@@ -1,0 +1,117 @@
+/**
+ * Aheed design tokens — see specs/design-system.md for the authored decision
+ * doc this file implements. Primitives are exact brand-kit values; components
+ * should read the semantic layer (--color-action, --color-primary, ...), never
+ * a --color-brand-* primitive directly.
+ */
+@theme {
+  /* primitives — exact Aheed brand-kit hex, do not use directly in components */
+  --color-brand-green-dark: #1b5e20;
+  --color-brand-green: #4caf50;
+  --color-brand-orange: #f57c00;
+  --color-brand-red: #d32f2f;
+  --color-brand-cream: #f5f5f0;
+
+  /*
+   * semantic — what components actually use.
+   *
+   * P7 closeout (#251/#217) darkened action, accent and danger for WCAG 2.2 AA.
+   * The brand primitives above are UNCHANGED and still hold the exact brand-kit
+   * hex; only this layer moved, which is what the primitive/semantic split is
+   * for. Do not "restore" the primitives here — the brand values fail AA in the
+   * combinations the UI actually renders:
+   *
+   *   brand-green  #4caf50 on white  2.78:1  (also under the 3:1 UI threshold)
+   *   brand-orange #f57c00 on white  2.70:1  (also under 3:1)
+   *   brand-orange on orange tint    2.47:1
+   *   brand-red    #d32f2f on red tint 4.36:1 — the standard error-message
+   *                treatment, at text-sm, in checkout and every account form
+   *
+   * Changing these five values fixed all 45+ call sites at once because every
+   * one of them reads the semantic layer. Ratios are asserted by
+   * tests/design-tokens-contrast.test.ts — change a value and that test tells
+   * you what it costs.
+   */
+  --color-primary: var(--color-brand-green-dark);
+  --color-action: #2e7d32;
+  --color-accent: #a85400;
+  --color-danger: #c82d2d;
+  --color-surface-muted: var(--color-brand-cream);
+
+  /* derived, not from brand kit — ~15% darker, for hover/active states */
+  --color-action-hover: #276a2b;
+  --color-accent-hover: #8f4700;
+
+  /*
+   * Muted foregrounds — the audited platform default, overridden per vendor by
+   * brandStyle() (lib/vendor-theme.ts) exactly like the semantic colours above.
+   *
+   * These replace 263 `text-primary/70`-style ALPHA MODIFIERS, which were the
+   * single largest accessibility defect in the repo. An alpha modifier is
+   * applied by the browser at paint time, so it composites an already-clamped
+   * token back BELOW the contrast floor — and tests/design-tokens-contrast.test.ts
+   * reads token VALUES, so it can never see that happen. Aheed's own
+   * `text-primary/70` measured 3.54:1 against its tints. Both values below are
+   * `mutedForeground(primitive, surfaces, alpha, ratio)` — the primitive
+   * composited over white at the old alpha, then clamped back to the floor, so
+   * the appearance the old sites were reaching for survives and the guarantee
+   * holds.
+   *
+   * Never re-introduce an alpha modifier on a themed foreground token; use these.
+   * tests/token-alpha-purity.test.ts fails the build if one comes back.
+   */
+  /* secondary/supporting TEXT — clamped to 4.5:1 (WCAG AA, normal text) */
+  --color-primary-muted: #49784e;
+  /* decorative aria-hidden GRAPHICS only — clamped to 3:1 (WCAG SC 1.4.11) */
+  --color-primary-subtle: #77917a;
+
+  /* tint primitives — exact brand-kit hex, light backgrounds for badges/banners */
+  --color-brand-green-tint: #e8f5e9;
+  --color-brand-orange-tint: #fff3e0;
+  --color-brand-red-tint: #ffebee;
+
+  /* semantic tints — named relative to their base color, matching the hover/active pattern above */
+  --color-action-tint: var(--color-brand-green-tint);
+  --color-accent-tint: var(--color-brand-orange-tint);
+  --color-danger-tint: var(--color-brand-red-tint);
+
+  /*
+   * #653 — Tailwind v4's @theme MERGES with its default radius scale rather
+   * than replacing it. Overriding only sm/md (as this block used to) left two
+   * silent aliases: rounded-sm/rounded-lg both resolved to 0.5rem, and
+   * rounded-md/rounded-2xl both resolved to 1rem, while rounded-xl (94 uses)
+   * and rounded-2xl (141 uses) named no token at all.
+   *
+   * Fixed by RETIRING the redundant utility, not by changing a value: every
+   * rounded-sm/rounded-md call site was rewritten to the identical-rendering
+   * rounded-lg/rounded-2xl (tests/radius-scale.test.ts#653), so sm and md are
+   * no longer used and no longer declared here. The five tokens below name
+   * every step still in use, each set to exactly what Tailwind's own default
+   * scale already computes it to (node_modules/tailwindcss/theme.css) — this
+   * makes the scale explicit, it does not change a single rendered radius.
+   * Bare `rounded` (8 uses) IS theme-backed and so is declared here too: the
+   * whole rounded family registers `themeKeys: ["--radius"]` (tailwindcss/
+   * dist/lib.js) and Tailwind's own default theme sets `--radius: 0.25rem`
+   * (theme.css:508). Left undeclared it would be the one radius in use still
+   * depending on an un-overridden default — the exact condition this block
+   * exists to remove. Declared at its current value, so nothing moves.
+   * `--radius-full` needs its own token for a different reason: Tailwind's
+   * default for it is calc(infinity * 1px), not a fixed length.
+   */
+  --radius: 0.25rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
+  --radius-full: 9999px;
+
+  /*
+   * #961 — the minimum touch target, 44px (WCAG 2.5.5 AAA, Apple's 44pt). It generates
+   * h-tap / w-tap / size-tap / min-h-tap / min-w-tap. The storefront's primary shopping controls
+   * use it below `lg`; see specs/design-system.md, "Touch targets". It is a size, not a colour,
+   * so brandStyle() never overrides it.
+   */
+  --spacing-tap: 2.75rem;
+
+  --font-sans: var(--font-poppins), system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}

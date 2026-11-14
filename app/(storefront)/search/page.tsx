@@ -1,0 +1,370 @@
+import Link from "next/link";
+import { getProductRepository } from "@/lib/products-service";
+import { getRequestCartQuantities } from "@/lib/cart-summary";
+import { getRequestFavouriteState } from "@/lib/favourites-summary";
+import { getCategoryRepository } from "@/lib/categories-service";
+import { getBrandRepository } from "@/lib/brands-service";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { getEnv } from "@/lib/config";
+import { ProductCard } from "@/components/product/ProductCard";
+import { ProductGrid } from "@/components/product/ProductGrid";
+import { DEFAULT_PRODUCT_GRID_DENSITY } from "@/lib/product-grid-density";
+import { FilterPanel } from "@/components/product/FilterPanel";
+import { CollapsibleSidebar } from "@/components/product/CollapsibleSidebar";
+import { FILTERS_COLLAPSED_SCRIPT } from "@/components/product/filters-collapsed";
+import { FilterChips } from "@/components/product/FilterChips";
+import { CollectionNav } from "@/components/product/CollectionNav";
+import { parsePackSizeParam } from "@/components/product/unit-price";
+import { DepartmentScroller } from "@/components/layout/DepartmentScroller";
+import { parsePriceInput } from "@/components/product/parse-price-input";
+import { categoryFilterHref, searchPageHref } from "@/components/product/search-href";
+import { searchHeading } from "@/components/product/search-heading";
+import { SubcategoryLinks } from "@/components/product/SubcategoryLinks";
+import { SearchTruncationNotice } from "@/components/product/SearchTruncationNotice";
+import { SearchRecoveryNotice } from "@/components/product/SearchRecoveryNotice";
+import { SearchSuggestionsNotice } from "@/components/product/SearchSuggestionsNotice";
+import { parseSearchQuery } from "@/lib/search-query";
+import { expandSearchTerms } from "@/lib/search-expansion";
+import { listCurrentVendorAttributeDefinitions } from "@/lib/attributes-service";
+import { resolveAttributeFilters } from "@/lib/attribute-filters";
+import type { FilterParamValue } from "@/components/product/filter-params";
+import { PageContainer } from "@/components/layout/PageContainer";
+
+// See app/(storefront)/categories/page.tsx — Prisma's @prisma/client/wasm
+// can't load during next build's Node-based static prerendering.
+export const dynamic = "force-dynamic";
+
+/**
+ * #501 — the title was a hardcoded `metadata = { title: "Search — Aheed Food
+ * Centre" }`, which rendered that name under SriMart too. Same defect class
+ * #239 spent a slice removing; derived from the vendor here exactly as
+ * `categories/page.tsx` and the landing page already do.
+ */
+export async function generateMetadata() {
+  const profile = await getCurrentVendorProfile();
+  const name = profile?.name ?? "Aheed Food Centre";
+  return { title: `Search — ${name}` };
+}
+
+const PAGE_SIZE = 12;
+
+type SearchParams = {
+  q?: string;
+  minPrice?: string;
+  maxPrice?: string;
+  inStock?: string;
+  isHalal?: string;
+  isFresh?: string;
+  isOrganic?: string;
+  /** #569 — dietary, offers, origin and brand facets. */
+  isVegetarian?: string;
+  isGlutenFree?: string;
+  isHmcCertified?: string;
+  onOffer?: string;
+  origin?: string;
+  /** #569 — a brand SLUG; unknown values are ignored, exactly as `category` is. */
+  brand?: string;
+  /** #397 — pack size as `<amount>-<UNIT>`, e.g. `500-GRAM`. */
+  packSize?: string;
+  featured?: string;
+  cursor?: string;
+  /** #568 — category drill-down from within results. A slug; unknown values are ignored. */
+  category?: string;
+  /** #912 — vendor-defined filters; unknown slugs are ignored, like `brand` and `category`. */
+  [attributeKey: `attr_${string}`]: FilterParamValue;
+};
+
+export default async function SearchPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const params = await searchParams;
+  const query = params.q?.trim() ?? "";
+
+  const categoryRepo = getCategoryRepository();
+  // #704 — back to top-level only. #681 widened this to `listTree()` specifically to feed the
+  // filter panel's category select (which needed departments AND their children); every other
+  // consumer here (the department strip, the recovery/suggestions notices) only ever used the
+  // top-level rows. With the select gone, `listTopLevel()` is the whole page's actual need again —
+  // same one-query shape as before #681, not a tree nothing reads any more.
+  const allCategories = await categoryRepo.listTopLevel();
+
+  /*
+   * #568 — resolve the drill-down slug to ids. An unknown or inactive slug resolves to `null` and
+   * is then IGNORED entirely: no predicate, no chip, no `notFound()`. A stray query parameter must
+   * never turn a working search page into a 404, and narrowing to "no category" would silently
+   * empty the catalogue instead of showing the shopper their unfiltered results.
+   */
+  const selectedCategory = params.category ? await categoryRepo.getBySlug(params.category) : null;
+  // A department narrows to itself AND its children (matching /categories/[slug]'s own
+  // aggregation); a subcategory has no children, so this is just its own id there.
+  const categoryIds = selectedCategory
+    ? [selectedCategory.id, ...selectedCategory.children.map((child) => child.id)]
+    : undefined;
+
+  const products = getProductRepository();
+
+  /*
+   * #569 — resolve the brand slug to an id, mirroring the category resolution above. Ids rather
+   * than slugs keep `buildFilterWhere` a pure predicate, and an unknown slug resolving to `null`
+   * is what lets the page apply NO predicate and render NO chip, rather than narrowing to a brand
+   * that matches nothing. `#568`'s R15 fix is the precedent: the predicate and the chip must be
+   * conditioned on the SAME resolution, or the chip claims a filter that never ran.
+   */
+  const selectedBrand = params.brand ? await getBrandRepository().getBySlug(params.brand) : null;
+
+  /*
+   * #912 — the vendor's own filters, resolved the same way: the predicate (`optionGroups`/`ranges`) and the
+   * chips (`labels`) come from ONE resolution, so an unknown filter or value applies nothing and
+   * shows nothing. One query for all of this vendor's filters.
+   */
+  const attributeFilters = resolveAttributeFilters(
+    params,
+    await listCurrentVendorAttributeDefinitions(),
+  );
+
+  /*
+   * #501 — BROWSE MODE. This page used to run its query inside `if (query)` and
+   * gate the grid on `query &&`, so a bare `/search` returned 200 with an empty
+   * content column. That made the shop page's only "View all" (a bare
+   * `/search`, no `q`) a dead end, and the header's search box did the same
+   * thing when submitted empty.
+   *
+   * The fix is confined to THIS page. `searchProducts`'s own empty-query guard
+   * in `lib/repositories/products.ts` is untouched and `list()`/`search()`
+   * remain two functions — #211's split is structural and still correct. What
+   * changed is only what an empty box means HERE: browse everything, rather
+   * than show nothing.
+   */
+  const options = {
+    take: PAGE_SIZE,
+    cursor: params.cursor,
+    minPricePence: parsePriceInput(params.minPrice ?? ""),
+    maxPricePence: parsePriceInput(params.maxPrice ?? ""),
+    inStockOnly: params.inStock === "1",
+    isHalal: params.isHalal === "1",
+    isFresh: params.isFresh === "1",
+    isOrganic: params.isOrganic === "1",
+    isVegetarian: params.isVegetarian === "1",
+    isGlutenFree: params.isGlutenFree === "1",
+    isHmcCertified: params.isHmcCertified === "1",
+    onOffer: params.onOffer === "1",
+    // An exact column match, so a value matching nothing legitimately returns nothing — unlike an
+    // unresolved category or brand slug, which apply no predicate at all.
+    origin: params.origin || undefined,
+    brandId: selectedBrand?.id,
+    // #397 — parsed, never read raw. A repeated `?packSize=` arrives as an array at runtime
+    // whatever this page's SearchParams type says (#689); the parser rejects it and every other
+    // malformed value, applying no predicate rather than throwing.
+    packSize: parsePackSizeParam(params.packSize),
+    // Only the exact value "1" enables it — an absent or any other value leaves
+    // the filter off, so a stray `?featured=0` browses the full catalogue.
+    isFeatured: params.featured === "1",
+    categoryIds,
+    // #918 — ticked values of one list filter are one group (any of them); number filters are ranges.
+    attributeOptionGroups: attributeFilters.optionGroups,
+    attributeRanges: attributeFilters.ranges,
+  };
+
+  const result = query ? await products.search(query, options) : await products.list(options);
+  const items = result.items;
+  const nextCursor = result.nextCursor;
+  // #564 — the repository decides this, not the page: it is the only layer that
+  // knows whether more matches existed than it was willing to rank. `list()`
+  // always reports false, so browse mode never shows the notice.
+  const truncated = result.truncated;
+  // #565 — same reasoning for the zero-result ladder's outcome. `list()` always
+  // returns `null`, so browse mode never shows a recovery notice either.
+  const recovery = result.recovery;
+  // #580 — set only when the direct search found products but none matched on NAME. Rendered
+  // beside those products, never in place of them.
+  const suggestions = result.suggestions;
+  const searchTerms = parseSearchQuery(query);
+  /*
+   * #572 — a query the shopper typed that parses to NO terms at all: single characters and bare
+   * punctuation are no longer search terms, because `e` matched 2,026 of roughly 2,000 products
+   * through their descriptions. Saying "No products match" here would be a lie about the
+   * catalogue, so the page says what actually happened instead. `searchProducts` has already
+   * returned early without issuing a query.
+   */
+  const queryTooShort = query !== "" && searchTerms.length === 0;
+
+  /*
+   * #568 — facets narrow to the CURRENT result context, so a toggle that would return nothing is
+   * not offered. The three speciality flags are deliberately NOT passed: each probe excludes all
+   * of them, so ticking one never hides the others, and an active filter can always be unticked.
+   * `getAvailableFacets` explains the trap in full.
+   */
+  const facets = await products.availableFacets({
+    groups:
+      searchTerms.length > 0
+        ? expandSearchTerms(searchTerms, await products.synonymAliasMap())
+        : undefined,
+    categoryIds,
+    minPricePence: options.minPricePence,
+    maxPricePence: options.maxPricePence,
+    inStockOnly: options.inStockOnly,
+  });
+  // P8.5a (#345): request-memoised, shared with the header's cart read.
+  const cartQuantities = await getRequestCartQuantities();
+  // #232 — request-memoised too, so a page rendering several grids issues ONE favourite query.
+  const favouriteState = await getRequestFavouriteState();
+
+  const { CDN_BASE_URL } = getEnv();
+  // #962 — request-memoised; the header already resolved this profile in the same render.
+  const gridDensity =
+    (await getCurrentVendorProfile())?.productGridDensity ?? DEFAULT_PRODUCT_GRID_DENSITY;
+
+  // #1173 — headed by the category when one is selected and nothing was typed, like its own page.
+  const heading = searchHeading(query, selectedCategory?.name);
+
+  return (
+    <PageContainer width="wide" padY="tight">
+      {/* Departments: horizontal strip on top (arrow-scrolled). */}
+      {/* #1173 — highlights the selected department (a subcategory's parent), like /categories. */}
+      <DepartmentScroller
+        categories={allCategories}
+        activeSlug={
+          selectedCategory ? (selectedCategory.parent?.slug ?? selectedCategory.slug) : null
+        }
+        use3D
+      />
+
+      {/* #1173 — applies a collapse chosen earlier in this tab before the sidebar paints. */}
+      <script dangerouslySetInnerHTML={{ __html: FILTERS_COLLAPSED_SCRIPT }} />
+      <div data-filters-layout="" className="mt-6 flex flex-col gap-6 md:flex-row">
+        {/*
+          #681 — the collection links sit ABOVE the panel and render exactly once. `FilterPanel`
+          renders its form twice (a `details` disclosure below `md`, a static `aside` at `md` and
+          above), which is safe for a form using no `id` attributes but would put two identical
+          `nav` landmarks in the accessibility tree. Keeping them outside also means they stay
+          visible on a narrow viewport instead of collapsing behind the disclosure.
+        */}
+        {/* #1173 — collapsible at md and up (a JavaScript enhancement; open without it). */}
+        <CollapsibleSidebar id="browse-sidebar">
+          {/* #1173 — with a category selected the page is that category, not "All products", so no
+              collection is highlighted (as on /categories). */}
+          <CollectionNav
+            activeHref={
+              selectedCategory
+                ? undefined
+                : params.featured === "1"
+                  ? "/search?featured=1"
+                  : "/search"
+            }
+          />
+          {/* #568 — sidebar at md+, a `details` disclosure below it. Both render the same form. */}
+          <FilterPanel heading="Search & filters" showQuery searchParams={params} facets={facets} />
+        </CollapsibleSidebar>
+
+        <div className="flex-1">
+          <h1 className="mb-1 text-2xl font-semibold text-primary">{heading}</h1>
+          {/*
+            #681 — browse mode is ordered `createdAt desc, id desc` by `findPage`, so this listing
+            genuinely IS newest-first. Saying so is what let the New Arrivals entry point exist
+            without inventing a `collection=new` parameter that would change no predicate while
+            rendering a chip claiming a filter that is not running.
+          */}
+          {!query && <p className="mb-6 text-sm text-primary-muted">Newest first</p>}
+          {query && <div className="mb-6" />}
+
+          {/*
+            #1169 — the category page's subcategory pills, for a resolved `category` (none for an
+            unknown slug, and `SubcategoryLinks` renders nothing for a department with no
+            subcategories). Same rules as /categories/[slug]: a department shows "All" (itself, active)
+            then its children; a subcategory shows its department's row with itself active. Unlike
+            there, every pill stays a search: `categoryFilterHref` keeps the query and filters and
+            drops the cursor, which is an offset into a differently sized result set.
+          */}
+          {selectedCategory && (
+            <SubcategoryLinks
+              tabs={selectedCategory.parent?.children ?? selectedCategory.children}
+              parentSlug={selectedCategory.parent?.slug ?? selectedCategory.slug}
+              activeSlug={selectedCategory.slug}
+              hrefFor={(slug) => categoryFilterHref(params, slug)}
+            />
+          )}
+
+          {/*
+            #568 fix (R15) — `category` must not reach the chip row unless it actually resolved.
+            `params.category` is the raw, unvalidated query value; passing it straight through made
+            an unknown/inactive slug render a removable chip for a filter that was never applied
+            (the predicate was already correctly skipped via `categoryIds` above — only the chip
+            display lagged behind). Every other filter key still comes from `params` unmodified.
+          */}
+          <FilterChips
+            basePath="/search"
+            params={{
+              ...params,
+              category: selectedCategory ? params.category : undefined,
+              // #569 — same guard as `category` above, for the same reason: an unresolved brand
+              // slug applies no predicate, so it must not render a removable chip either.
+              brand: selectedBrand ? params.brand : undefined,
+            }}
+            categoryLabel={selectedCategory?.name}
+            brandLabel={selectedBrand?.name}
+            attributeLabels={attributeFilters.labels}
+          />
+
+          <SearchTruncationNotice truncated={truncated} />
+
+          {queryTooShort ? (
+            <p className="text-primary-muted">
+              That search is too short. Try at least two characters.
+            </p>
+          ) : items.length === 0 ? (
+            recovery?.rung === "none" ? (
+              // #565 — the zero-result ladder ran and still found nothing: relevant
+              // categories plus one link per search term, rather than a dead end.
+              <SearchRecoveryNotice
+                recovery={recovery}
+                terms={searchTerms}
+                categories={allCategories}
+              />
+            ) : (
+              /*
+               * #501 — without this, a search with no matches (or an over-narrow
+               * price filter) still renders the same blank content column this
+               * slice exists to remove, just reached by a different route.
+               */
+              <p className="text-primary-muted">
+                No products match. Try a different search or clear your filters.
+              </p>
+            )
+          ) : (
+            <>
+              <SearchRecoveryNotice
+                recovery={recovery}
+                terms={searchTerms}
+                categories={allCategories}
+              />
+              <SearchSuggestionsNotice suggestions={suggestions} categories={allCategories} />
+              <ProductGrid density={gridDensity}>
+                {items.map((product) => (
+                  <ProductCard
+                    key={product.id}
+                    product={product}
+                    cdnBaseUrl={CDN_BASE_URL ?? ""}
+                    cartQuantity={cartQuantities.get(product.id) ?? 0}
+                    favouriteState={favouriteState(product.id)}
+                  />
+                ))}
+              </ProductGrid>
+            </>
+          )}
+
+          {nextCursor && (
+            <Link
+              href={searchPageHref(params, nextCursor)}
+              data-tap-surface="pagination"
+              className="mt-6 inline-flex min-h-tap items-center rounded-full bg-action px-4 py-2 font-semibold text-white lg:min-h-0"
+            >
+              Next page
+            </Link>
+          )}
+        </div>
+      </div>
+    </PageContainer>
+  );
+}

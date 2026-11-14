@@ -1,0 +1,328 @@
+import { describe, expect, it, vi } from "vitest";
+import { getAvailableFacets } from "@/lib/repositories/products";
+import { toUnexpandedGroups } from "@/lib/search-expansion";
+
+/**
+ * P2.6 slice 5 (#568), R18/R19 — context-aware speciality facets.
+ *
+ * THE TRAP THESE EXIST FOR, because it is easy to reintroduce and impossible to see in a passing
+ * page: if each facet were probed against the FULL current filter state, ticking "Halal" would hide
+ * "Organic" the moment no product is both — and, worse, an active facet could hide the very
+ * checkbox needed to untick it, stranding the shopper inside a filter they can neither see nor
+ * remove. Excluding all three speciality flags from every probe is what prevents that, and R19 is
+ * the assertion that it is still happening.
+ *
+ * A spy client rather than a live database, for the reason `tests/search-repository.test.ts` gives:
+ * the requirement is about what the composed `where` CONTAINS (and, for R19, what it must NOT
+ * contain), and a live result set that happens to look right is consistent with the predicate being
+ * wrong. Only possible because the function takes `prisma` explicitly (#252, #409).
+ */
+
+const VENDOR = "vendor-1";
+
+function makeStub() {
+  const findFirst = vi.fn(async (_args: unknown) => null);
+  // #569 — origin and brand are distinct-VALUE facets, so they probe with findMany rather than
+  // findFirst. Defaulting to empty keeps every pre-#569 assertion below about the boolean probes.
+  const findMany = vi.fn(async (_args: unknown) => [] as unknown[]);
+  // #912 — the vendor-filter facet probes ProductAttributeValue, not Product.
+  const attributeFindMany = vi.fn(async (_args: unknown) => [] as unknown[]);
+  const client = {
+    product: { findFirst, findMany },
+    productAttributeValue: { findMany: attributeFindMany },
+  } as never;
+  return { client, findFirst, findMany, attributeFindMany };
+}
+
+/** The `where` each of the three probes was called with, in halal/fresh/organic order. */
+function capturedWheres(findFirst: ReturnType<typeof makeStub>["findFirst"]) {
+  return findFirst.mock.calls.map((call) => (call[0] as { where: Record<string, unknown> }).where);
+}
+
+describe("getAvailableFacets context (R18)", () => {
+  it("forwards category, price and in-stock into every probe", async () => {
+    const { client, findFirst } = makeStub();
+
+    await getAvailableFacets(client, VENDOR, {
+      categoryIds: ["cat-1"],
+      minPricePence: 100,
+      maxPricePence: 500,
+      inStockOnly: true,
+    });
+
+    // #569 widened this from three probes to seven findFirst probes (six dietary/speciality
+    // booleans plus offers); the two distinct-value facets use findMany instead.
+    expect(findFirst).toHaveBeenCalledTimes(7);
+    for (const where of capturedWheres(findFirst)) {
+      expect(where).toMatchObject({
+        vendorId: VENDOR,
+        isActive: true,
+        categoryId: { in: ["cat-1"] },
+        basePrice: { gte: 100, lte: 500 },
+        // #1211 — in stock = UNTRACKED, or TRACKED with stock; UNKNOWN never matches.
+        inventory: {
+          OR: [{ stockMode: "UNTRACKED" }, { stockMode: "TRACKED", quantity: { gt: 0 } }],
+        },
+      });
+    }
+  });
+
+  it("forwards the search term predicate", async () => {
+    const { client, findFirst } = makeStub();
+    const groups = toUnexpandedGroups(["basmati", "rice"]);
+
+    await getAvailableFacets(client, VENDOR, { groups });
+
+    for (const where of capturedWheres(findFirst)) {
+      expect(where.AND).toEqual(groups.map(() => ({ OR: expect.any(Array) })));
+    }
+  });
+
+  it("issues a plain vendor-wide probe when given no context", async () => {
+    const { client, findFirst } = makeStub();
+
+    await getAvailableFacets(client, VENDOR);
+
+    for (const where of capturedWheres(findFirst)) {
+      expect(where).not.toHaveProperty("AND");
+      expect(where).not.toHaveProperty("categoryId");
+    }
+  });
+
+  it("reports a facet available only when its probe found a row", async () => {
+    const findFirst = vi
+      .fn()
+      .mockResolvedValueOnce({ id: "p1" }) // halal
+      .mockResolvedValueOnce(null) // fresh
+      .mockResolvedValueOnce({ id: "p2" }) // organic
+      .mockResolvedValueOnce(null) // vegetarian (#569)
+      .mockResolvedValueOnce({ id: "p3" }) // glutenFree
+      .mockResolvedValueOnce(null) // hmcCertified
+      .mockResolvedValueOnce({ id: "p4" }); // onOffer
+    const findMany = vi
+      .fn()
+      .mockResolvedValueOnce([{ origin: "Morocco" }, { origin: null }])
+      .mockResolvedValueOnce([{ brand: { id: "b1", name: "Shan", slug: "shan" } }, { brand: null }])
+      // #397 — pack sizes, deliberately returned OUT of size order and with a half-null row, to
+      // pin both the ordering and the same null-filtering the two lists above need.
+      .mockResolvedValueOnce([
+        { netContentAmount: 1, netContentUnit: "KILOGRAM" },
+        { netContentAmount: 500, netContentUnit: "GRAM" },
+        { netContentAmount: 250, netContentUnit: null },
+      ]);
+    // #912 — returned out of order on purpose: attributes and options must come back in the
+    // vendor's (sortOrder, name) order, grouped one entry per attribute.
+    const colour = {
+      id: "a1",
+      slug: "colour",
+      name: "Colour",
+      sortOrder: 0,
+      kind: "LIST",
+      unit: null,
+    };
+    const connectivity = {
+      id: "a2",
+      slug: "connectivity",
+      name: "Connectivity",
+      sortOrder: 2,
+      kind: "LIST",
+      unit: null,
+    };
+    // #918 — a NUMBER filter positioned BETWEEN the two list filters, to pin one combined order.
+    const power = {
+      id: "a3",
+      slug: "power",
+      name: "Power",
+      sortOrder: 1,
+      kind: "NUMBER",
+      unit: "W",
+    };
+    const attributeFindMany = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { option: { slug: "wired", name: "Wired", sortOrder: 0 }, attribute: connectivity },
+        { option: { slug: "white", name: "White", sortOrder: 1 }, attribute: colour },
+        { option: { slug: "black", name: "Black", sortOrder: 0 }, attribute: colour },
+      ])
+      .mockResolvedValueOnce([{ attribute: power }]);
+    const client = {
+      product: { findFirst, findMany },
+      productAttributeValue: { findMany: attributeFindMany },
+    } as never;
+
+    expect(await getAvailableFacets(client, VENDOR)).toEqual({
+      halal: true,
+      fresh: false,
+      organic: true,
+      vegetarian: false,
+      glutenFree: true,
+      hmcCertified: false,
+      onOffer: true,
+      // A null origin/brand can survive `distinct` on a nullable column, so both lists are
+      // filtered before being returned — a null reaching a `select` option would render blank.
+      origins: ["Morocco"],
+      brands: [{ id: "b1", name: "Shan", slug: "shan" }],
+      // 500g before 1kg: ordered by real size, not raw amount. The half-null row is dropped —
+      // a pack size needs BOTH columns, and one alone cannot describe a pack.
+      packSizes: [
+        { amount: 500, unit: "GRAM" },
+        { amount: 1, unit: "KILOGRAM" },
+      ],
+      attributes: [
+        {
+          slug: "colour",
+          name: "Colour",
+          kind: "LIST",
+          unit: null,
+          options: [
+            { slug: "black", name: "Black" },
+            { slug: "white", name: "White" },
+          ],
+        },
+        { slug: "power", name: "Power", kind: "NUMBER", unit: "W", options: [] },
+        {
+          slug: "connectivity",
+          name: "Connectivity",
+          kind: "LIST",
+          unit: null,
+          options: [{ slug: "wired", name: "Wired" }],
+        },
+      ],
+    });
+  });
+});
+
+describe("speciality probes exclude all three speciality filters (R19)", () => {
+  it("does not narrow any probe by another speciality", async () => {
+    const { client, findFirst } = makeStub();
+
+    // The type deliberately has no speciality fields, so this is the closest a caller can get to
+    // passing them — and the probes must still be free of every flag but their own.
+    await getAvailableFacets(client, VENDOR, {
+      categoryIds: ["cat-1"],
+      inStockOnly: true,
+    });
+
+    const [halal, fresh, organic] = capturedWheres(findFirst);
+
+    expect(halal).toMatchObject({ isHalal: true });
+    expect(halal).not.toHaveProperty("isFresh");
+    expect(halal).not.toHaveProperty("isOrganic");
+
+    expect(fresh).toMatchObject({ isFresh: true });
+    expect(fresh).not.toHaveProperty("isHalal");
+    expect(fresh).not.toHaveProperty("isOrganic");
+
+    expect(organic).toMatchObject({ isOrganic: true });
+    expect(organic).not.toHaveProperty("isHalal");
+    expect(organic).not.toHaveProperty("isFresh");
+  });
+});
+
+/**
+ * P2.6 slice 6 (#569), R17/R18 — the exclusion rule, now over NINE facet fields rather than three.
+ *
+ * `FacetContext` excludes every facet field by TYPE, so these tests cannot even express the failure
+ * they guard against by passing one in. What they assert instead is the observable consequence:
+ * whatever the caller supplies, no probe's `where` ends up carrying a facet key — which is what
+ * makes an active facet always report itself available, and therefore always removable.
+ */
+describe("#569 widened facet probes", () => {
+  const FACET_KEYS = [
+    "isHalal",
+    "isFresh",
+    "isOrganic",
+    "isVegetarian",
+    "isGlutenFree",
+    "isHmcCertified",
+    "onOffer",
+    "origin",
+    "brandId",
+  ];
+
+  it("excludes every facet field from each boolean probe (R17)", async () => {
+    const { client, findFirst } = makeStub();
+
+    await getAvailableFacets(client, VENDOR, {
+      categoryIds: ["cat-1"],
+      minPricePence: 100,
+      inStockOnly: true,
+    });
+
+    const wheres = capturedWheres(findFirst);
+    // Six dietary/speciality booleans plus the offers probe.
+    expect(wheres).toHaveLength(7);
+
+    for (const where of wheres) {
+      const serialised = JSON.stringify(where);
+      // The probe's OWN flag is the one key it legitimately sets, so count keys across the whole
+      // set instead: no probe may carry a facet key it did not itself add.
+      const own = Object.keys(where).filter((key) => FACET_KEYS.includes(key));
+      expect(own.length).toBeLessThanOrEqual(1);
+      // The context's non-facet filters must still be there — a probe that dropped them would
+      // report availability against the wrong result set.
+      expect(serialised).toContain("cat-1");
+    }
+  });
+
+  it("omits origin from the origin probe and brandId from the brand probe (R18)", async () => {
+    const { client, findMany } = makeStub();
+
+    await getAvailableFacets(client, VENDOR, { categoryIds: ["cat-1"] });
+
+    const wheres = findMany.mock.calls.map(
+      (call) => (call[0] as { where: Record<string, unknown> }).where,
+    );
+    expect(wheres).toHaveLength(3);
+
+    const [originWhere, brandWhere, packSizeWhere] = wheres;
+    // Each narrows to rows that HAVE a value, never to a chosen one.
+    expect(JSON.stringify(originWhere)).toContain('"origin"');
+    expect(originWhere).not.toHaveProperty("origin.equals");
+    expect(JSON.stringify(brandWhere)).toContain('"brandId"');
+    expect(brandWhere).not.toHaveProperty("brandId.equals");
+    // #397 — the pack-size probe asks for BOTH columns non-null and narrows to neither value.
+    expect(JSON.stringify(packSizeWhere)).toContain('"netContentAmount"');
+    expect(JSON.stringify(packSizeWhere)).toContain('"netContentUnit"');
+    expect(packSizeWhere).not.toHaveProperty("netContentAmount.equals");
+  });
+
+  it("issues every probe in one Promise.all rather than sequentially (R19)", async () => {
+    const { client, findFirst, findMany, attributeFindMany } = makeStub();
+    await getAvailableFacets(client, VENDOR);
+    // Twelve probes total: seven findFirst, three product findMany, #912's list-filter probe and
+    // #918's number-filter probe. If they were awaited in sequence the counts would be identical —
+    // what this pins is the probe SET, so a facet added without extending the Promise.all shows up
+    // here as a count change rather than passing silently.
+    expect(
+      findFirst.mock.calls.length +
+        findMany.mock.calls.length +
+        attributeFindMany.mock.calls.length,
+    ).toBe(12);
+  });
+
+  it.each([
+    ["#912 list", 0, { optionId: { not: null } }],
+    ["#918 number", 1, { numericValue: { not: null } }],
+  ])(
+    "%s-filter probe is vendor-scoped, keeps the context, and carries no filter VALUE",
+    async (_label, callIndex, presence) => {
+      const { client, attributeFindMany } = makeStub();
+      await getAvailableFacets(client, VENDOR, { categoryIds: ["cat-1"], inStockOnly: true });
+
+      const where = (
+        attributeFindMany.mock.calls[callIndex][0] as { where: Record<string, unknown> }
+      ).where;
+      expect(where.vendorId).toBe(VENDOR);
+      // The only value condition is "carries one at all" — never a specific option or number.
+      expect(where).toMatchObject(presence);
+      const { product } = where as { product: unknown };
+      const serialised = JSON.stringify(product);
+      expect(serialised).toContain("cat-1");
+      // FacetContext cannot carry vendor-filter values, so an applied vendor filter never narrows
+      // its own control away.
+      expect(serialised).not.toContain("optionId");
+      expect(serialised).not.toContain("attributeValues");
+    },
+  );
+});

@@ -1,0 +1,379 @@
+---
+id: adr-005-payments-money-flow
+title: "ADR-005 — Payments & multi-vendor money flow"
+audience: [dev]
+type: adr
+status: approved
+version: "1.9.0"
+updated: 2026-09-29
+visibility: internal
+summary: Stripe behind a PaymentService port, taking card payments via hosted Stripe Checkout. All vendors settle into a single platform Stripe account for now, with a Connect-ready seam so per-vendor payouts are an additive change rather than a rewrite.
+tags: [adr, payments, stripe, multi-tenancy, compliance]
+related: [architecture, tech-stack, adr-004-multi-tenancy, p3b-checkout-order-core]
+---
+
+# ADR-005 — Payments & multi-vendor money flow
+
+- **Status:** **Accepted** (approved 2026-08-10). Decided during P3's proposal; recorded here because
+  the choice sets a **legal posture**, not just a technical one, and was previously written down
+  nowhere. Tracked by issue #96 (P3b).
+- **Related:** `specs/tech-stack.md` (names the `PaymentService` port), ADR-004 (multi-tenancy),
+  `specs/architecture.md`.
+
+## Context
+
+ADR-004 made the platform multi-tenant: two vendors (Aheed Food Centre and SriMart) already serve
+different catalogues on different hosts from one codebase. P3 introduces payment. That raises a
+question ADR-004 never addressed: **when a customer pays SriMart, whose bank account does the money
+land in?**
+
+`tech-stack.md` already committed to Stripe behind a `PaymentService` port with PCI scope minimised,
+but said nothing about routing money between vendors, and the port itself had never been written.
+
+## Decision
+
+1. **Stripe, behind the `PaymentService` port** (`lib/payments.ts`). Card data never touches our
+   servers in any implementation. The port exists so the provider is swappable and so P3b could ship
+   and be tested with a **stub adapter** before any Stripe credential existed.
+
+2. **Hosted Stripe Checkout, not embedded Elements.** Stripe hosts the payment page; we create a
+   session server-side and confirm via a signature-verified, idempotent webhook. Rationale: Checkout
+   handles **UK Strong Customer Authentication / 3-D Secure**, which is a legal requirement rather
+   than a nicety, and brings Apple/Google Pay with the smallest PCI surface and least Worker code.
+   **Rejected:** Payment Intents + Elements — better brand continuity (which matters more now that
+   branding is per-vendor), but we would own the 3DS action flow and its failure modes. It remains a
+   later swap behind this same port.
+
+3. **A single platform Stripe account, with a Connect-ready seam.** Every vendor's payments settle
+   into one Stripe account today. `CreatePaymentInput` carries `vendorId` so an adapter can route
+   per vendor, and a `VendorPaymentAccount` table can be added later without reshaping the port.
+   **Rejected:** full Stripe Connect now — the correct long-term marketplace model, but it needs
+   Connect onboarding, KYC, payouts and per-account webhooks, and SriMart is a seeded demo vendor,
+   not a real merchant. **Also rejected:** no seam at all — that would repeat exactly the
+   hardcoded-single-vendor retrofit ADR-004 spent five slices undoing.
+
+4. **Stock is decremented at order creation, not at payment success.** The order is created
+   `PENDING_PAYMENT` with stock already held, so overselling is structurally impossible. Releasing
+   stock when payment fails or the Checkout session expires is handled by P3c's webhook.
+
+## Consequences
+
+- **Positive:** one integration serves all vendors; PCI scope stays with Stripe; SCA is handled for
+  us; adding a real second merchant is additive.
+- **⚠️ Merchant of record.** With a single platform account, **the platform is the merchant of
+  record for every vendor's sales** — SriMart's customers pay the platform, and the platform owes
+  SriMart. That carries real obligations: settlement to vendors happens **off-platform** and is not
+  modelled anywhere in this system; refunds and chargebacks land on the platform's account; and the
+  platform's own terms, tax treatment and consumer-rights position must reflect that it is selling,
+  not merely introducing. **This is acceptable only while the sole real merchant is Aheed itself.**
+  Before onboarding a genuine third-party merchant, revisit this decision — the trigger is
+  commercial, not technical, so it will not surface as a failing test.
+- **Cost:** an abandoned checkout holds stock until P3c's release path exists. P3b must not reach
+  production ahead of P3c.
+- **Rule of thumb:** if taking payment for a new vendor requires anything beyond database rows and
+  Stripe configuration, the seam has been violated.
+
+## Implementation note (P3c, 2026-08-10, #99)
+
+All four decisions above are **implemented**: `lib/payments.ts` creates hosted Checkout sessions via
+raw `fetch` against the single platform account, carrying `vendorId` through `CreatePaymentInput` as
+the Connect-ready seam; `/api/webhooks/stripe` verifies signatures with WebCrypto and confirms or
+cancels orders idempotently; stock decremented at creation is **released** on payment failure or
+session expiry, closing the gap P3b recorded. The stub adapter is kept as the fallback for
+environments with no Stripe key.
+
+One thing worth recording because it is easy to get wrong: **exactly one webhook endpoint is
+registered per environment, not one per vendor host.** The same Worker serves every host and the
+handler derives the vendor from the order, so per-host endpoints would only produce multiple signing
+secrets that the single `STRIPE_WEBHOOK_SECRET` cannot represent.
+
+## Implementation note (P5a, 2026-08-11, #135)
+
+Loyalty redemption reduces what the customer pays, so it is worth recording where it sits relative
+to the decisions above: **entirely upstream of them**. The discount is applied inside
+`computeTotals` during the checkout transaction, so `Order.totalPence` is already net of it before
+`createPayment` is called after the commit. The `PaymentService` port, the hosted-Checkout flow and
+the webhook are all unchanged — a redemption is invisible to them, because by the time they see an
+amount it is simply the amount.
+
+**No decision here is reopened.** This is a note about ordering, not a change to any of the four.
+
+One constant this does introduce, and the reason it belongs in this ADR rather than only in the
+slice spec: **`MIN_PAYABLE_PENCE` (30p)** in `lib/loyalty.ts`. Decision 2 committed to hosted Stripe
+Checkout, and Stripe will not create a GBP session below 30p. Without a floor, a large enough
+redemption would produce an order that commits successfully and can then never be paid for —
+`createPayment` would fail and the compensating path would immediately cancel the order the shopper
+just placed. The clamp makes that unreachable rather than rare. A payment provider with a different
+minimum, or a decision to allow fully-points-paid orders (which needs a no-payment path this
+codebase does not have), would both change that number — so it lives next to the redemption rules,
+not in the payment adapter.
+
+## Implementation note (P5b, 2026-08-11, #145)
+
+Discount codes join loyalty redemption in exactly the same position relative to the decisions above:
+**entirely upstream of them.** A code is claimed inside the checkout transaction and its pence figure
+is passed to the same `computeTotals` call, so `Order.totalPence` is already net of it before
+`createPayment` runs after the commit. The `PaymentService` port, the hosted-Checkout flow and the
+webhook are unchanged and did not need reading — by the time they see an amount it is simply the
+amount. `MIN_PAYABLE_PENCE` is reused, not redefined: a code is clamped by the same 30p floor, and
+the combined code-plus-points discount obeys it jointly, so no combination of the two can produce an
+order that commits and can never be paid for.
+
+**No decision here is reopened.** As with P5a, this is a note about ordering.
+
+One consequence worth recording for a future refund path: a *paid* order's code use cannot currently
+be returned, because `releaseOrder` acts only on `PENDING_PAYMENT` orders. That is the same
+structural reason #137 gives for earn reversal, and it is tracked as #151 rather than solved here —
+refunds are this ADR's territory, and the decision belongs with them.
+
+**Superseded 2026-09-17 by #696** — see the implementation note at the end of this file. Both
+reversals now exist and neither waited for refunds. The structural claim above was accurate when
+written; what it inferred from it, that the decision had to travel with refunds, was not.
+
+## Implementation note (P7.5a, 2026-08-19, #234)
+
+**The payment-failure compensation restores the shopper's cart as well as the stock.** P3c's note
+above describes that path as releasing stock; that was the whole of it, and it was incomplete in a
+way that only showed up in front of a real shopper. `placeOrder` clears the cart *inside* the
+order-creating transaction — deliberately, because that is what makes a double submit safe (the
+second attempt finds `CART_EMPTY`) — so when `createPayment` then throws, the order is cancelled and
+its stock, points and discount-code use are all returned, while the basket stays deleted. The error
+copy tells the shopper "Nothing has been charged — please try again", and trying again was
+impossible: they landed on an empty cart and had to rebuild it item by item. Observed on staging
+with a 17-item basket during #103's deliberate payment-failure window.
+
+`restoreCartFromOrder` now re-inserts the cancelled order's lines into the originating cart.
+
+**Two constraints on that function that are easy to undo by tidying it up:**
+
+1. **It is called from `placeOrder`'s `catch`, not from inside `releaseOrder`,** even though the
+   rest of the compensation lives there and moving it would look like obvious consolidation.
+   `releaseOrder` is shared with the Stripe webhook, which cancels orders whose Checkout session
+   *expired* — typically hours later, with the shopper long gone and possibly a new basket already
+   built. Restoring a cart there resurrects a stale basket rather than repairing anything.
+2. **It runs only when `releaseOrder` actually cancelled the order** (`count === 1`). A `false`
+   return means the order was already `CONFIRMED` or already `CANCELLED` by someone else; refilling
+   the cart for an order that turned out to be *paid* would hand the shopper a duplicate basket,
+   which is a worse failure than the empty one this fixes.
+
+Nothing here reopens a decision — the money flow is unchanged. It records what the compensation path
+now does, so a future reader does not infer from the P3c note that stock is all it covers.
+
+## Implementation note (P7.5b, 2026-08-20, #150 / #138)
+
+**An order's `discountPence` is now decomposed for display, and the loyalty share is obtained by
+subtraction — deliberately, not for want of a better source.**
+
+`Order.discountPence` is a single generic column by design (see the P5a note above): it holds a
+loyalty redemption, a discount code, or both added together, and `placeOrder` is its only writer
+(`codeDiscountPence + redemption.discountPence`). Only the code's share is separately stored, as
+`DiscountRedemption.amountPence`. So:
+
+- **code share** = `DiscountRedemption.amountPence`
+- **loyalty share** = `discountPence − code share`
+
+The obvious-looking alternative — recovering the loyalty share from the REDEEM ledger row via
+`pointsToPence(points, pencePerPointRedeemed)` — is **wrong, and must not be "fixed" back to it**.
+The ledger stores a redemption in *points*, not pence, and `pencePerPointRedeemed` is vendor config
+an admin can change at any time afterwards. A recomputed share would therefore drift away from the
+`discountPence` displayed beside it, and an order page would stop adding up. Subtraction cannot
+drift: the two shares sum to the figure they decompose, by construction.
+
+Two bounds make that safe rather than merely convenient, and both are enforced upstream: a code's
+face value is clamped before it is stored (`lib/discounts.ts:141`), and `clampRedemption` gives
+points only the headroom the code left. So the code share can never exceed `discountPence`, and
+`splitDiscount` needs no defensive cap — one is deliberately absent so that a genuine data defect
+would surface rather than be silently absorbed.
+
+**Points earned are read, never predicted.** `earnPoints` writes its EARN row inside
+`confirmPayment`'s transaction, so `pointsEarned` is non-null exactly when the award has happened.
+Surfaces that render an order before payment clears show a line with no number rather than an
+estimate — the tier multiplier comes from a windowed spend query and is snapshotted onto the EARN
+row *because* it moves, so an estimate computed outside that write path can legitimately disagree
+with the award. The confirmation email is unaffected either way: it is sent only after the webhook's
+`confirm` returned true, from a second, post-commit read of the order.
+
+Nothing here changes how money is calculated, charged or recorded — only what an order is able to
+explain about the figures it already carries.
+
+## Implementation note (P9.1, 2026-08-29, #429)
+
+**A verified webhook signature is no longer sufficient to move an order's payment state.** The
+Decision's "signature-verified, idempotent webhook" is unchanged and no decision here is reopened —
+this records a third property it now also has, and which the wording above does not imply.
+
+A signature proves an event came from Stripe. It does not prove the event concerns *the payment this
+order is waiting on*: a session created in the same Stripe account with crafted metadata, or a
+metadata mix-up during an integration change, both arrive correctly signed. Until this slice
+`metadata.orderNumber` was the only link between an event and the order it moved, and
+`Payment.providerReference` — written post-commit with the Checkout Session id — was never read back.
+
+Both transitions now also prove correspondence, in the `where` clause of the compare-and-set that
+already guarded the status change, never by fetching and comparing in application code. That
+placement is the point: it is the P7a lesson recorded on `findOrderForGuestLookup`, where a missing
+credential *skipped* the comparison instead of failing it. It also makes the nullable-reference case
+free — a stored `null` cannot equal a non-null session id, so an order whose session write never
+landed is refused by the same predicate that refuses a wrong one, with no separate branch.
+
+The two paths bind on deliberately different fields:
+
+| | binds on | rationale |
+|---|---|---|
+| `confirmPayment` | provider, session id, amount, currency | confirmation is where money is asserted, so the money is checked |
+| `failPayment` | provider, session id | cancellation asserts no money; refusing to release stock because Stripe omitted `amount_total` would strand inventory indefinitely — a worse failure, reachable with no attacker |
+
+**Money is still calculated, charged and recorded exactly as before.** `computeTotals` remains the
+only place an order's money is decided, and `lib/payments.ts` is untouched. What changed is which
+events are permitted to act on a figure that was already correct.
+
+**Two consequential details for future readers.** First, a mismatch **fails closed**: the order stays
+`PENDING_PAYMENT` and the refusal is logged, which means a genuine integration defect would leave a
+real shopper charged with no confirmation and their stock held, needing manual reconciliation —
+tracked as **#454**, since #101 covers webhooks that never *arrive*, not ones that arrive and are
+refused. Second, the P7.5b note above says the confirmation email is sent "after the webhook's
+`confirm` returned true"; `confirmPayment` now returns a result union rather than a boolean, and the
+email is keyed on `{ ok: true }`. The behaviour is the same — the wording predates the type.
+
+## Implementation note (P9.2, 2026-09-02, #454)
+
+**The `PaymentService` port now carries a READ method.** `retrieveSession(sessionId)` returns what
+the provider says about a session we already created — `paymentStatus`, `status`, `amountTotal`,
+`currency`. It is the first method on this port that is not a write, and it exists because the P9.1
+note above left a real gap: a binding refusal fails closed, which is correct, but if it ever fires
+against a genuine payment the shopper has been charged and their order is stranded. Deciding whether
+a given refusal was correct is not answerable from our own data — it requires asking the provider.
+
+**Recovery deliberately introduces no second path to `CONFIRMED`.** The staff action reads the
+session, and when the provider reports it paid it calls the **unchanged** `confirmPayment` with a
+`PaymentBinding` built from the provider's own response. That binding still has to satisfy the same
+compare-and-set predicate `#429` installed, evaluated by Postgres in the same statement that performs
+the transition. So a refusal that was correct cannot be confirmed away by a staff click, and the
+security property of the P9.1 note is preserved rather than carved out. The alternative — letting
+staff force a status change — was rejected for exactly that reason.
+
+**It asks about the order's own stored session, never the one the refused event claimed.** The
+claimed session id is the value under suspicion; asking the provider about it would confirm nothing
+about whether *this order* was paid.
+
+**Refusals are recorded, not just logged.** `PaymentBindingRefusal` holds one row per loud refusal
+with both the claimed and the stored session/amount/currency. This is a schema change rather than a
+query over existing state because `PENDING_PAYMENT` plus a non-null `providerReference` cannot
+separate an abandoned checkout from a never-arrived webhook (**#101**) from a refused binding, and
+the three have three different remediations — only the refused one must **not** be re-driven.
+
+**Still undecided, and deliberately not decided here: refunds and the capture method.**
+`lib/payments.ts` pins no `capture_method`, so payment is captured immediately, and no code path
+writes `PaymentStatus.REFUNDED`. Reducing, substituting or refunding a paid order needs that
+decision, it is entangled with **#399**'s variant and weight model, and it remains this ADR's open
+territory — now tracked as **#606**.
+
+This paragraph used to add that a paid order's discount-code use and earned points could not be
+reversed either. **That is no longer true (#696, 2026-09-17)** and the two questions have been
+separated; see the implementation note at the end of this file. Refunds are still undecided. Ledger
+reversal no longer waits on them.
+
+## Implementation note (P9.2, 2026-09-06, #618)
+
+**An order's payment state can now also be moved by an unattended scheduled sweep, not only by the
+webhook.** The Decision's "confirm via a signature-verified, idempotent webhook" is unchanged and no
+numbered decision is reopened — the webhook remains the primary path and its binding is untouched.
+What is new is a second caller of the same bound compare-and-set.
+
+The P9.1 note above ends by saying a fail-closed refusal "would leave a real shopper charged with no
+confirmation and their stock held, needing manual reconciliation — tracked as **#454**, since #101
+covers webhooks that never *arrive*". This note closes that second reference. `#454` gave a human a
+worklist; `#618` removes the requirement that a human be looking, for the case where no webhook ever
+arrived and therefore no worklist row was ever written.
+
+**The sweep decides nothing from our own data.** For each order still `PENDING_PAYMENT` past a short
+cutoff it retrieves that order's OWN stored session — never a session id supplied by anything else —
+and acts only on a definitive answer: `paid` confirms, an `expired` session releases, an `open`
+session is left alone because the shopper can still pay, and a `retrieveSession` that throws
+transitions nothing. A provider outage is not an answer, and specifically is not the answer
+"unpaid", which is the one that would authorize cancelling an order and restocking it.
+
+**Release is gated on the session's own state, never on elapsed time.** This is what allows the
+candidate cutoff to be as short as 30 minutes without any risk of cancelling a live checkout, and it
+is the reason the sweep is safe to run frequently.
+
+**Two cases the provider cannot answer directly** share one 7-day backstop: an order whose
+`Payment.providerReference` is null (no session was ever stored, so no `PaymentBinding` is
+constructible and only the no-binding `cancelUnpaidOrder` path can resolve it), and a session left
+`complete` and `unpaid` by an asynchronous payment method whose outcome webhook was itself lost.
+Stripe's default session expiry is 24 hours and this app sets no `expires_at`, so nothing behind
+that cutoff can still be paid.
+
+**Consequential detail for future readers.** The stub payment adapter reports `paymentStatus:
+"unpaid"` unconditionally. That is correct for `#454`, whose risk is confirming an order nobody paid
+for. It is *hazardous* here, because this path's risk runs the opposite way — "unpaid" is what
+authorizes cancellation — so the job route refuses to run at all when `STRIPE_SECRET_KEY` is unset.
+A safety property that holds in one direction on this port does not automatically hold in the other.
+
+## Implementation note (P10, 2026-09-29, #945)
+
+**The scheduled sweep now remembers each order between runs.** No numbered decision is reopened,
+and the `#618` note above still describes what the sweep decides. What changes is how often it
+asks, and when it stops.
+
+**A per-order reconciliation record.** The first time the sweep claims a `PENDING_PAYMENT` order it
+creates a `PaymentReconciliation` row. A claim pushes the row's `nextAttemptAt` forward by a
+10-minute lease before the provider is asked anything; the outcome is written only while the row's
+`lastAttemptAt` still equals that claim instant. So a Worker that dies mid-attempt leaves the order
+due again on the next tick, and a slow run cannot overwrite a newer attempt. The sweep only selects
+orders that are due, so an order it is backing off, or has given up on, no longer blocks newer
+orders at the head of its oldest-first queue.
+
+**Retries are bounded.** A retryable provider failure (5xx, 429, network, and deliberately `401`/`403`,
+which mean our own key is wrong and affect every order at once) backs off from 15 minutes, doubling,
+and the 8th consecutive one exhausts the order. A `400`/`404`, or a refused binding, exhausts it at
+once. Exhaustion stops the retries and shows the order to staff on `/staff/payments`, where a Retry
+re-arms it.
+
+**The sweep still acts only on the provider's own answer.** An exhausted order is never released
+because of the exhaustion: a `404` means "we could not find out", not "unpaid", and only the latter
+authorizes cancelling an order and restocking it. The concurrency guarantee is still the bound
+compare-and-set out of `PENDING_PAYMENT` in `confirmPayment`/`failPayment`/`releaseOrder`, which this
+slice does not touch; the claim adds bookkeeping, not a second lock.
+
+## Implementation note (P9.2, 2026-09-17, #696)
+
+**Ledger reversal is now decoupled from refunds, and no numbered decision is reopened.** Staff can
+cancel an order that was actually paid for (`cancelConfirmedOrder`), and that cancellation returns
+the stock, reverses the loyalty `REDEEM` *and* the `EARN`, and gives back the discount-code use.
+`#137` and `#151` are closed by it. The capture method is unchanged, `lib/payments.ts` still pins no
+`capture_method`, and **nothing in this codebase writes `PaymentStatus.REFUNDED`** — the Decision
+above stands exactly as written.
+
+**What this ADR previously assumed, and why it was wrong.** Two passages above recorded that a paid
+order's code use and earned points could not be reversed, and both concluded that the decision
+therefore "belongs with" refunds. The first half was a true structural observation: `releaseOrder`
+acts only on `PENDING_PAYMENT` orders, strictly before `confirmPayment` writes the `EARN`, so no
+path existed that could reverse either. The second half did not follow from it. Reversing a ledger
+entry and moving money are separate acts, and only the second is this ADR's territory. What was
+actually missing was a cancel path for a paid order — not a refund decision.
+
+**The state this creates, stated plainly because it is unusual.** A cancelled order whose `Payment`
+still reads `SUCCEEDED`. The customer's money is retained, their points and code use are restored,
+and the goods are back in stock. That is a real operational position — staff cancel an order and
+settle up with the customer out of band — and #696 represents it honestly rather than implying a
+refund happened. `cancelConfirmedOrder` never touches the `Payment` row, deliberately: writing
+`FAILED` there (as `releaseOrder` does on the unpaid path, correctly) would be false at the moment
+it was written, and would collide with the real `REFUNDED` writer #606 eventually adds.
+
+**Two consequences a refund slice will inherit:**
+
+- **Revenue is derived from order status, not payment state**, so a cancelled-but-unrefunded order
+  silently leaves `/staff/reports` although its money is in the bank. Tracked as **#795**, which
+  proposes deriving revenue from a `SUCCEEDED`-and-not-`REFUNDED` payment instead — that rule would
+  cover this case and the refund exclusion `REVENUE_STATUSES`' own comment already asks for, in one
+  change rather than two.
+- **`LoyaltyEntryKind` gained `EARN_REVERSAL`** rather than widening
+  `@@unique([orderId, kind])`. A partial refund reversing part of an earn does not fit that shape
+  and should expect to revisit it — this slice deliberately did not pre-commit #606 to an answer.
+
+## Deferred upgrade — Stripe Connect
+
+When a real third-party merchant onboards: add `VendorPaymentAccount` (vendor → Stripe account id),
+onboard vendors through Connect, and have the adapter set the destination/`on_behalf_of` per vendor.
+Additive to the port defined here — not a rewrite. Platform fees, payout schedules and per-account
+webhook routing come with it.

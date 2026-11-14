@@ -1,0 +1,93 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { getUserId } from "@/lib/cart-identity";
+import { getShoppingListService } from "@/lib/shopping-lists-service";
+import { ShopYourList } from "@/components/cart/ShopYourList";
+import { getProductRepository } from "@/lib/products-service";
+import { MAX_EXAMPLE_NAMES } from "@/lib/shopping-list-examples";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { Icon } from "@/components/icons/Icon";
+
+/**
+ * "Shop your list" (P3d, #114) — the second way to fill a cart, alongside
+ * clicking Add to Cart on a product card.
+ *
+ * force-dynamic for the same reason as /search and /categories: the storefront
+ * layout resolves the vendor through Prisma, which next build's Node-based
+ * static prerendering cannot load (@prisma/client/wasm).
+ */
+export const dynamic = "force-dynamic";
+
+// #1145 gave the feature one shopper-facing name; #1187 splits that name deliberately, now that a
+// hub exists: "Quick Shop" is the hub at /quick-shop, and this page — one of its four tiles — is
+// "Smart Lists". The URL stays /shop-your-list so bookmarks, the sitemap and existing links keep
+// working, which is the same reasoning #1145 used.
+export const metadata: Metadata = { title: "Smart Lists" };
+
+/** Rows shown before the shopper has to click through to /account/lists (#806). */
+const QUICK_PICK_LIMIT = 5;
+
+export default async function ShopYourListPage() {
+  // Saving a list needs an account, so the control is resolved here and passed down: ShopYourList
+
+  // proxy.ts to carry it. Matching and adding stay available to guests exactly as before (#116).
+  const canSave = (await getUserId()) !== null;
+  const [savedLists, examples] = await Promise.all([
+    canSave ? getShoppingListService().list() : [],
+    // #729 — the textarea's examples come from this vendor's own in-stock products rather than a
+    // fixed grocery list; see lib/shopping-list-examples.ts.
+    getProductRepository().list({ take: MAX_EXAMPLE_NAMES, inStockOnly: true }),
+  ]);
+
+  return (
+    <PageContainer width="narrow" padY="tight">
+      {/* #1145 — no intro paragraph: the textarea's own label says what to do. */}
+      <h1 className="mb-5 text-xl font-bold text-primary">Smart Lists</h1>
+
+      {savedLists.length > 0 && (
+        <div className="mb-6">
+          {/* #1187 — this block and /account/lists are the SAME data (both from
+              getShoppingListService().list()), so they carry the same name. It read "Your saved
+              lists" while that page read "Your lists", which would have left one concept wearing
+              three labels once this page became "Smart Lists" — the #1145 failure, re-created. */}
+          <h2 className="text-sm font-bold text-primary">Your lists</h2>
+          <ul className="mt-2 space-y-2">
+            {savedLists.slice(0, QUICK_PICK_LIMIT).map((list) => (
+              <li key={list.id} className="rounded-2xl border border-black/10 bg-surface-muted p-3">
+                <Link
+                  href={`/account/lists/${list.id}`}
+                  className="flex items-center justify-between gap-3"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Icon name="list-checks" className="h-4 w-4 shrink-0 text-primary" />
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-primary">
+                        {list.name}
+                      </span>
+                      <span className="block text-xs text-primary-muted">
+                        {list.itemCount} item{list.itemCount === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  </span>
+                  <Icon name="chevron-right" className="h-4 w-4 shrink-0 text-primary-subtle" />
+                </Link>
+              </li>
+            ))}
+          </ul>
+          <Link
+            href="/account/lists"
+            className="mt-2 inline-block text-xs font-semibold text-primary underline"
+          >
+            Manage your lists →
+          </Link>
+        </div>
+      )}
+
+      <ShopYourList canSave={canSave} exampleNames={examples.items.map((item) => item.name)} />
+
+      <Link href="/cart" className="mt-6 inline-block text-xs font-semibold text-primary underline">
+        Back to your cart
+      </Link>
+    </PageContainer>
+  );
+}

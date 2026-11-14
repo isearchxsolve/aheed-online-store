@@ -1,0 +1,159 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { updateQuantity } from "@/features/cart/update-quantity";
+import { clampQuantity } from "@/lib/cart-rules";
+import { createQuantityCoalescer, type QuantityCoalescer } from "./quantity-coalescer";
+import { Icon } from "@/components/icons/Icon";
+
+/**
+ * P8.5a (#345) — the product grid's cart-mutating quantity stepper.
+ *
+ * Distinct from `AddToCartButton`'s `variant="card"` control, which picks a
+ * quantity BEFORE adding. This one reflects what is already in the cart and
+ * changes it: the card renders `AddToCartButton` when the product is not in the
+ * cart, and this when it is.
+ *
+ * Writes are coalesced — see `quantity-coalescer.ts` for why that is a
+ * requirement (R8) rather than a refinement. The displayed number updates
+ * immediately so the control feels direct; the server sees one call carrying
+ * the final quantity.
+ *
+ * On failure the display reverts to the last server-confirmed value (R10)
+ * rather than stranding an optimistic number the cart does not actually hold.
+ *
+ * #351/#656: this control is a sibling of ProductCard's stretched-link title
+ * now, not a descendant of an `<a>` — see `ProductCard.tsx`'s doc comment.
+ * There is no ancestor anchor for a click here to reach any more, so the
+ * buttons no longer swallow the event on its way up; `preventDefault()`
+ * alone still guards `type="button"` from any enclosing `<form>`'s default
+ * submit.
+ */
+
+/**
+ * Idle window before a burst flushes. Long enough that a human tapping "+"
+ * three or four times lands one write, short enough that the cart total the
+ * shopper sees next is not visibly stale.
+ */
+const COALESCE_MS = 600;
+
+export function CartQuantityStepper({
+  productId,
+  quantity: serverQuantity,
+  stock,
+  productName,
+}: {
+  productId: string;
+  /** Quantity currently in the cart, from the server render. */
+  quantity: number;
+  /** Available stock, so "+" cannot exceed it. */
+  stock: number;
+  /** Used for the controls' accessible names. */
+  productName: string;
+}) {
+  const [displayed, setDisplayed] = useState(serverQuantity);
+  const [failed, setFailed] = useState(false);
+
+  // A server render (after revalidation) is authoritative: adopt it and drop
+  // any optimistic value.
+  //
+  // Done DURING RENDER, not in an effect. This is React's documented "adjusting
+  // state when a prop changes" pattern — an effect calling setState here would
+  // cascade an extra render for every cart write, and would trip
+  // `react-hooks/set-state-in-effect`. Suppressing that rule was the other
+
+  // section only sanctions silencing it when the dependency semantics are the
+  // thing at stake, which they are not here.
+  const [lastServerQuantity, setLastServerQuantity] = useState(serverQuantity);
+  if (serverQuantity !== lastServerQuantity) {
+    setLastServerQuantity(serverQuantity);
+    setDisplayed(serverQuantity);
+    setFailed(false);
+  }
+
+  // The value to fall back to when a flush rejects (R10). Mirrors the server
+  // render, not the optimistic state. Written in an effect rather than during
+  // render — `react-hooks/refs` rightly rejects reading a ref from a callback
+  // built during render.
+  const confirmed = useRef(serverQuantity);
+  useEffect(() => {
+    confirmed.current = serverQuantity;
+  }, [serverQuantity]);
+
+  const coalescer = useRef<QuantityCoalescer | null>(null);
+  useEffect(() => {
+    const pendingWrites = createQuantityCoalescer({
+      delayMs: COALESCE_MS,
+      flush: (next) => updateQuantity(productId, next),
+      onError: () => {
+        setDisplayed(confirmed.current);
+        setFailed(true);
+      },
+    });
+    coalescer.current = pendingWrites;
+    return () => {
+      // Flush rather than cancel: if the card unmounts mid-burst (navigation,
+      // a filter change) the click the shopper just made must still land.
+      pendingWrites.flushNow();
+      coalescer.current = null;
+    };
+  }, [productId]);
+
+  function step(event: React.MouseEvent, delta: 1 | -1) {
+    // `type="button"`, so this guards only against a hypothetical enclosing
+    // <form>'s default submit — there is no longer an ancestor anchor for
+    // the click to reach.
+    event.preventDefault();
+
+    // Decrementing past 1 means removal, which clampQuantity deliberately
+    // refuses to express (it never lands on 0 by decrement), so it is handled
+    // here.
+    const next = displayed + delta <= 0 ? 0 : clampQuantity(displayed, delta, stock);
+    if (next === displayed) return;
+    setFailed(false);
+    setDisplayed(next);
+    coalescer.current?.set(next);
+  }
+
+  // #961 — the two buttons are 44px (`tap`) below `lg` and today's 24px from `lg`. At 360px a
+  // 2-column card has about 128px of content width; two 44px buttons, the readout, `p-1` and the
+  // border fit only with the tighter `gap-1` there.
+  return (
+    <div className="flex items-center gap-1 lg:gap-1.5 rounded-xl border border-primary/30 bg-action-tint p-1">
+      <button
+        type="button"
+        onClick={(event) => step(event, -1)}
+        aria-label={
+          displayed <= 1 ? `Remove ${productName} from cart` : `Decrease quantity of ${productName}`
+        }
+        className="flex size-tap lg:size-6 items-center justify-center rounded-lg bg-white text-primary transition-colors hover:bg-surface-muted"
+      >
+        <Icon name="minus" className="h-3.5 w-3.5" />
+      </button>
+
+      <span
+        className="min-w-[1.25rem] px-1 text-center text-xs font-bold text-primary"
+        aria-live="polite"
+        aria-label={`${displayed} ${productName} in cart`}
+      >
+        {displayed}
+      </span>
+
+      <button
+        type="button"
+        onClick={(event) => step(event, 1)}
+        disabled={displayed >= stock}
+        aria-label={`Increase quantity of ${productName}`}
+        className="flex size-tap lg:size-6 items-center justify-center rounded-lg bg-primary text-white transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        <Icon name="plus" className="h-3.5 w-3.5" />
+      </button>
+
+      {failed && (
+        <span role="status" className="pl-1 text-[10px] font-semibold text-danger">
+          Not saved
+        </span>
+      )}
+    </div>
+  );
+}

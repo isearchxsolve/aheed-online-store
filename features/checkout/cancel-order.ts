@@ -1,0 +1,70 @@
+"use server";
+
+import { redirect } from "next/navigation";
+import { getOrderCancelService, getOrderRepository } from "@/lib/orders-service";
+import { getCartRepository } from "@/lib/cart-service";
+import { getCartIdentity } from "@/lib/cart-identity";
+import { scopedToUser } from "@/features/cart/shared";
+import { restoredLines } from "@/lib/restore-lines";
+import { buildRestoreNoticeUrl } from "@/lib/restore-notice";
+
+/**
+ * Cancel a still-unpaid order and put its lines back in the cart (P9.1, #428).
+ *
+ * This used to be `app/api/checkout/cancel/route.ts`, a GET that cancelled the
+ * order and released its inventory on sight. Stripe's `cancel_url` returns the
+ * browser with a GET, so the route was reachable — and destructive — to any link
+ * prefetcher, mail scanner, chat unfurler or crawler that so much as touched the
+ * URL. Splitting it was the fix: the page at
+ * `app/(storefront)/checkout/[orderNumber]/cancel/page.tsx` asks, and this
+ * action acts.
+ *
+ * The hidden fields are attacker-controlled like any other form input, so this
+ * re-proves the capability token rather than trusting that the page already did
+ * — the same posture `eraseGuestOrder` takes with the order-number/email pair.
+ *
+ * Refusal and success both end at `/cart`, so the response says nothing about
+ * whether the order existed or the token was right.
+ *
+ * NOTE: this file may export async functions and nothing else. A single value
+ * export makes every action in it fail at runtime while `build`, `typecheck` and
+
+ */
+export async function cancelOrder(formData: FormData): Promise<void> {
+  const orderNumber = String(formData.get("orderNumber") ?? "");
+  const token = String(formData.get("t") ?? "");
+
+  const identity = await getCartIdentity();
+  const scoped = scopedToUser(identity);
+  const userId = scoped.userId ?? null;
+
+  const order = await getOrderRepository().getByOrderNumber(orderNumber, userId, token || null);
+  // Every path but a real cancel lands on plain `/cart`, which says nothing about the order.
+  let destination = "/cart";
+
+  // Only PENDING_PAYMENT is cancellable. A paid or already-cancelled order is
+  // left exactly as it is — the same guard the deleted route carried, and the
+  // reason calling this twice cannot release the same stock twice.
+  if (order && order.status === "PENDING_PAYMENT") {
+    // Not the webhook's `fail` any more (P9.1, #429): that now requires a
+    // payment binding proving which Stripe session an event is about, and a
+    // shopper cancelling from their own browser has none. This path's credential
+    // is the capability token, already proved above.
+    await getOrderCancelService().cancelUnpaid(
+      orderNumber,
+      "Shopper cancelled payment at checkout",
+    );
+
+    // #957 — and say what could not go back (a product deactivated since the order was placed, or
+    // stock taken by someone else after the release above), rather than handing back a short basket
+    // with no message.
+    const lines = await restoredLines(order.items, (toAdd) =>
+      getCartRepository().addItems(scoped, toAdd),
+    );
+    destination = buildRestoreNoticeUrl("cancelled", lines);
+  }
+
+  // Outside any try/catch: redirect() throws a control-flow signal that must not
+  // be swallowed.
+  redirect(destination);
+}

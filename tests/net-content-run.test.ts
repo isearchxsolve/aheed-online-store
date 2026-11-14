@@ -1,0 +1,423 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  MAX_CONSECUTIVE_TRANSPORT_ERRORS,
+  NET_CONTENT_MODEL_RATES,
+  neuronsForCall,
+  runNetContentSuggestions,
+  type RunDependencies,
+  type RunProduct,
+} from "@/lib/net-content-run";
+import {
+  descriptionExcerpt,
+  type NetContentSuggester,
+  type SuggesterResult,
+} from "@/lib/net-content-suggester";
+import type { AiBudgetCheck, AiMeter } from "@/lib/ai-meter";
+import { describeStaffNetContentRun } from "@/lib/net-content-review-form";
+
+/**
+ * #900 (R15, R16) — the run loop's stop rules, with a stubbed suggester and store. What matters
+ * is what gets WRITTEN: a missing credential or a transport fault must write nothing, and the
+ * budget and error limits must stop new calls.
+ */
+
+const rice: RunProduct = {
+  id: "p-rice",
+  name: "Basmati Rice 5kg",
+  unitLabel: "£8.99 / 5kg",
+  description: "",
+  basePrice: 899,
+  images: [],
+};
+
+function product(id: string): RunProduct {
+  return { ...rice, id };
+}
+
+const RICE_REPLY: SuggesterResult = {
+  kind: "reply",
+  text: '{"amount":5,"unit":"KILOGRAM","confidence":95,"evidenceSource":"NAME","evidence":"5kg"}',
+  latencyMs: 100,
+  usage: { inputTokens: 400, outputTokens: 50, neurons: 5 },
+};
+
+function suggesterReturning(...results: SuggesterResult[]): NetContentSuggester {
+  const suggest = vi.fn(async () => results.shift() ?? RICE_REPLY);
+  return { model: "@cf/google/gemma-4-26b-a4b-it", suggest };
+}
+
+/** A meter that always allows, unless given checks to return in order (#1017). */
+function meterAllowing(
+  ...checks: AiBudgetCheck[]
+): AiMeter & { check: ReturnType<typeof vi.fn>; record: ReturnType<typeof vi.fn> } {
+  return {
+    check: vi.fn(
+      async () =>
+        checks.shift() ?? {
+          allowed: true,
+          scope: "vendor" as const,
+          usedNeurons: 0,
+          budgetNeurons: 3000,
+        },
+    ),
+    record: vi.fn(async () => {}),
+    recordImage: vi.fn(async () => {}),
+  };
+}
+
+function deps(overrides: Partial<RunDependencies>): RunDependencies & {
+  saveSuggestion: ReturnType<typeof vi.fn>;
+} {
+  const saveSuggestion = vi.fn(async (input: { value: unknown }) => ({
+    status: input.value ? ("PENDING" as const) : ("NO_ANSWER" as const),
+  }));
+  return {
+    products: [rice],
+    suggester: suggesterReturning(RICE_REPLY),
+    loadPhoto: vi.fn(async () => null),
+    saveSuggestion,
+    neuronBudget: 5000,
+    rate: NET_CONTENT_MODEL_RATES["@cf/google/gemma-4-26b-a4b-it"],
+    storeDescription: null,
+    aiMeter: meterAllowing(),
+    ...overrides,
+  } as RunDependencies & { saveSuggestion: ReturnType<typeof vi.fn> };
+}
+
+describe("runNetContentSuggestions (R15)", () => {
+  it("passes the vendor's store description into every suggest call (#905 R19)", async () => {
+    const d = deps({ storeDescription: "Phones & chargers" });
+    await runNetContentSuggestions(d);
+    expect(d.suggester.suggest).toHaveBeenCalledWith(
+      expect.objectContaining({ storeDescription: "Phones & chargers" }),
+    );
+  });
+
+  it("writes a PENDING row with its label check for a valid reply", async () => {
+    const d = deps({});
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary).toMatchObject({ outcome: "completed", attempted: 1, pending: 1, noAnswer: 0 });
+    expect(d.saveSuggestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        productId: "p-rice",
+        productImageId: null,
+        model: "@cf/google/gemma-4-26b-a4b-it",
+        inputTokens: 400,
+        outputTokens: 50,
+        value: expect.objectContaining({ amount: 5, unit: "KILOGRAM", unitLabelCheck: "AGREES" }),
+      }),
+    );
+  });
+
+  it("writes a NO_ANSWER row with a null value for an invalid reply", async () => {
+    const d = deps({
+      suggester: suggesterReturning({ ...RICE_REPLY, text: '{"amount": null}' }),
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary.noAnswer).toBe(1);
+    expect(d.saveSuggestion).toHaveBeenCalledWith(expect.objectContaining({ value: null }));
+  });
+
+  it("stops with no row written when the suggester is not configured", async () => {
+    const d = deps({
+      products: [product("a"), product("b")],
+      suggester: suggesterReturning({ kind: "not-configured" }),
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary.outcome).toBe("not-configured");
+    expect(d.saveSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("writes no row for a transport error and counts it as failed", async () => {
+    const d = deps({
+      products: [product("a"), product("b")],
+      suggester: suggesterReturning(
+        { kind: "transport-error", message: "429", latencyMs: 5 },
+        RICE_REPLY,
+      ),
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary).toMatchObject({ failed: 1, pending: 1, attempted: 2, outcome: "completed" });
+    expect(d.saveSuggestion).toHaveBeenCalledTimes(1);
+    expect(d.saveSuggestion.mock.calls[0][0].productId).toBe("b");
+  });
+
+  it(`stops after ${MAX_CONSECUTIVE_TRANSPORT_ERRORS} consecutive transport errors`, async () => {
+    const failure: SuggesterResult = { kind: "transport-error", message: "down", latencyMs: 5 };
+    const suggester = suggesterReturning(failure, failure, failure, failure);
+    const d = deps({
+      products: [product("a"), product("b"), product("c"), product("d")],
+      suggester,
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary.outcome).toBe("transport-errors");
+    expect(summary.failed).toBe(3);
+    expect(suggester.suggest).toHaveBeenCalledTimes(3);
+    expect(d.saveSuggestion).not.toHaveBeenCalled();
+  });
+
+  it("sends a staff photo and records its image id", async () => {
+    const withPhoto: RunProduct = {
+      ...rice,
+      images: [
+        { id: "img-ai", storageKey: "k1", sortOrder: 0, source: "AI_GENERATED" },
+        { id: "img-staff", storageKey: "k2", sortOrder: 1, source: "STAFF_UPLOAD" },
+      ],
+    };
+    const loadPhoto = vi.fn(async () => ({
+      bytes: new Uint8Array([1]),
+      contentType: "image/webp",
+    }));
+    const d = deps({ products: [withPhoto], loadPhoto });
+    await runNetContentSuggestions(d);
+
+    expect(loadPhoto).toHaveBeenCalledWith(expect.objectContaining({ id: "img-staff" }));
+    expect(d.saveSuggestion.mock.calls[0][0].productImageId).toBe("img-staff");
+    expect(vi.mocked(d.suggester.suggest).mock.calls[0][0].photo).not.toBeNull();
+  });
+
+  it("records no image id when the chosen photo's object is missing", async () => {
+    const withPhoto: RunProduct = {
+      ...rice,
+      images: [{ id: "img-staff", storageKey: "k2", sortOrder: 0, source: "STAFF_UPLOAD" }],
+    };
+    const d = deps({ products: [withPhoto], loadPhoto: vi.fn(async () => null) });
+    await runNetContentSuggestions(d);
+
+    expect(d.saveSuggestion.mock.calls[0][0].productImageId).toBeNull();
+  });
+});
+
+describe("the neuron budget (R16)", () => {
+  it("stops starting new calls once the budget is reached", async () => {
+    const suggester = suggesterReturning(); // every call costs 5 reported neurons
+    const d = deps({
+      products: [product("a"), product("b"), product("c"), product("d")],
+      suggester,
+      neuronBudget: 10,
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary.outcome).toBe("budget-reached");
+    expect(suggester.suggest).toHaveBeenCalledTimes(2);
+    expect(summary.neurons).toBe(10);
+  });
+
+  it("counts a truncated call's neurons toward the budget, though it writes no row", async () => {
+    const truncated: SuggesterResult = {
+      kind: "transport-error",
+      message: "Reply truncated at 800 tokens",
+      latencyMs: 5,
+      usage: { inputTokens: 327, outputTokens: 800, neurons: 25 },
+    };
+    const suggester = suggesterReturning(truncated, RICE_REPLY, RICE_REPLY);
+    const d = deps({
+      products: [product("a"), product("b"), product("c")],
+      suggester,
+      neuronBudget: 28,
+    });
+    const summary = await runNetContentSuggestions(d);
+
+    // 25 (truncated) + 5 = 30 >= 28, so the third call never starts.
+    expect(suggester.suggest).toHaveBeenCalledTimes(2);
+    expect(summary).toMatchObject({
+      outcome: "budget-reached",
+      failed: 1,
+      pending: 1,
+      neurons: 30,
+      inputTokens: 727,
+      outputTokens: 850,
+    });
+    expect(d.saveSuggestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("estimates a truncated call from the rate table when no neurons are reported", async () => {
+    const truncated: SuggesterResult = {
+      kind: "transport-error",
+      message: "Reply truncated at 800 tokens",
+      latencyMs: 5,
+      usage: { inputTokens: 1_000_000, outputTokens: 0, neurons: null },
+    };
+    const summary = await runNetContentSuggestions(
+      deps({ products: [product("a")], suggester: suggesterReturning(truncated) }),
+    );
+    expect(summary.neurons).toBe(9091);
+    expect(summary.neuronsIncomplete).toBe(false);
+  });
+
+  it("prefers reported neurons, then estimates from the rate table", () => {
+    const rate = { input: 9091, output: 27273 };
+    expect(neuronsForCall({ inputTokens: 400, outputTokens: 50, neurons: 4.9 }, rate)).toBe(4.9);
+    expect(neuronsForCall({ inputTokens: 1_000_000, outputTokens: 0, neurons: null }, rate)).toBe(
+      9091,
+    );
+    expect(neuronsForCall({ inputTokens: 400, outputTokens: 50, neurons: null }, null)).toBeNull();
+  });
+
+  it("carries the rates read from Cloudflare's pricing page for the two known models", () => {
+    expect(NET_CONTENT_MODEL_RATES["@cf/google/gemma-4-26b-a4b-it"]).toEqual({
+      input: 9091,
+      output: 27273,
+    });
+    expect(NET_CONTENT_MODEL_RATES["@cf/meta/llama-4-scout-17b-16e-instruct"]).toEqual({
+      input: 24545,
+      output: 77273,
+    });
+  });
+});
+
+describe("the description excerpt is shared by prompt and validator (#928 R9)", () => {
+  // The only metric size, "1L", lies after character 500; "400ml" lies inside the excerpt.
+  const longDescription =
+    "Rich, creamy coconut milk, 400ml tin. " +
+    "x".repeat(480) +
+    " also sold as 1L carton " +
+    "y".repeat(90);
+  const coconut: RunProduct = {
+    id: "p-coconut",
+    name: "Coconut Milk",
+    unitLabel: "£1.29 / tin",
+    description: longDescription,
+    basePrice: 129,
+    images: [],
+  };
+
+  function descriptionReply(evidence: string, amount: number, unit: string): SuggesterResult {
+    return {
+      kind: "reply",
+      text: JSON.stringify({
+        amount,
+        unit,
+        confidence: 80,
+        evidenceSource: "DESCRIPTION",
+        evidence,
+      }),
+      latencyMs: 100,
+      usage: { inputTokens: 500, outputTokens: 50, neurons: 5 },
+    };
+  }
+
+  it("sends the cut excerpt, not the full description", async () => {
+    const d = deps({ products: [coconut], suggester: suggesterReturning(RICE_REPLY) });
+    await runNetContentSuggestions(d);
+    const sent = vi.mocked(d.suggester.suggest).mock.calls[0][0].description;
+    expect(longDescription.length).toBeGreaterThan(600);
+    expect(sent.length).toBeLessThanOrEqual(500);
+    expect(sent).toBe(descriptionExcerpt(longDescription));
+    expect(sent).not.toContain("1L");
+  });
+
+  it("stores a quote from beyond the excerpt as NO_ANSWER", async () => {
+    const d = deps({
+      products: [coconut],
+      suggester: suggesterReturning(descriptionReply("1L carton", 1, "LITRE")),
+    });
+    const summary = await runNetContentSuggestions(d);
+    expect(summary).toMatchObject({ pending: 0, noAnswer: 1 });
+    expect(d.saveSuggestion).toHaveBeenCalledWith(expect.objectContaining({ value: null }));
+  });
+
+  it("stores a quote from inside the excerpt as PENDING with DESCRIPTION evidence", async () => {
+    const d = deps({
+      products: [coconut],
+      suggester: suggesterReturning(descriptionReply("400ml tin", 400, "MILLILITRE")),
+    });
+    const summary = await runNetContentSuggestions(d);
+    expect(summary).toMatchObject({ pending: 1, noAnswer: 0 });
+    expect(d.saveSuggestion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        value: expect.objectContaining({
+          amount: 400,
+          unit: "MILLILITRE",
+          evidenceSource: "DESCRIPTION",
+          evidenceText: "400ml tin",
+        }),
+      }),
+    );
+  });
+});
+
+describe("runNetContentSuggestions — the vendor's daily AI budget (#1017 R29)", () => {
+  it("starts no further call once the vendor meter refuses, and says why", async () => {
+    const refused = {
+      allowed: false,
+      scope: "vendor" as const,
+      usedNeurons: 3001,
+      budgetNeurons: 3000,
+    };
+    const aiMeter = meterAllowing(
+      { allowed: true, scope: "vendor" as const, usedNeurons: 0, budgetNeurons: 3000 },
+      refused,
+    );
+    const d = deps({ products: [product("a"), product("b"), product("c")], aiMeter });
+
+    const summary = await runNetContentSuggestions(d);
+
+    expect(summary.outcome).toBe("vendor-budget-reached");
+    expect(summary.vendorBudget).toEqual(refused);
+    expect(d.suggester.suggest).toHaveBeenCalledTimes(1);
+    expect(d.saveSuggestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("charges the vendor meter once per call that reports usage, including a truncated one", async () => {
+    const truncated: SuggesterResult = {
+      kind: "transport-error",
+      message: "Reply truncated at 800 tokens",
+      latencyMs: 100,
+      usage: { inputTokens: 400, outputTokens: 800, neurons: 25 },
+    };
+    const unbilled: SuggesterResult = {
+      kind: "transport-error",
+      message: "HTTP 500",
+      latencyMs: 5,
+    };
+    const aiMeter = meterAllowing();
+    const d = deps({
+      products: [product("a"), product("b"), product("c")],
+      suggester: suggesterReturning(RICE_REPLY, truncated, unbilled),
+      aiMeter,
+    });
+
+    await runNetContentSuggestions(d);
+
+    expect(aiMeter.record).toHaveBeenCalledTimes(2);
+    expect(aiMeter.record).toHaveBeenCalledWith({
+      model: "@cf/google/gemma-4-26b-a4b-it",
+      usage: RICE_REPLY.kind === "reply" ? RICE_REPLY.usage : null,
+    });
+  });
+
+  it("turns the stop into the store's allowance message on the staff button", () => {
+    const state = describeStaffNetContentRun({
+      kind: "ran",
+      summary: {
+        outcome: "vendor-budget-reached",
+        attempted: 0,
+        pending: 0,
+        noAnswer: 0,
+        failed: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        neurons: 0,
+        neuronsIncomplete: false,
+        meanLatencyMs: null,
+        vendorBudget: {
+          allowed: false,
+          scope: "vendor" as const,
+          usedNeurons: 3012.4,
+          budgetNeurons: 3000,
+        },
+      },
+    });
+    expect(state).toEqual({
+      error:
+        "This store has used its AI allowance for today (3,013 of 3,000 neurons). It resets at 00:00 UTC.",
+      notice: null,
+    });
+  });
+});

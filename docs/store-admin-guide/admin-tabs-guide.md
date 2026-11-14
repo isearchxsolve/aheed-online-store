@@ -1,0 +1,706 @@
+---
+id: store-admin-tabs-guide
+title: "Store Admin Management Guide"
+audience: [store-admin]
+type: runbook
+status: approved
+version: "2.19.0"
+updated: 2026-10-24
+visibility: internal
+summary: "How to use every owner-only page in the Store Admin Panel: discounts, loyalty, storefront configuration, delivery areas, reports, customers, payment issues, and team access."
+tags: ["admin", "guide", "ui", "configuration", "vendor", "payments"]
+---
+
+# Store Admin Management Guide
+
+This guide covers every page reserved strictly for a **store admin**, one section per menu item.
+Pages accessible to both staff and admins — such as Products, Categories, Brands, Bundles,
+Promotions, Live Inventory & Availability, Orders, Search dictionary moderation, and the Runbook —
+are described in the Staff Daily Operations Playbook rather than repeated here. You can open all of
+those as well (generating new AI proposals within Search dictionary remains an admin-only
+capability).
+
+The menu is grouped. You see six groups beside **Overview**: **Orders & Fulfilment**,
+**Catalogue**, **Offers & Loyalty**, **Customers & Content**, **Store setup** and
+**Insights & Help**. Staff see five of them — **Store setup** is entirely yours.
+
+**Two things this panel does not do, so you are not looking for a control that is not there:**
+
+- **There is no refund control anywhere in this panel.** Refunding a customer is done directly in
+  your payment provider's own dashboard, outside this application. Nothing here will move money back
+  to a customer, and nothing here records that you did.
+- **There is no way to invite someone to join your team.** A colleague must register their own
+  account on the shop first, exactly as a customer would. Once they have, you can give that account
+  a role from the Team & Access page.
+
+
+## Discount codes — `/staff/discounts`
+
+**Purpose:** Money-off codes customers type at checkout.
+
+**Who can access:** Store admins only
+
+**What you can do:** Create a code, review the codes you have, and deactivate one.
+
+**Typical workflow:** You decide on an offer. Create the code with either a percentage or a fixed
+amount off, set a minimum basket value if you want one, set the dates it runs, cap how many times it
+can be used, and save. When the offer ends, deactivate it.
+
+**Important fields and filters:** A code is either a percentage or a fixed amount, not both. You can
+set a minimum basket, a start and end date, an overall usage cap and a per-customer cap.
+
+**Common mistakes and limitations:** A code that is deactivated stops working for new orders but does
+not affect orders already placed with it. Set a usage cap on anything you share publicly — a code
+with no cap can be shared far beyond the audience you intended. Percentage discounts apply to the
+basket, so check the interaction with a low minimum before publishing a large percentage.
+
+**What happens after changes are saved:** The code works at checkout immediately, and deactivating
+one stops it immediately.
+
+## Loyalty — `/staff/loyalty`
+
+**Purpose:** How customers earn points, what points are worth, and the tiers that reward your best
+customers.
+
+**Who can access:** Store admins only
+
+**What you can do:** Switch your loyalty scheme on or off, set the earn rate, set the redemption
+value, and define tiers with spend thresholds and point multipliers.
+
+**Typical workflow:** You set this up once and revisit it rarely. Decide how many points a pound
+earns, what a point is worth when spent, then add tiers such as Silver and Gold with the spend needed
+to reach each and the multiplier it grants.
+
+**Important fields and filters:** The earn rate and redemption value are the two figures that decide
+what the scheme costs you. Tier thresholds are measured on customer spend; the multiplier applies to
+points earned once a customer is in that tier.
+
+**Switching loyalty off hides it from shoppers.** With loyalty off, every Rewards link, setting
+and help entry disappears from your storefront: the Rewards button, the footer's Rewards link, the
+Loyalty & Rewards tab and card in a shopper's account, the loyalty section of the Help Centre, the
+loyalty wording in your privacy policy and on a shopper's "Your data" page, and points at checkout.
+Switching it back on restores all of them.
+
+**Common mistakes and limitations:** Referrals are part of your loyalty scheme. Switching loyalty
+off also switches off referrals: shoppers' referral links stop working at checkout and no referral
+bonus is paid. Existing balances and referral codes are kept, not deleted, so switching loyalty back
+on makes those links work again. Changing the redemption value changes what **already-earned**
+points are worth, not just future ones — customers holding a balance are affected immediately, so
+treat a reduction carefully. The Reports page shows your outstanding points liability, which is worth
+reading before you raise the earn rate.
+
+**What happens after changes are saved:** New settings apply to checkouts from that point onward, and
+the redemption value applies to every existing balance.
+
+## Storefront — `/staff/storefront`
+
+**Purpose:** Your shop's own identity — its branding colours, logo and homepage copy — the delivery
+rules every order is charged by, the social and contact links shoppers use to reach you, which
+product labels your staff can set, a short description of what you sell, and what your storefront
+footer shows.
+
+**Who can access:** Store admins only
+
+**What you can do:** Pick a ready-made colour theme, set all eight of your brand colours
+individually, upload your logo and your square mark, edit the homepage hero subtitle, the header banner's headline and notice, and
+the search box text shown in the header's search box, set your delivery fee, your free delivery threshold, your minimum delivery order and, if you offer Click & Collect, your collection minimum order, and enter your
+Facebook page address, your Instagram profile address, your WhatsApp number, your WhatsApp community group invite link, and your WhatsApp group QR code image. In the **Product
+labels & store description** form at the bottom of the page, choose which of the six product labels
+(Halal, Fresh, Organic, Vegetarian, Gluten free, HMC certification) your staff see on the product
+form, and write what your store sells. In the **Product grid layout** form below that, choose how
+many product cards sit side by side on your category, search and bundle pages. A shopper who hides the
+filter sidebar on a category or search page sees one more card per row on wide screens. Three footer forms
+follow: in **Footer contact & legal**, enter your phone number, email address, company number, VAT
+number, registered office, a one-line note under your opening hours, and whether to show "Secure
+checkout powered by Stripe". In **Opening hours & payment badges**, set your usual opening and
+closing time for each day of the week (or tick **Closed all day**) and tick which payment-method
+badges (Visa, Mastercard, American Express, Apple Pay, Google Pay) appear in the footer. In
+**Holiday & closure dates**, add a date, a name for it and either different hours or **Closed all
+day** — for a bank holiday, a stocktake or a staff day off.
+
+**Typical workflow:** You do the branding at setup and when it changes. The quickest start is to
+choose a theme from the **Select a theme** list and press **Apply Theme** — that fills all eight
+colour fields for you, and you can then adjust any of them before saving. Otherwise set the colours
+yourself, upload the logo, write the banner note, and check the shop's homepage afterwards.
+Your logo looks best at about 9:5 (for example 900 × 500 pixels). The header shows it in a small
+box, so a very wide logo comes out with tiny text.
+
+**Square mark.** Below the logo, **Square mark** takes a square version of your symbol: an
+initial, an emblem or a monogram. The image must be at least 512 pixels wide or tall. A
+rectangular image is fitted inside the square with space around it, not cropped. Press **Upload
+image** once. From that one upload your shop gets its browser-tab icon, the icon used when a
+shopper adds your shop to their phone's home screen, the picture shown when someone shares a link
+to your shop (for example in WhatsApp), and the logo in the header on phones. On a computer screen
+the header keeps showing your full logo. The link-preview picture uses your saved **Surface Brand Color (Cream)** as it is when you
+upload, so **after changing your colours, upload the mark again** to update it.
+There is no button to remove a mark; upload a new one to replace it.
+Delivery rules are their own form lower down the page with its own Save button — changing your
+delivery fee does not require touching your branding, and saving one does not save the other. Social
+and contact links are a third form below that, again with its own Save button, so you can add a
+Facebook page months after setting your colours without touching anything else.
+
+**Important fields and filters:** Colours are applied across the whole shop, so change one and check
+a product page as well as the homepage. There are eight of them and they do different jobs: the two
+**primary** colours carry headings and text, **accent** and **danger** carry buttons and alerts,
+**cream** is the page background, and the three **tint** colours are the pale backgrounds behind
+badges and notices. Applying a theme overwrites all eight at once. The **banner headline** is the
+first line of the banner at the top of every page, up to 120 characters; leave it blank and the
+banner shows your store name and delivery area (and "click and collect" if you offer it). The
+banner note is a second short line in the site header — a good place for opening hours over a bank
+holiday. The search box text is the
+hint inside the header's search box, up to 80 characters — name a few things you sell, such as
+"Search chargers, earbuds, lamps…"; leaving it empty shows "Search products…". The delivery amounts
+are entered in pounds:
+**Delivery fee** is what a shopper pays for delivery; **Free delivery over** is the basket value at
+which that fee is waived, and leaving it **blank** means free delivery is never offered — which is
+not the same as entering `0`, because `0` would make every order qualify; **Minimum delivery
+order** is the basket value below which a delivery order cannot check out, so enter `0.00` if you do
+not want one. It does not apply to Click & Collect: with **Offer Click & Collect** ticked, a separate
+**Collection minimum order** field appears, and `0.00` there (the starting value) means a
+collection order has no minimum at all. Unticking collection keeps whatever collection minimum you
+had set, for when you turn it back on.
+The three social and contact fields work differently from everything else on this page: **leaving
+one blank hides that link entirely** rather than showing a default, so a shop with no Instagram
+account simply has no Instagram icon anywhere on the storefront. All three links live together in
+one expandable button fixed to the bottom-right corner of every storefront page, above the floating
+cart button — tapping it reveals whichever of Facebook, Instagram and WhatsApp the shop has
+configured. The page footer also shows a Facebook icon when a Facebook page address is set;
+Instagram and WhatsApp appear only in the floating button.
+When the help assistant is switched on (Help Assistant page), the button shows the help assistant
+in place of the WhatsApp icon: shoppers reach your WhatsApp through the assistant, after it has had
+the chance to answer their question. Your Help Centre page has a **Still need help?** card that follows the same
+rule: it opens the help assistant while it is on, links straight to your WhatsApp while it is off,
+and does not appear at all without a WhatsApp number.
+**Facebook page address** and **Instagram profile address** must both be full web addresses
+starting with `https://`. **WhatsApp number** is entered as digits only in international format —
+`447700900123`, not `+44 7700 900123`. **WhatsApp community group link** must be a WhatsApp group
+invite link starting with `https://chat.whatsapp.com/` followed by the invite code; when set, your
+storefront's **Offers & Deals** page (`/whatsapp-offers`) shows a prominent **Join Our WhatsApp
+Group** banner at the top and a secondary join card at the bottom, and leaving it blank hides both
+cards so only your product offers appear. Below the social & contact form, **WhatsApp Group QR
+Code** lets you upload the official WhatsApp group QR code image (PNG, JPEG, or WebP) so desktop
+shoppers can scan to join from the banner on `/whatsapp-offers`, or press **Remove QR code** to
+clear it.
+**Product labels** decide what the product form offers your staff, nothing more. Switching a label
+off hides its tick box on the product form, but **every product keeps the value it already has** —
+saving a product afterwards does not clear it — and your storefront is unchanged: a label still
+shows on exactly the products that carry it. A shop that sells no food can switch all six off.
+**HMC certification needs Halal**: saving it switched on while Halal is off is refused with the
+field marked. When this page was first introduced, each label started switched on only if at least
+one of your products already carried it, so switch on any you need that are off. **What this store
+sells** is one or two sentences, up to 200 characters, such as "Consumer electronics and
+accessories". It is given to the shop's AI features — shopping-list matching, search-word
+suggestions and pack-size suggestions — so they understand what you sell. Leave it blank and they
+use neutral wording.
+**Product grid layout** has three options, each saved with its own **Save Product Grid Layout**
+button. **Standard** is what every shop starts with: 2 cards per row on phones and tablets, 4 on
+laptops and wider screens. **Compact** fits more, smaller cards: 2 per row on phones and tablets, 4
+on laptops and 6 on the widest screens. **Spacious** shows fewer, larger cards: 1 per row on phones,
+2 on tablets and laptops, and 4 on the widest screens. It applies to your category pages, your
+search results and your Value Bundles page, and it changes the layout only: every product still
+shows, and nothing about a product changes. Saving any other form on this page leaves your choice
+alone.
+**The storefront footer** appears at the bottom of every storefront page. Its first column shows
+your shop name and address — taken from the **Collection Location** in the delivery rules form, not
+entered again here — with a **Get directions** link that opens Google Maps, then your phone number
+and email address. Its second column shows your opening hours, Monday to Sunday, with today's day in
+bold; its third column links shoppers to your Help Centre, the delivery and refunds sections of your
+help and terms pages, your loyalty page (only when loyalty is on), and your feedback page, followed
+by round buttons for the same ways to contact you as the floating contact button (Facebook,
+Instagram, WhatsApp, or the help assistant — only the ones that button shows). The bottom bar shows your company number, VAT
+number and registered office, the Terms, Privacy and Cookies links, the Stripe line and the payment
+badges. Like the social links, **leaving a footer field blank hides it** rather than showing a
+default, and a column with nothing in it disappears. A phone number becomes a tap-to-call link and
+an email becomes a link that opens the shopper's email app — but only when it is a real number or
+address. Placeholder text in square brackets, such as `[YOUR EMAIL]`, is shown exactly as typed and
+never as a link, so you can save the form before you have every detail. **Opening hours** are real
+times: each day has an opening and a closing time (closing must be later than opening), or **Closed
+all day**. Leave both times empty to leave a day out of the footer. **Holiday & closure dates**
+change one date only. A date in the next 14 days appears under **Holiday hours**, below the weekly
+hours, for example "Fri 25 Dec · Christmas Day · Closed"; on the day itself it replaces that day's
+usual hours instead. There is one entry per date: saving a date that already has one replaces it,
+which is how you change it. Each upcoming date has a **Delete** button, past dates are tidied away
+automatically, and you can hold up to 50 upcoming dates. Each footer form has its own Save button and
+leaves every other form alone.
+
+**Common mistakes and limitations:** Colour choices affect the readability of text sitting on them.
+After changing a brand colour, look at a real page rather than only the colour swatch. Because your
+branding is applied on top of the site's defaults, a very light or very dark choice can reduce
+contrast for shoppers. Two things about themes are worth knowing: **Apply Theme** replaces all
+eight colours immediately, so anything you had typed in those fields is lost — apply the theme
+first, then adjust. And a theme is only a starting point: once applied, your colours are your own
+and editing one does not "break" the theme or switch you back to it. For delivery, the two mistakes
+worth naming are entering `0` in the free
+delivery field when you meant to leave it blank, and setting a minimum order above what a typical
+basket comes to — that refuses shoppers at checkout rather than warning them earlier. Amounts are
+pounds and pence with at most two decimal places; anything else is refused with the field marked,
+and nothing is saved until every value is valid. For the social and contact fields, the four
+mistakes worth naming are pasting a Facebook or Instagram address that starts with `http://`
+instead of `https://`, which is refused with the field marked; pasting a WhatsApp number or personal
+`wa.me` link into **WhatsApp community group link** instead of a `https://chat.whatsapp.com/...`
+group invite link, which is also refused; typing a WhatsApp number with a plus
+sign, spaces or dashes, which is also refused; and expecting a blank field to fall back to
+something — it does not, it removes the link (and clearing the WhatsApp community group link hides
+the WhatsApp banner on `/whatsapp-offers`, even if a QR code image is still uploaded). As with delivery, nothing in this form is saved until
+every value in it is valid.
+
+**What happens after changes are saved:** Applied across the shop immediately. An uploaded logo may
+take a short time to appear everywhere because images are cached. New delivery rules apply to the
+next basket calculated — a shopper already partway through checkout may still see the previous fee
+until their basket recalculates. Social and contact links appear inside the floating contact button
+on every storefront page as soon as they are saved; clearing a field removes that link from it just
+as quickly. Saving or clearing the WhatsApp community group link or uploading/removing the WhatsApp
+group QR code updates your `/whatsapp-offers` page immediately.
+
+### Marketing consent
+
+**Marketing consent** is a separate section near the bottom of the page, with one checkbox, **Ask
+shoppers for marketing consent**, and a **Save** button. It is off until you switch it on.
+
+When it is on, three things change on your storefront. Account sign-up shows an unticked, optional
+checkbox reading "Email me marketing and promotional offers from" followed by your store's name,
+and "You can change this at any time in your account." Each shopper's **Your data** page gains a
+**Marketing emails** section where they can opt in or withdraw. And your privacy policy says that,
+if a shopper opts in, you may use their details for marketing and promotional purposes, and that
+they can withdraw at any time. Every choice is recorded with when it was made, where (sign-up or
+their account) and the exact wording they saw, and it is included when a shopper downloads or erases
+their data. A choice made before the shopper has verified their email address is recorded but does
+not count as consent until they verify it.
+
+**Nothing sends marketing emails yet.** This section only collects consent; sending will be a later
+change, and it will email only shoppers whose consent counts. **Have the wording reviewed by someone
+with legal knowledge before you switch it on.** Switching it off later hides the sign-up checkbox,
+the privacy wording and the opt-in, but a shopper who is currently opted in can still withdraw from
+their **Your data** page.
+
+## Help Centre Answers — `/staff/faqs`
+
+**Purpose:** Your own answers to the questions shoppers ask you, in your own words, shown on your
+Help Centre page. Nothing here is written for you, and nothing is filled in by default — the
+platform does not put words in your shop's mouth.
+
+**Who can access:** Store admins only
+
+**What you can do:** Add a question and its answer, edit either afterwards, set the order they
+appear in, hide one without deleting it, and delete one outright.
+
+**Typical workflow:** You will not need this for delivery charges, your minimum order, free
+delivery, collection or loyalty — your Help Centre already answers all of those from your own
+settings, exactly as they are, and repeating them here is how the two end up disagreeing. Use this
+for everything else shoppers ask: how you handle a missing item, what to do about a damaged product,
+whether you can put something aside, how long a refund takes. Add them as they come up, newest at
+the bottom, then reorder once you can see which are asked most.
+
+**Important fields and filters:** **Question** is one line, up to 200 characters. **Answer** is
+plain text up to 1,200 characters — line breaks are kept, but styling and links are not shown, so
+write a web address out in full if you need one. **Order** is a whole number from 0 upwards,
+lowest first; two answers sharing a number fall back to alphabetical order by question.
+**Show this on the Help Centre** is ticked by default; unticking it keeps the answer but hides it
+from shoppers. You cannot have the same question twice — saving a question you already use is
+refused, and the fix is to edit the existing one.
+
+**Common mistakes and limitations:** The biggest one is answering a question your settings already
+answer, because your settings change and your typed answer does not. The second is promising
+something the shop cannot deliver through this site: a shopper cannot swap an item for another after
+paying, and cannot cancel a paid order themselves, so an answer saying otherwise sends them to a
+button that does not exist. Hiding an answer is not the same as deleting it — a hidden answer is
+still stored and comes back when you show it again. Deleting is immediate and cannot be undone.
+Answers are per shop: what you write here is never shown on another store on this platform.
+
+**What happens after changes are saved:** The answer appears on, or disappears from, your Help
+Centre page immediately. Hiding the last active answer removes the whole questions section from
+that page rather than leaving an empty heading. Active answers also appear in the help assistant
+when it is switched on (see **Help Assistant** below), from the next time a shopper opens it.
+
+## Help Assistant — `/staff/assistant`
+
+**Purpose:** A guided help assistant on your storefront, and a report of what shoppers ask it. A
+shopper picks a topic and sees the answer, or taps through to message you on WhatsApp with a short
+summary of what they picked. It answers from your own settings and your Help Centre answers only;
+it does not make anything up, and shoppers cannot type into it.
+
+**Who can access:** Store admins only
+
+**What you can do:** Switch the help assistant on or off for your storefront with **Show the help
+assistant** and **Save**. Read how many conversations it had in the last 90 days, how many were
+answered, handed off to WhatsApp or left without an answer, the same split for each topic, and the
+ten questions most often handed off.
+
+**Typical workflow:** Make sure your WhatsApp number is set on the Storefront page, then switch the
+assistant on. After a few weeks, read the report: a question that keeps being handed off is one
+shoppers want answered, so add an answer for it on **Help Centre Answers**. The assistant picks it up
+the next time a shopper opens it.
+
+**Important fields and filters:** The assistant offers delivery charges and minimums, discount
+codes, where an order is, swapping an item, cancelling a paid order and "something else" in every
+store. It adds Click & Collect only if you offer collection, rewards only if your loyalty scheme is
+on, and one entry for each of your active Help Centre answers. Swapping an item and cancelling a paid
+order always go to WhatsApp, because neither can be done through this site. A signed-in shopper can
+pick one of their own recent orders to mention; its order number is the only order detail sent.
+
+**Common mistakes and limitations:** With no WhatsApp number, the assistant stays hidden even when
+switched on, and this page says so. The WhatsApp message is a starting point the shopper can edit,
+not a copy of the conversation. The report shows topics and outcomes, never who asked: no
+conversation is linked to a shopper's name or account, and each is deleted after 90 days.
+
+**What happens after changes are saved:** The help assistant appears on, or disappears from, your
+storefront's contact button on the next page a shopper loads. While it is on, the button's direct
+WhatsApp icon is hidden, because the assistant hands shoppers to WhatsApp itself; switch the
+assistant off and the WhatsApp icon returns. The Help Centre's **Still need help?** card switches the same way, between
+**Open the help assistant** and a direct WhatsApp link. The report updates as conversations
+happen.
+
+## AI Allowance — `/staff/ai-usage`
+
+**Purpose:** How much of today's AI allowance your store has used. Several features use AI: Shop
+your list, search dictionary suggestions, net content suggestions, and product and department
+campaign images. Each draws on a daily budget measured in neurons (Cloudflare's unit). This page
+shows where the budget has gone, so you can tell before pressing an AI button whether it will run.
+
+**Who can access:** Store admins only
+
+**What you can do:** Read today's neurons used against your store's daily budget and how many are
+left; a table of each AI feature's use today and over the last seven days; and which Workers plan
+the platform runs on. You cannot change the budget here: a platform admin sets it, because it limits
+spend the platform pays for.
+
+**Typical workflow:** Before a large image backfill or a net content run, open this page and check
+how much budget is left. If a feature keeps running out, ask your platform admin to raise the
+budget.
+
+**Important fields and filters:** **Today** is your store's use since 00:00 UTC against its daily
+budget. **Plan** is Free or Paid. On Free, the page also shows the shared allowance every store
+draws on (10,000 neurons a day); when it runs out, AI pauses for every store until 00:00 UTC, even
+one with budget left. **By feature** lists every AI feature, including ones that used nothing.
+"Last 7 days" means today and the six days before it, in UTC.
+
+**Common mistakes and limitations:** All figures reset at 00:00 UTC, which is 1 am in UK summer
+time. A budget of 0 switches AI off for your store; the features keep working without it (for
+example, Shop your list falls back to its plain matcher). Some figures are estimates where
+Cloudflare does not report an exact cost, so treat them as close, not exact. The page has no filters
+and no history beyond seven days.
+
+**What happens after changes are saved:** You cannot change anything here. The figures update as
+AI features run; reload to see the latest.
+
+## Delivery areas — `/staff/delivery-areas`
+
+**Purpose:** The postcode areas and districts your shop delivers to, what delivery costs in each,
+and which districts outside them customers have tried. The list is a hard gate on checkout, not a
+guideline.
+
+**Who can access:** Store admins only
+
+**What you can do:** Add postcode areas or districts — one at a time, as a comma-separated list, or
+as a range; give any area or district its own delivery charge, minimum order and free-delivery
+threshold; remove an area; and see the districts you turned away in the last 30 days.
+
+**Typical workflow:** You extend delivery to part of a new town. Add its districts here (for example
+`MK1-MK10`), and customers in them can immediately check out. The examples shown on the page itself
+use your own shop's postcode area — your store postcode's area, or else the first area you already
+deliver to. If the outlying ones cost more to
+reach, open **Edit charges** on those rows and set a higher delivery charge. Check the
+**Districts you turned away** table now and then to see where customers are asking for delivery.
+
+**Important fields and filters:**
+
+- **Area or district.** An area is the letters at the start of a postcode, such as `MK`, and covers
+  every district in it. A district is an area plus its number, such as `MK9`, and covers only that
+  one — `MK9` does not include `MK91` or `MK17`. If both an area and one of its districts are
+  listed, the district's charges apply to it.
+- **Lists and ranges.** Separate several entries with commas (`MK1, MK3, MK5`), or give a range with
+  both ends written in full (`MK1-MK10`). A range covers every numbered district between the two,
+  inclusive. You can add at most 100 in one go. Districts ending in a letter, such as `EC1A`, must be
+  added one at a time.
+- **Leaving a district out.** There is no "exclude" setting. To deliver to all of an area except one
+  district, list the districts you do serve instead of the area itself — `MK1-MK16, MK18, MK19`
+  rather than `MK`.
+- **Charges per area (optional).** Delivery charge, minimum order and "free delivery over". Leave a
+  field blank to use the store's defaults from **Storefront** — each field falls back on its own, so
+  you can raise just the delivery charge. `£0` means: free delivery (charge), no minimum (minimum),
+  or free delivery **not offered** in that area (free-delivery threshold). Charges apply to
+  delivery orders only. Click & Collect is never priced per area: it has no delivery charge, and its
+minimum is the **Collection minimum order** set on **Storefront**, not the delivery minimum. When you add several areas
+  at once, the charges you enter apply to every new one; any that were already listed keep their
+  existing charges, and the confirmation says so.
+
+**Common mistakes and limitations:** **A customer whose postcode matches nothing here cannot complete
+a delivery order at all** — they can browse and fill a basket but will be refused at the end.
+Removing an area is therefore an immediate loss of trade in it, not a soft change. You cannot remove
+your last remaining area: with none left, every postcode would be undeliverable and no customer could
+order. Replacing `MK` with a list of districts is safest done by adding the districts first and
+removing `MK` last. If a customer's checkout address is in an area with different charges from the
+postcode they entered earlier, checkout stops and asks them to review the updated total before
+placing the order.
+
+**Districts you turned away:** Counts, per district, of real postcodes outside your list that
+customers entered — in the header postcode box or at checkout — over the last 30 days. Mistyped or
+unrecognised postcodes are not counted. It holds **no personal data**: only the district (such as
+`MK17`) and the day, never a full postcode, a name, an account or an IP address, so it does not
+appear in customer data exports or erasure requests.
+
+**What happens after changes are saved:** Effective immediately for every shopper, including ones
+already mid-basket.
+
+## Fulfilment — `/staff/fulfilment`
+
+**Purpose:** When customers can receive their orders — the delivery and collection time windows they
+choose between at checkout, and the hours express collection is offered.
+
+**Who can access:** Store admins only
+
+**What you can do:** Switch delivery time slots on or off; switch 60-minute express collection on or
+off; set how far ahead customers can book and how long an unpaid order holds its slot; set your
+store's time zone; add and remove weekly delivery and collection slots; add and remove express
+windows.
+
+**Typical workflow:** You decide to start offering Saturday morning delivery. Add a slot for Saturday
+from 09:00 to 12:00 with a capacity of 12, and it appears at checkout for the next Saturday inside
+your booking window.
+
+**Important fields and filters:** **Capacity is the number of orders you can fulfil in that window**,
+and once it is full the slot stops being offered — it is the only thing preventing a day taking more
+orders than you can physically deliver. Slots repeat every week; there is no one-off or holiday slot.
+Times are 24-hour, so afternoon slots start at 13:00 rather than 1:00. **The booking window** is how
+many days ahead a customer may book. **The slot hold** is how long an unpaid order keeps its space
+before it is released for someone else. **The time zone** is your store's own clock: it decides
+which calendar day a slot falls on for a customer booking from anywhere in the world, and how the
+start and end times you type on campaigns and discount codes are read. Leave it at `Europe/London`
+unless your shop is genuinely in another zone.
+
+**Common mistakes and limitations:** **If delivery time slots are switched on but no delivery slots
+exist, customers see "No slots available" and cannot choose a time** — switching the feature on is
+only half the job. **Collection is the same trap with no switch to catch it**: whenever Click &
+Collect is on, a customer choosing Collection always sees the time picker — there is no
+"offer collection slots" toggle the way there is for delivery — so a store that offers collection
+but hasn't added any Collection-method weekly slots shows every collection customer "No slots
+available" until slots are added here. Add at least one slot of each method you offer before
+turning a fulfilment method on for customers. Express collection also needs Click & Collect switched
+on in **Storefront** under delivery rules; without it the express control here is disabled, because
+express is only ever offered to collection customers. An express window only shows a customer
+express collection while the current time is inside it — a window that has passed today shows
+nothing until it comes round again next week. Removing a slot does not move orders already booked
+into it. **Changing the time zone does not move slots or orders already booked** — the times you
+typed stay the numbers you typed, and they are simply read as that new zone's clock from then on,
+so a store that genuinely moves zone should check its weekly slots still say what it means.
+
+**What happens after changes are saved:** Effective immediately at checkout, for shoppers already
+mid-basket as well as new ones. Orders already placed against a slot keep it.
+
+> **Note on operational rules:** For details on how time slots interact with order states and cancellations, see the canonical [Order & Fulfilment Operations](/staff/runbook/order-fulfilment-core) guide.
+
+## Reports — `/staff/reports`
+
+**Purpose:** The numbers for your shop — sales, catalogue health and loyalty liability.
+
+**Who can access:** Store admins only
+
+**What you can do:** Read the figures. This page has no controls and nothing to edit.
+
+**Typical workflow:** A weekly read. Check revenue and average basket, then look at the out-of-stock
+and low-stock counts to see what needs reordering.
+
+**Important fields and filters:** **Total revenue and total orders count only orders that were
+actually paid for** — confirmed, out for delivery, and delivered. Abandoned checkouts and cancelled
+orders are deliberately excluded, because including them once overstated revenue substantially.
+Average basket value is derived from those same two figures. Low stock counts products at or below
+their own threshold, and out-of-stock products are counted once rather than in both figures.
+
+**Common mistakes and limitations:** These totals are for all time, not a selected period — there is
+no date range on this page. The figures cannot currently be clicked through to the underlying orders,
+so to see the orders behind a number, use the Orders page's own status filter. Note that the Orders
+page's default view is narrower than the revenue figure here, so the two will not match unless you
+filter deliberately.
+
+**What happens after changes are saved:** Nothing is editable. Figures reflect the database at the
+moment you loaded the page; refresh for current numbers.
+
+## Customers — `/staff/customers`
+
+**Purpose:** Who buys from your shop, what they have spent, and where they stand in the loyalty
+scheme.
+
+**Who can access:** Store admins only
+
+**What you can do:** Browse the customer list and open a customer to see their detail.
+
+**Typical workflow:** You want to understand your regulars, or check a specific customer's history
+before a conversation with them.
+
+**Important fields and filters:** The list carries contact details alongside spend and loyalty
+standing, which is why it is restricted to store admins rather than being visible to staff.
+
+**Common mistakes and limitations:** This is personal data. Open a customer's record when you have a
+reason to, not out of curiosity, and do not export or forward it. Pages in this panel are marked as
+not cacheable so they are not stored by browsers or proxies, but that protects the data in transit,
+not what you do with it once you have read it. There is no control here to edit a customer's details
+or adjust their points.
+
+**What happens after changes are saved:** Nothing is editable from this page.
+
+
+## Team & Access — `/staff/team`
+
+**Purpose:** Give a colleague access to the panel, change their level of access, or take it away.
+
+**Who can access:** Store admins only
+
+**What you can do:** Grant the Staff role to a registered account by email address, and revoke access
+from someone who has it.
+
+**Typical workflow:** A new colleague starts. **Ask them to register an account on the shop
+themselves first**, using the email address you will grant access to. Once they have registered, come
+here, enter that email address, choose Staff, and save.
+
+**Important fields and filters:** People are identified by the email address on their account, and
+that account must already exist. The role options are Staff and Revoke access.
+
+**Common mistakes and limitations:** **Entering the email of someone who has not registered fails
+with "User not found"** — that is not a fault, it means they have not created their account yet.
+**As a store admin you can grant the Staff role only.** Making someone a store admin requires a
+platform administrator, so the Store Admin option does not appear for you. You also cannot change the
+privileges of a platform administrator, and the system will not let the shop be left with no store
+admin at all, so you cannot remove your own admin access if you are the last one.
+
+**What happens after changes are saved:** Access changes immediately — the person sees the panel on
+their next page load, or loses it. Every change is recorded in an audit log with who made it.
+
+
+
+## Payment Issues — `/staff/payments`
+
+**Purpose:** Find orders where the payment did not complete cleanly, and get them unstuck. Without
+this page an affected order sits in *Pending payment* forever, quietly holding its stock.
+
+**Who can access:** Store admins only
+
+**What you can do:** See each payment event the system refused, re-check it against the payment
+provider, and recover the order it left stranded. See the orders the scheduled payment check stopped
+retrying, and retry them.
+
+**Typical workflow:** A customer says they paid but their order still shows as awaiting payment.
+Open this page, find their order, and use the reconcile control to ask the payment provider what
+really happened. If the payment did go through, recover the order so it moves on to *Confirmed* and
+reaches your picking queue.
+
+**Important fields and filters:** The page lists the 50 most recent refusals for this store. Each row
+shows the order it relates to and the amount, so you can match a customer's phone enquiry to a row
+quickly.
+
+**Orders the payment sweep stopped retrying:** A second list, below the refusals. A scheduled check
+asks the payment provider about orders that are still awaiting payment. If the provider keeps failing,
+or rejects the lookup outright, the check stops asking and the order appears here with the reason, the
+provider's error code, how many times it tried, and when it stopped. Nothing has been charged or
+cancelled because of this. Check the order at the payment provider first, then press **Retry** to make
+the scheduled check ask again on its next run (within about 15 minutes). The order number links to the
+order's own page.
+
+**Common mistakes and limitations:** This page shows payments the system actively **refused**, not
+every order stuck in *Pending payment*. An order whose payment notification simply never arrived is
+picked up automatically by a scheduled check instead, so a missing row does not mean nothing is
+wrong. Escalate rather than cancelling an order the customer insists they paid for. Refusals that
+could not be matched to any order do not appear here at all — they are kept for investigation and are
+not something you can action.
+
+**Checking one order from its own page:** You do not need to wait for the scheduled check. Open the
+order from Fulfillment & Orders. While it is still *Pending payment*, the order page shows a **Check
+payment now** button, which asks the payment provider about that order straight away. If the payment
+went through, the order moves to *Confirmed* and the customer is sent their confirmation email. If it
+did not, the page tells you what the provider reported, and nothing is changed: this button never
+cancels an order or refunds a payment. Once an order is paid, the same page instead shows **Resend
+confirmation email**, for a customer who says the email never arrived. It sends the confirmation to
+the email address on the order. Check that address first if they still do not receive it. Both buttons
+are for store admins only; staff accounts do not see them. Customers coming back from the payment
+page are checked automatically, so most "I paid but it still says pending" cases resolve themselves
+within seconds.
+
+**What happens after changes are saved:** Reconciling asks the payment provider and updates the order
+to match reality — it never assumes. Recovering a genuinely paid order moves it into the normal flow,
+where it shows up in Fulfillment & Orders like any other confirmed order. Running the same action
+twice is safe and will not double-charge or double-confirm anything.
+
+> **Note on operational rules:** For details on how recovered payments enter the order lifecycle, see the canonical [Order & Fulfilment Operations](/staff/runbook/order-fulfilment-core) guide.
+
+
+
+## Import stock file — `/staff/products/import`
+
+**Purpose:** Bulk import product lines, departments, and initial prices from client stock spreadsheets (`.csv`, `.xlsx`, `.xls`) without manual per-item data entry.
+
+**Who can access:** Store admins only
+
+**What you can do:** Upload stock files up to 10,000 rows. View an in-memory preview of candidate additions, categories, matching existing records, duplicate rejects, and ADR-007 restriction classifications before any database write. Confirm and commit verified changes.
+
+**Typical workflow:** Select or drop a `.csv`, `.xlsx`, or `.xls` stock sheet. Inspect the preview metrics and rejection table to ensure columns and rows mapped correctly. Once satisfied, click "Confirm & Apply Changes". Review the execution receipt, then navigate to `/staff/products` to review and publish lines.
+
+**Important fields and filters:** The file must include columns for item code/PLU, description/name, retail price, and department. Sub-department and VAT rate columns are optional. Payloads exceeding 10,000 rows are refused.
+
+**Common mistakes and limitations:** Imported stock quantities and negative EPOS till numbers are never imported as live inventory. All imported products are created hidden (`isActive: false`) with stock mode `UNKNOWN` and quantity 0. You must manually publish products and set tracked stock. Re-importing existing products will never overwrite existing prices, manual descriptions, or unhide inactive products; it will only tighten restrictions.
+
+**What happens after changes are saved:** Products and categories are created inside per-department interactive transactions. Restrictions are logged to the immutable `ProductRestrictionAuditLog`. New products appear immediately in the `/staff/products` admin catalogue list under the Hidden filter, ready for staff review and activation.
+
+
+
+## Onboarding Readiness — `/staff/onboarding`
+
+**Purpose:** Comprehensive audit dashboard tracking all required storefront configuration, benchmarked against `https://aheedfoodcentre.nocaped.com/`, with completion percentage and launch readiness status.
+
+**Who can access:** Store admins only
+
+**What you can do:** Audit store configuration across 8 key operational domains, track completion progress toward launch readiness, review validation rules for missing fields, and deep-link directly to administrative screens to configure outstanding items.
+
+**Typical workflow:** When onboarding a new vendor or reviewing store configuration before public launch, open this dashboard. Check the overall completion percentage and readiness status (`LAUNCH_READY`, `NEEDS_ATTENTION`, `IN_PROGRESS`). Filter by "Action Required (Missing)" to identify unconfigured essential settings. Click "Configure →" beside any item to navigate directly to its configuration tab. Revisit the dashboard to verify 100% completion before marketing the store.
+
+**Important fields and filters:** Filters allow viewing All Items, Action Required (Missing), Configured, or Planned/External. Audited categories cover Storefront Identity & Chrome, Visual Theme & Brand Primitives, Storefront Copy & Badges, Fulfilment & Delivery, Footer Location & Legal Compliance, Customer Communication, Catalogue & ADR-007 Inventory Safeguards, and Platform Infrastructure.
+
+**Common mistakes and limitations:** This dashboard is a read-only audit and benchmarking view; it displays live data and direct links to editing forms, but does not edit records directly. Planned features (such as Cloudflare Email Sending #1217, live Stripe keys #113, and external apex DNS) are clearly marked and do not block in-app configuration.
+
+**What happens after changes are saved:** After configuring settings on their respective tabs (such as Storefront, Delivery areas, Fulfilment, or Team & Access), returning to the Onboarding Readiness dashboard automatically recalculates the completion percentage and updates the readiness status in real time.
+
+
+
+
+
+
+---
+
+## Feature Catalogue - `/staff/feature-catalogue`
+
+**Purpose:** A structured reference of what the platform does today, written for demonstrations. It
+is organised by who uses it (Customer, Admin, Staff, Platform Admin), then by business area, then by
+feature. Each feature opens with what it does and why, then its business value and a short demo
+talking point.
+
+**Who can access:** Store admins only
+
+**What you can do:** Read the catalogue, jump between roles with the buttons under the heading, open a
+feature's page from its card, and check the "Not ready to demonstrate" table for anything partial or
+unavailable. The page is read-only.
+
+**Typical workflow:** Before a demonstration, open the page and scan the three status counts. Pick the
+role you are showing, follow its areas in order, and use each card's demo line as the talking point.
+Check "Not ready to demonstrate" before you promise anything.
+
+**Important fields and filters:** **Live** works end to end. **Partial** is real but conditional, for
+example a per-store switch that is off by default or an owner-only setup that is not done; the card
+says what is missing. **Unavailable** is not built or not usable yet. There are no filters.
+
+routes and for menu pages being listed; it cannot prove a description is still true, so tell a
+developer if you find one that is wrong. Some Platform Admin features need a platform admin to open;
+this page lists them but does not grant access to them.
+
+**What happens after changes are saved:** Nothing is saved here. The page changes only when a
+developer edits the catalogue and deploys it.
+
+### Sanity check: Feature Catalogue (`#1374`)
+
+Run after deploying changes to `/staff/feature-catalogue` or `features/feature-catalogue/`. Last run: 2026-10-31, after PR #1375 (`14b61da`): all passed.
+
+| # | Check | Expect |
+|---|---|---|
+| 1 | `npx vitest run --maxWorkers=4 tests/feature-catalogue.test.ts` | 95 tests pass; all routes and menu pages verified |
+| 2 | `npx vitest run --maxWorkers=4 tests/operator-doc-coverage.test.ts` | All operator doc coverage tests pass |
+| 3 | `curl.exe -sS -I https://aheed-staging.merqify.com/staff/feature-catalogue` | Anonymous request returns `307 Temporary Redirect` to `/login` |
+| 4 | Sign in to staging as `demo-admin@merqify.com` and open `/staff/feature-catalogue` | HTTP 200; renders Customer, Admin, Staff, Platform Admin sections and 'Not ready to demonstrate' table |
+| 5 | Sign in to staging as `demo-staff@merqify.com` and open `/staff/feature-catalogue` | HTTP 200; renders 'Admin only' PanelRefusal ('This area is restricted to store administrators') |
+

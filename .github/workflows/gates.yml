@@ -1,0 +1,37 @@
+name: gates
+on:
+  pull_request:
+    branches: [staging, main]
+
+jobs:
+  # The five shared checks live in quality.yml so `deploy-production` runs the exact
+  # same set (P9.2, #435). Do not re-add them here — two copies drift.
+  quality:
+    uses: ./.github/workflows/quality.yml
+
+  # PR-only gate. Gate 4 needs `github.base_ref` to diff against, which a push event does
+  # not have, so it cannot move into the reusable workflow.
+  #
+  # The two KMS checks that used to live here moved into `quality.yml` in #537/#473. The
+  # reason they were kept out — that the ARTIFACT_INDEX.md staleness check also needed
+  # `github.base_ref` — was simply untrue: it copied a file, regenerated, and diffed,
+  # reading no base ref at all. That false claim was written here, in `quality.yml` and in
+
+  docs-gates:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Gate 4 — CHANGELOG updated on this branch
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -qx 'CHANGELOG.md'; then
+            echo "CHANGELOG.md updated ✓"
+          else
+            echo "::error::Gate 4 failed — CHANGELOG.md was not updated on this branch."
+            exit 1
+          fi

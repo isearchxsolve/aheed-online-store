@@ -1,0 +1,445 @@
+/**
+ * SDD loop forcing function — one check, two entry points.
+ *
+ *   npm run sdd:preclear   Before a Clear: is everything load-bearing actually on disk?
+ *   npm run sdd:audit      At Orient: did the last shipped slice — and the last promotion
+ *                          (staging → main) — get its roadmap entry? (#207) And is the
+ *                          stakeholder business case current for the milestone that closed
+ *                          most recently? (#777)
+ *
+ * The loop's whole bet is "persist before clear" and "documentation actually lands".
+ * Both were prose in specs/sdd-workflow.md, which is how three slices (P3a/P3b/P3c)
+ * shipped with no roadmap change-log entry. This turns both into exit codes.
+ *
+ * Base-ref resolution, the offline no-block posture, and the --no-verify style escape
+ * hatch are copied from hooks/pre-push (Gate 4) so all the SDD checks behave alike.
+ */
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { ROOT } from "../kms/schema/repo";
+import { checkGeneratedArtefacts } from "../kms/scripts/check-generated";
+import {
+  auditPromotions,
+  missingPromotionRows,
+  type Promotion,
+  type PromotionVerdict,
+} from "./sdd-promotions";
+import { BUSINESS_CASE_PATH, auditBusinessCase } from "./sdd-business-case";
+
+/**
+ * Slices at or before this one predate the loop (specs/sdd-workflow.md 2.0.0) and are
+ * deliberately NOT audited — retroactively policing them would report gaps nobody
+ * agreed to fill. Slice dirs are YYYY-MM-DD-prefixed, so a lexicographic compare is
+ * chronological. Caveat: two slices created on the same day order by slug, so a
+ * same-day sibling could sort either side of this. The audit reports rather than
+ * blocks, so that's tolerable; bump this constant when a phase closes.
+ *
+ * SDD_LOOP_BASELINE overrides it, so the audit can be exercised against slices whose
+ * outcome is already known instead of only ever being run on the live repo state.
+ */
+const LOOP_BASELINE_SLICE = process.env.SDD_LOOP_BASELINE ?? "2026-08-10-p3d-shop-your-list";
+
+const REQUIRED_SPEC_FILES = ["plan.md", "requirements.md", "validation.md", "build-notes.md"];
+
+/** Must match specs/templates/feature-spec/build-notes.md — the template is this check's contract. */
+const REQUIRED_BUILD_NOTE_HEADINGS = [
+  "## What changed and why",
+  "## Decisions taken during the build",
+  "## Deviations from the spec",
+  "## Known-shaky areas",
+];
+
+const SLICE_DIR = /^\d{4}-\d{2}-\d{2}-/;
+
+function sh(cmd: string): string | null {
+  try {
+    return execSync(cmd, {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** origin/staging, else origin/main, else null (offline — callers must not block). */
+function resolveBaseRef(): string | null {
+  for (const ref of ["origin/staging", "origin/main"]) {
+    if (sh(`git rev-parse --verify ${ref}`)) return ref;
+  }
+  return null;
+}
+
+function sliceDirs(): string[] {
+  const specs = join(ROOT, "specs");
+  return readdirSync(specs)
+    .filter((d) => SLICE_DIR.test(d) && statSync(join(specs, d)).isDirectory())
+    .sort();
+}
+
+function fail(msg: string): void {
+  console.error(`  ✘ ${msg}`);
+}
+
+function pass(msg: string): void {
+  console.log(`  ✓ ${msg}`);
+}
+
+/** Rebuilds EVERY generated KMS artefact and diffs each against what's on disk — the same check
+ * CI's `quality` workflow runs, moved earlier so it can't surface for the first time on an open PR
+ * (#132: P4b lost a CI run and a fix commit to exactly that). Returns the paths that drifted.
+ *
+ * This used to rebuild and diff ARTIFACT_INDEX.md alone, while `npm run kms:build-index` writes
+
+ * this very function on every run and then left modified, since only the index was ever restored —
+ * so a stale docs.ts showed up as an unexplained dirty file with nothing tying it to the index,
+ * and the clean-tree check below blamed whatever the session happened to be doing. Both the file
+ * list and the restore behaviour now live in `kms/scripts/check-generated.ts`, which derives the
+ * list from the generator itself, so a third output cannot go unwatched here again. */
+function staleGeneratedArtefacts(): string[] {
+  return checkGeneratedArtefacts()
+    .filter((r) => r.drifted)
+    .map((r) => r.path);
+}
+
+// ------------------------------------------------------------- promotions
+
+/**
+ * Merged `staging → main` PRs since the loop baseline, newest-first from `gh`.
+ *
+ * Returns null — not an empty list — when `gh` is missing, unauthenticated, or errors.
+ * The distinction matters: an empty list means "no promotions to check", while null means
+ * "couldn't look", and only the former should ever be reported as a clean result. Matches
+ * hooks/pre-push's posture: resolve what you can, otherwise don't block.
+ */
+function listPromotions(sinceDate: string): Promotion[] | null {
+  const raw = sh(
+    "gh pr list --base main --state merged --limit 60 --json number,mergeCommit,mergedAt",
+  );
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      number: number;
+      mergeCommit: { oid?: string } | null;
+      mergedAt: string;
+    }[];
+    return parsed
+      .filter((p) => typeof p.mergedAt === "string" && p.mergedAt.slice(0, 10) >= sinceDate)
+      .map((p) => ({
+        number: p.number,
+        mergeSha: p.mergeCommit?.oid ?? null,
+        mergedAt: p.mergedAt,
+      }));
+  } catch {
+    return null;
+  }
+}
+
+function reportPromotions(roadmapText: string): number {
+  console.log("promotions (staging → main) since the baseline:");
+
+  const sinceDate = LOOP_BASELINE_SLICE.slice(0, 10);
+  const promotions = listPromotions(sinceDate);
+
+  if (promotions === null) {
+    console.log("  skipped — `gh` unavailable, unauthenticated, or returned no usable JSON.");
+    console.log("  Not treated as a failure: this check needs the GitHub API and the audit");
+    console.log("  must stay runnable offline. Re-run once `gh auth status` succeeds.");
+    return 0;
+  }
+  if (promotions.length === 0) {
+    console.log(`  none merged since ${sinceDate}.`);
+    return 0;
+  }
+
+  // Carry-forward: a promotion merged after the roadmap was last touched can't have a row
+  // yet, by construction — its row rides the next slice's branch.
+  const lastRoadmapEdit = sh("git log -1 --format=%cI -- specs/roadmap.md");
+  const verdicts: PromotionVerdict[] = auditPromotions(promotions, roadmapText, lastRoadmapEdit);
+
+  for (const { promotion, cited, pending } of verdicts) {
+    const sha = promotion.mergeSha ? promotion.mergeSha.slice(0, 7) : "unknown";
+    const label = `PR #${promotion.number} (merge ${sha}, ${promotion.mergedAt.slice(0, 10)})`;
+    if (cited) pass(`${label} — cited by a roadmap change-log row`);
+    else if (pending)
+      console.log(`  · ${label} — merged after the last roadmap edit; row pending carry-forward`);
+    else fail(`${label} — NO roadmap change-log row cites it`);
+  }
+
+  const missing = missingPromotionRows(verdicts);
+  return missing.length;
+}
+
+// ------------------------------------------------------------ business case
+
+/**
+ * Is the stakeholder business case current for the milestone the roadmap says closed most
+ * recently? (#777)
+ *
+ * **Expect this to report a gap DURING a milestone close, and read that as the check working.**
+ * `/document` writes the roadmap closure row at step 4, and the business case review happens
+ * after `/learn`, later in the same close — so between those two points the artifact genuinely
+ * is stale, and saying so is the entire point. The close is not finished until `sdd:audit` exits
+ * 0 again. The alternative — suppressing the report while a close is in flight — would require
+ * this function to know which stage it is running in, which it cannot, and would silently cover
+ * the exact case of a close abandoned halfway.
+ */
+function reportBusinessCase(roadmapText: string): number {
+  console.log("stakeholder business case (reviewed at every milestone close):");
+
+  const path = join(ROOT, BUSINESS_CASE_PATH);
+  const text = existsSync(path) ? readFileSync(path, "utf8") : null;
+  const verdict = auditBusinessCase(text, roadmapText);
+
+  switch (verdict.kind) {
+    case "missing":
+      fail(`${BUSINESS_CASE_PATH} is MISSING — the milestone-close review has nothing to update`);
+      return 1;
+    case "unparseable":
+      fail(
+        `${BUSINESS_CASE_PATH} has no parseable "| **Last reviewed** | YYYY-MM-DD |" row — ` +
+          "a typo here would silently disable this check, so it is reported as a gap",
+      );
+      return 1;
+    case "stale":
+      fail(
+        `${BUSINESS_CASE_PATH} last reviewed ${verdict.lastReviewed}, but a milestone closed on ` +
+          `${verdict.closure.date} — run the milestone-close review (specs/sdd-workflow.md)`,
+      );
+      console.error(`      closure row: ${verdict.closure.row.slice(0, 160)}`);
+      return 1;
+    case "ok":
+      pass(
+        `reviewed ${verdict.lastReviewed}` +
+          (verdict.milestoneAssessed ? ` against ${verdict.milestoneAssessed}` : "") +
+          (verdict.closureDate ? ` (newest phase closure ${verdict.closureDate})` : ""),
+      );
+      return 0;
+  }
+}
+
+// ---------------------------------------------------------------- preclear
+
+function preclear(): number {
+  console.log("sdd:preclear — is everything load-bearing on disk before the Clear?\n");
+
+  console.log("generated KMS artefacts:");
+  let failures = 0;
+  const stale = staleGeneratedArtefacts();
+  if (stale.length > 0) {
+    for (const path of stale) fail(`${path} is stale`);
+    fail("run `npm run kms:build-index` and commit the result (this is what CI's quality");
+    fail("workflow would also fail on — catching it here saves the round trip)");
+    failures++;
+  } else {
+    pass("all current (content-wise; the index footer is normalised)");
+  }
+  console.log("");
+
+  const baseRef = resolveBaseRef();
+  if (!baseRef) {
+    console.log("  neither origin/staging nor origin/main resolves (offline?) — not blocking on");
+    console.log("  the branch checks below, but the generated-artefact result above still stands.");
+    if (failures > 0) console.error(`\nNOT safe to /clear — ${failures} check(s) failed.`);
+    return failures > 0 ? 1 : 0;
+  }
+
+  const base = sh(`git merge-base HEAD ${baseRef}`);
+  const head = sh("git rev-parse HEAD");
+  if (!base || base === head) {
+    console.log(`  nothing to check relative to ${baseRef} — not blocking on the branch checks`);
+    console.log("  below, but the generated-artefact result above still stands.");
+    if (failures > 0) console.error(`\nNOT safe to /clear — ${failures} check(s) failed.`);
+    return failures > 0 ? 1 : 0;
+  }
+
+  const committed = (sh(`git diff --name-only ${base}...HEAD`) ?? "").split("\n").filter(Boolean);
+  const porcelain = (sh("git status --porcelain") ?? "").split("\n").filter(Boolean);
+  const dirtyPaths = porcelain.map((l) => l.slice(3).trim());
+
+  // A slice is "under work" when one of its FOUR SPEC FILES was ADDED on this branch — not
+  // merely when some file inside its directory changed (#861 R2a).
+  //
+  // The old rule matched any changed path under specs/<date-slug>/. That was fine while no slice
+  // had ever edited an older slice's files, and wrong the moment one did: #861's U7 revert stripped
+  // front-matter from 18 files across 7 historical slice directories, and pre-clear then demanded
+  // the full four-file contract from slices that shipped in August — 2026-08-21-view-switcher has
+  // no validation.md, two slices have no build-notes.md, and
+  // 2026-08-22-ui-polish-docs-integration's build-notes.md pre-dates the four required headings.
+  // All four gaps exist on origin/staging; none was introduced by the branch being checked.
+  //
+  // Turning those green would have meant inventing a validation record for work nobody validated
+  // that way. The gate's purpose is that the slice UNDER WORK is fully on disk before a Clear, and
+  // a months-old slice whose front-matter this branch happens to strip is not under work.
+  //
+  // Additions only, so a branch that merely edits an existing slice (a Document pass, a fix to an
+  // older spec) reports no slice and falls through to the not-blocking path below — while an
+  // uncommitted, still-untracked new spec folder is caught, preserving the original intent.
+  const committedAdds = (sh(`git diff --name-status --diff-filter=A ${base}...HEAD`) ?? "")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.split("\t")[1])
+    .filter(Boolean);
+  const uncommittedAdds = porcelain
+    .filter((line) => line.startsWith("??") || line.slice(0, 2).includes("A"))
+    .map((line) => line.slice(3).trim());
+
+  const sliceSpecFile = new RegExp(
+    `^specs/(\\d{4}-\\d{2}-\\d{2}-[^/]+)/(?:${REQUIRED_SPEC_FILES.join("|").replace(/\./g, "\\.")})$`,
+  );
+  const slices = [
+    ...new Set(
+      [...committedAdds, ...uncommittedAdds]
+        .map((p) => sliceSpecFile.exec(p)?.[1])
+        .filter((s): s is string => Boolean(s)),
+    ),
+  ].sort();
+
+  if (slices.length === 0) {
+    console.log(`  no specs/<date-slice>/ touched on this branch (vs ${baseRef}) — not blocking`);
+    console.log("  on the slice checks below (a docs-only or tooling branch has no slice to");
+    console.log("  pre-check), but the generated-artefact result above still stands.");
+    if (failures > 0) console.error(`\nNOT safe to /clear — ${failures} check(s) failed.`);
+    return failures > 0 ? 1 : 0;
+  }
+
+  for (const slice of slices) {
+    console.log(`slice: specs/${slice}/`);
+    for (const file of REQUIRED_SPEC_FILES) {
+      const full = join(ROOT, "specs", slice, file);
+      if (!existsSync(full)) {
+        fail(`${file} is missing — the Clear would destroy whatever it should have held`);
+        failures++;
+        continue;
+      }
+      if (file === "build-notes.md") {
+        const body = readFileSync(full, "utf8");
+        const missing = REQUIRED_BUILD_NOTE_HEADINGS.filter((h) => !body.includes(h));
+        if (missing.length > 0) {
+          fail(`build-notes.md is missing required section(s): ${missing.join(", ")}`);
+          failures++;
+          continue;
+        }
+      }
+      pass(file);
+    }
+  }
+
+  console.log("\nbranch:");
+  if (committed.includes("CHANGELOG.md")) {
+    pass(`CHANGELOG.md differs from ${baseRef} (Gate 4)`);
+  } else {
+    fail(
+      `CHANGELOG.md was not updated on this branch (vs ${baseRef}) — Gate 4 lands here, not after Ship`,
+    );
+    failures++;
+  }
+
+  if (porcelain.length === 0) {
+    pass("working tree is clean — nothing lives only in the editor");
+  } else {
+    fail(`working tree is not clean (${porcelain.length} uncommitted path(s)):`);
+    for (const p of porcelain.slice(0, 10)) console.error(`      ${p}`);
+    if (porcelain.length > 10) console.error(`      … and ${porcelain.length - 10} more`);
+    failures++;
+  }
+
+  if (failures > 0) {
+    console.error(`\nNOT safe to /clear — ${failures} check(s) failed.`);
+    console.error("Commit the work, or accept the loss deliberately. A Clear is not recoverable.");
+    return 1;
+  }
+
+  console.log("\nSafe to /clear. Switch to Sonnet 5 (/model claude-sonnet-5) for Validate.");
+  return 0;
+}
+
+// ------------------------------------------------------------------- audit
+
+function audit(): number {
+  console.log("sdd:audit — did shipped slices and promotions get their roadmap entry?\n");
+  console.log(`  baseline: slices after ${LOOP_BASELINE_SLICE} (earlier ones predate the loop)\n`);
+
+  const roadmapText = readFileSync(join(ROOT, "specs", "roadmap.md"), "utf8");
+  const slices = sliceDirs().filter((d) => d > LOOP_BASELINE_SLICE);
+  if (slices.length === 0) {
+    console.log("  no slices under the new loop yet — nothing to audit.\n");
+    const missing = reportPromotions(roadmapText);
+    if (missing > 0) {
+      console.error(`\n${missing} promotion(s) with no roadmap change-log row.`);
+      return 1;
+    }
+    return 0;
+  }
+
+  // Change-log rows. A row counts as documenting a slice only when it cites the slice's
+  // spec PATH (`specs/<slice>/`), not merely its name.
+  //
+  // A date guard was tried first — row.date >= sliceDate — on the reasoning that a
+  // pre-existing row mentioning future work shouldn't satisfy the slice it predicts.
+  // It does not hold: the P3a/P3b/P3c backfill row is dated 2026-08-10 and names "P3d",
+  // and the P3d slice dir is ALSO 2026-08-10, so the row passed its own guard and P3d
+  // audited clean while genuinely undocumented. Spec and ship land the same day
+  // routinely here, so same-day collisions are the norm, not an edge case.
+  //
+  // Requiring the path is both precise and a convention worth having: every real closure
+  // row already cites it (see P3c's row), and prose can't accidentally satisfy it.
+  const roadmapRows = roadmapText
+    .split("\n")
+    .map((l) => /^\|\s*(\d{4}-\d{2}-\d{2})\s*\|/.exec(l))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => ({ date: m[1], text: m.input }));
+  const index = readFileSync(join(ROOT, "ARTIFACT_INDEX.md"), "utf8");
+
+  let gaps = 0;
+
+  for (const slice of slices) {
+    const inRoadmap = roadmapRows.some((row) => row.text.includes(`specs/${slice}/`));
+    // The index is already enforced at merge by gates.yml's staleness check; this only
+    // confirms the slice's plan.md actually reached the table, which a missed rebuild
+    // before that check ran would show up as.
+    const inIndex = index.includes(`specs/${slice}/plan.md`);
+
+    console.log(`slice: specs/${slice}/`);
+    if (inRoadmap) pass("roadmap change-log entry cites specs/" + slice + "/");
+    else {
+      fail(`NO roadmap change-log row cites specs/${slice}/ — a closure row must cite the path`);
+      gaps++;
+    }
+    if (inIndex) pass("present in ARTIFACT_INDEX.md");
+    else {
+      fail("NOT in ARTIFACT_INDEX.md — run npm run kms:build-index");
+      gaps++;
+    }
+  }
+
+  console.log("");
+  gaps += reportPromotions(roadmapText);
+
+  console.log("");
+  gaps += reportBusinessCase(roadmapText);
+
+  if (gaps > 0) {
+    console.error(`\n${gaps} documentation gap(s). The Document (final) pass did not land.`);
+    console.error(
+      "Fix on the CURRENT branch — post-merge doc changes ride the next slice's branch.",
+    );
+    return 1;
+  }
+
+  console.log("\nAll slices and promotions under the loop are documented.");
+  return 0;
+}
+
+// -------------------------------------------------------------------- main
+
+const mode = process.argv[2];
+if (mode === "preclear") process.exit(preclear());
+else if (mode === "audit") process.exit(audit());
+else {
+  console.error("usage: tsx scripts/sdd-check.ts <preclear|audit>");
+  process.exit(2);
+}

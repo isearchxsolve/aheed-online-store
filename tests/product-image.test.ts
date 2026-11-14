@@ -1,0 +1,285 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  IMAGE_CONTENT_TYPE,
+  IMAGE_QUALITY,
+  MAX_IMAGE_ATTEMPT_FAILURES,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_EDGE_PX,
+  buildProductImageKey,
+  fitWithinEdge,
+  imageExtensionForContentType,
+  hasExhaustedImageAttempts,
+  isProductImageKey,
+  isPlaceholderImageKey,
+} from "@/lib/product-image";
+
+/**
+ * The actions module is imported FOR REAL below — only its dependencies are
+ * mocked. `lib/db` imports `@prisma/client/wasm`, which the Workers runtime
+
+ * fails before any assertion runs. Same mocking shape as auth-rbac.test.ts.
+ *
+ * Nothing here stubs `features/admin/product-image` itself, which is the point:
+ * the export-shape assertion has to see the real module's real exports.
+ */
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+vi.mock("@/lib/auth", () => ({
+  getAuth: async () => ({ api: { getSession: async () => null } }),
+}));
+vi.mock("@/lib/db", () => ({ getPrisma: () => ({}) }));
+
+import * as imageActions from "@/features/admin/product-image";
+
+/**
+ * P6b2 (#167) — the product image rules, unit-tested with no database, no
+ * storage and no session.
+ *
+ * Two of these matter more than they look. `isProductImageKey` is the only thing
+ * standing between a client-supplied key and a write, so every way of dressing
+ * up "a different object" has to be refused rather than normalised. And the
+ * export-shape test below is not ceremony: a "use server" file that exports
+ * anything other than async functions fails at RUNTIME only, with every
+ * build-time check green — the exact defect that reached P6b1's validation
+ * stage (#159).
+ */
+
+const PRODUCT = "3f2a1b4c-0000-4000-8000-000000000001";
+const OTHER = "3f2a1b4c-0000-4000-8000-000000000002";
+
+/**
+ * #364 — the key used to lie. Both builders always suffixed `.webp`, while the
+ * AI paths store what Workers AI returns (PNG) and the Open Food Facts path
+ * stores whatever the remote server sent. Nothing rendered wrong — the object
+ * carries its true content type and the CDN answers on that — but the key
+ * asserted a format its bytes were not, against a standing rule that image keys
+ * are meaningful.
+ */
+describe("imageExtensionForContentType", () => {
+  it("maps the types this app actually stores", () => {
+    expect(imageExtensionForContentType("image/webp")).toBe(".webp");
+    expect(imageExtensionForContentType("image/png")).toBe(".png");
+    expect(imageExtensionForContentType("image/jpeg")).toBe(".jpg");
+    expect(imageExtensionForContentType("image/svg+xml")).toBe(".svg");
+  });
+
+  it("ignores parameters and case, as a real Content-Type header carries them", () => {
+    expect(imageExtensionForContentType("IMAGE/PNG")).toBe(".png");
+    expect(imageExtensionForContentType("image/jpeg; charset=binary")).toBe(".jpg");
+    expect(imageExtensionForContentType("  image/webp  ")).toBe(".webp");
+  });
+
+  it("does NOT fall back to .webp for an unknown or missing type", () => {
+    // Falling back to .webp would quietly reintroduce exactly the lie this
+    // function exists to remove.
+    expect(imageExtensionForContentType("application/octet-stream")).toBe(".bin");
+    expect(imageExtensionForContentType(null)).toBe(".bin");
+    expect(imageExtensionForContentType(undefined)).toBe(".bin");
+    expect(imageExtensionForContentType("")).toBe(".bin");
+  });
+});
+
+describe("buildProductImageKey — extension follows the real content type (#364)", () => {
+  it("defaults to .webp, so the browser-upload path is unchanged", () => {
+    expect(buildProductImageKey(PRODUCT)).toMatch(/\.webp$/);
+  });
+
+  it("uses the actual type when one is given", () => {
+    expect(buildProductImageKey(PRODUCT, "image/png")).toMatch(/\.png$/);
+    expect(buildProductImageKey(PRODUCT, "image/jpeg")).toMatch(/\.jpg$/);
+  });
+
+  it("still refuses a non-webp key on the browser-upload path it guards", () => {
+    // isProductImageKey deliberately stays WebP-only: it guards the presigned
+    // upload, which is pinned to IMAGE_CONTENT_TYPE end to end. A server-built
+    // PNG key never passes through it.
+    expect(isProductImageKey(buildProductImageKey(PRODUCT, "image/png"), PRODUCT)).toBe(false);
+    expect(isProductImageKey(buildProductImageKey(PRODUCT), PRODUCT)).toBe(true);
+  });
+
+  it("keeps a PNG key distinguishable from a seeded placeholder", () => {
+    expect(isPlaceholderImageKey(buildProductImageKey(PRODUCT, "image/png"))).toBe(false);
+  });
+});
+
+describe("buildProductImageKey", () => {
+  it("produces products/{productId}/{uuid}.webp", () => {
+    expect(buildProductImageKey(PRODUCT)).toMatch(
+      new RegExp(`^products/${PRODUCT}/[0-9a-f-]{36}\\.webp$`),
+    );
+  });
+
+  it("never repeats a key for the same product — replacement writes a NEW object", () => {
+    expect(buildProductImageKey(PRODUCT)).not.toBe(buildProductImageKey(PRODUCT));
+  });
+
+  it("round-trips through its own validator", () => {
+    expect(isProductImageKey(buildProductImageKey(PRODUCT), PRODUCT)).toBe(true);
+  });
+});
+
+/**
+ * #502 — the rule that decides which products the "Auto-fill Missing Images"
+ * job acts on.
+ *
+ * It matters that this is derived from the key's SHAPE. The job's original
+ * predicate asked the database for products with no `ProductImage` row and so
+ * matched nothing at all, because both seed paths give every product a
+ * placeholder row. `lib/repositories/products.ts` uses the exported
+ * `PLACEHOLDER_IMAGE_SUFFIX` inside a Prisma `endsWith` filter and this
+ * predicate over already-fetched rows, so the two spellings of one rule are
+ * pinned to the same constant here.
+ */
+describe("isPlaceholderImageKey", () => {
+  it("accepts a curated product's seeded placeholder", () => {
+    expect(isPlaceholderImageKey("products/cat-litter-5kg/main.svg")).toBe(true);
+  });
+
+  it("accepts the generated catalogue's shared per-subcategory placeholder", () => {
+    expect(isPlaceholderImageKey("products/gen-south-asian/main.svg")).toBe(true);
+  });
+
+  it("rejects a real uploaded image", () => {
+    expect(isPlaceholderImageKey(buildProductImageKey(PRODUCT))).toBe(false);
+  });
+
+  it("rejects a key that merely contains the placeholder name mid-path", () => {
+    expect(isPlaceholderImageKey("products/main.svg/real.webp")).toBe(false);
+  });
+});
+
+describe("isProductImageKey", () => {
+  it("refuses a key built for a different product", () => {
+    expect(isProductImageKey(buildProductImageKey(OTHER), PRODUCT)).toBe(false);
+  });
+
+  it("refuses a traversal segment", () => {
+    expect(isProductImageKey(`products/${PRODUCT}/../evil.webp`, PRODUCT)).toBe(false);
+  });
+
+  it("refuses any suffix other than .webp", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isProductImageKey(`products/${PRODUCT}/${uuid}.png`, PRODUCT)).toBe(false);
+    expect(isProductImageKey(`products/${PRODUCT}/${uuid}.svg`, PRODUCT)).toBe(false);
+  });
+
+  it("refuses an extra path segment", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isProductImageKey(`products/${PRODUCT}/nested/${uuid}.webp`, PRODUCT)).toBe(false);
+  });
+
+  it("refuses a leading slash", () => {
+    expect(isProductImageKey(`/${buildProductImageKey(PRODUCT)}`, PRODUCT)).toBe(false);
+  });
+
+  it("refuses a different prefix", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isProductImageKey(`categories/${PRODUCT}/${uuid}.webp`, PRODUCT)).toBe(false);
+  });
+
+  it("refuses a filename that is not a uuid", () => {
+    expect(isProductImageKey(`products/${PRODUCT}/main.webp`, PRODUCT)).toBe(false);
+  });
+});
+
+describe("fitWithinEdge", () => {
+  it("leaves an image already within the cap untouched", () => {
+    expect(fitWithinEdge(800, 600, 1200)).toEqual({ width: 800, height: 600 });
+  });
+
+  it("never scales up", () => {
+    expect(fitWithinEdge(100, 50, 1200)).toEqual({ width: 100, height: 50 });
+  });
+
+  it("caps the longest edge, keeping the aspect ratio", () => {
+    expect(fitWithinEdge(4000, 3000, 1200)).toEqual({ width: 1200, height: 900 });
+    expect(fitWithinEdge(3000, 4000, 1200)).toEqual({ width: 900, height: 1200 });
+  });
+
+  it("keeps a square square", () => {
+    expect(fitWithinEdge(2400, 2400, 1200)).toEqual({ width: 1200, height: 1200 });
+  });
+
+  it("never produces a zero dimension for an extreme ratio", () => {
+    const { width, height } = fitWithinEdge(10000, 3, 1200);
+    expect(width).toBe(1200);
+    expect(height).toBeGreaterThanOrEqual(1);
+  });
+
+  it("defaults to MAX_IMAGE_EDGE_PX", () => {
+    expect(fitWithinEdge(2400, 1200)).toEqual({ width: MAX_IMAGE_EDGE_PX, height: 600 });
+  });
+});
+
+describe("image constants", () => {
+  it("pins the values the spec names", () => {
+    expect(IMAGE_CONTENT_TYPE).toBe("image/webp");
+    expect(MAX_IMAGE_EDGE_PX).toBe(1200);
+    expect(IMAGE_QUALITY).toBe(0.82);
+    expect(MAX_IMAGE_BYTES).toBe(2 * 1024 * 1024);
+  });
+});
+
+describe('features/admin/product-image.ts is a valid "use server" module', () => {
+  /**
+   * Next validates a "use server" file's ENTIRE export set the moment any one
+   * action in it is dispatched — so one exported constant 500s every action in
+   * the file, for every caller, while `next build`, `tsc --noEmit` and the rest
+   * of this suite stay green. Asserted on the imported module rather than by
+   * grepping the source, so it holds however the file is written.
+   */
+  it("exports only async functions", () => {
+    const exports = Object.entries(imageActions);
+    expect(exports.length).toBeGreaterThan(0);
+    for (const [name, value] of exports) {
+      expect(typeof value, `${name} must be a function`).toBe("function");
+      expect((value as () => unknown).constructor.name, `${name} must be async`).toBe(
+        "AsyncFunction",
+      );
+    }
+  });
+
+  it("exports exactly the eight actions", () => {
+    expect(Object.keys(imageActions).sort()).toEqual([
+      "addProductImage",
+      "approveProductImage",
+      "attachProductImage",
+      "promoteProductImage",
+      "removeProductImage",
+      "reorderProductImages",
+      "requestImageUpload",
+      "toggleConfirmedPhoto",
+    ]);
+  });
+});
+
+/**
+ * #523 — the give-up rule for products the image pipeline can never fill.
+ *
+ * Pure, so the threshold that governs a paid, scheduled job is checkable
+ * without a database or a live Workers AI call.
+ */
+describe("hasExhaustedImageAttempts", () => {
+  it("is false below the threshold, so a retryable product keeps being offered", () => {
+    expect(hasExhaustedImageAttempts(0)).toBe(false);
+    expect(hasExhaustedImageAttempts(MAX_IMAGE_ATTEMPT_FAILURES - 1)).toBe(false);
+  });
+
+  it("is true at and above the threshold", () => {
+    expect(hasExhaustedImageAttempts(MAX_IMAGE_ATTEMPT_FAILURES)).toBe(true);
+    expect(hasExhaustedImageAttempts(MAX_IMAGE_ATTEMPT_FAILURES + 5)).toBe(true);
+  });
+
+  it("allows more than one attempt, because the AI filter is flaky in both directions", () => {
+    // `Gulab Jamun 1kg` and `Extra Noodles 1L` were each refused once as NSFW and
+    // then accepted on a retry. A threshold of 1 would permanently give up on
+    // products that do in fact work.
+    expect(MAX_IMAGE_ATTEMPT_FAILURES).toBeGreaterThan(1);
+  });
+
+  it("stays small enough to bound spend on a product that never succeeds", () => {
+    // Every attempt that reaches AI generation is a paid call, repeated on every
+    // scheduled run until the product gives up.
+    expect(MAX_IMAGE_ATTEMPT_FAILURES).toBeLessThanOrEqual(5);
+  });
+});

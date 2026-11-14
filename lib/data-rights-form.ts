@@ -1,0 +1,219 @@
+/**
+ * Data-rights field rules (P7b, #216) — pure, DB-free, unit-testable.
+ *
+ * Same posture as lib/catalogue-form.ts (P6b1) and lib/shopping-list.ts (P3d):
+ * every decision about what a submitted field MEANS lives where a test can
+ * reach it without a database, a session or a request. The server actions in
+ * features/account/data-rights.ts do the FormData reading and the repository
+ * calls; nothing here knows either exists.
+ *
+ * The state shapes are declared here rather than beside the actions because
+ * features/account/data-rights.ts is `"use server"` — every export of such a
+ * file must be an async function, and a same-file value export makes EVERY
+ * action in the file 500 at runtime while build, typecheck and test all stay
+ * green (#159). A plain state constant has no business there regardless.
+ *
+ * The error/field/saved shape deliberately mirrors CatalogueFormState rather
+ * than importing it: a three-field state object is not worth coupling an
+ * account-settings module to the catalogue admin's.
+ */
+
+export interface DataRightsFormState {
+  error: string | null;
+  /** The control to point at, matching the input's `name`. Null for whole-form errors. */
+  field: string | null;
+  /** Human-readable confirmation of what happened, rendered on success. */
+  done: string | null;
+}
+
+export const initialDataRightsState: DataRightsFormState = {
+  error: null,
+  field: null,
+  done: null,
+};
+
+/**
+ * Which confirmation an account can actually satisfy.
+ *
+ * A Google-only account has no password to re-enter (`Account.password` is null
+ * for the OAuth provider), so a password prompt would be an unpassable gate
+ * rather than a security control. Better Auth writes `"credential"` as the
+ * providerId for email/password accounts.
+ */
+export type EraseConfirmationMode = "password" | "email";
+
+export function eraseConfirmationMode(providerIds: readonly string[]): EraseConfirmationMode {
+  return providerIds.includes("credential") ? "password" : "email";
+}
+
+export type ParsedName = { ok: true; value: string } | { ok: false; state: DataRightsFormState };
+
+/**
+ * A display name must have something in it. Whitespace-only is the case worth
+ * naming explicitly — it renders as a blank account page and reads as a bug
+ * rather than as the empty string someone actually submitted.
+ */
+export function parseDisplayName(raw: string | null): ParsedName {
+  const value = (raw ?? "").trim();
+  if (value === "") {
+    return {
+      ok: false,
+      state: { error: "Your name can't be blank.", field: "name", done: null },
+    };
+  }
+  return { ok: true, value };
+}
+
+export type ParsedConfirmation = { ok: true } | { ok: false; state: DataRightsFormState };
+
+/**
+ * Check the erasure confirmation for an OAuth-only account: the account's own
+ * email address, typed exactly.
+ *
+ * Compared case-sensitively and without trimming beyond the outer whitespace a
+ * browser or a paste tends to add. The point of this control is deliberate
+ * friction on an irreversible action, so "close enough" is not the standard.
+ */
+export function checkEmailConfirmation(
+  submitted: string | null,
+  accountEmail: string,
+): ParsedConfirmation {
+  if ((submitted ?? "").trim() !== accountEmail) {
+    return {
+      ok: false,
+      state: {
+        error: "That doesn't match your account email address. Type it exactly to confirm.",
+        field: "confirmEmail",
+        done: null,
+      },
+    };
+  }
+  return { ok: true };
+}
+
+/** What the user is told after a successful erasure — differs by whether the login survived. */
+export function erasureSummary(identityDeleted: boolean, ordersAnonymised: number): string {
+  const orders =
+    ordersAnonymised === 1
+      ? "1 order was kept as an anonymised financial record"
+      : `${ordersAnonymised} orders were kept as anonymised financial records`;
+  return identityDeleted
+    ? `Your data has been erased and your sign-in has been deleted. ${orders}, with your name and address removed.`
+    : `Your data at this store has been erased. ${orders}, with your name and address removed. Your sign-in still works at the other store you shop with.`;
+}
+
+// ---------------------------------------------------------------------------
+// Guest erasure (P7 closeout, #251 / #222)
+// ---------------------------------------------------------------------------
+
+/**
+ * The typed confirmation a guest must supply before an order's personal data is
+ * erased. Same reasoning as the account-holder confirmations above: deliberate
+ * friction on an irreversible action, so "close enough" is not the standard.
+ *
+ * A fixed word rather than the guest's own email, which they have already had to
+ * type once to be shown the order at all — asking for it a second time would
+ * look like a control while adding nothing.
+ */
+export const GUEST_ERASE_CONFIRMATION = "ERASE";
+
+export interface GuestErasureFields {
+  orderNumber: string;
+  email: string;
+}
+
+export type ParsedGuestErasure =
+  { ok: true; value: GuestErasureFields } | { ok: false; state: DataRightsFormState };
+
+/**
+ * Validate the guest erasure submission's shape — before anything touches a
+ * database or a rate limiter.
+ *
+ * This decides only whether the form was filled in, never whether the pair is
+ * genuine: proving the order-number/email pair happens at the query level in
+ * `eraseGuestOrderData`, so that no caller can skip it.
+ */
+export function parseGuestErasure(
+  orderNumber: string | null,
+  email: string | null,
+  confirmation: string | null,
+): ParsedGuestErasure {
+  const trimmedOrder = (orderNumber ?? "").trim();
+  const trimmedEmail = (email ?? "").trim();
+
+  if (!trimmedOrder || !trimmedEmail) {
+    return {
+      ok: false,
+      state: {
+        error: "Look up your order first, then request erasure from the result.",
+        field: null,
+        done: null,
+      },
+    };
+  }
+
+  if ((confirmation ?? "").trim() !== GUEST_ERASE_CONFIRMATION) {
+    return {
+      ok: false,
+      state: {
+        error: `Type ${GUEST_ERASE_CONFIRMATION} to confirm. This cannot be undone.`,
+        field: "confirmErase",
+        done: null,
+      },
+    };
+  }
+
+  return { ok: true, value: { orderNumber: trimmedOrder, email: trimmedEmail } };
+}
+
+/**
+ * What a guest is told after a successful erasure.
+ *
+ * States the one-order scope explicitly. A guest with several orders has to
+ * repeat the flow, and discovering that by noticing another order still carries
+ * their address would be exactly the promise/behaviour mismatch this slice
+ * exists to remove.
+ */
+export function guestErasureSummary(orderNumber: string): string {
+  return (
+    `The personal details on order ${orderNumber} have been erased — the delivery name, ` +
+    `address and phone number are removed and the email is unlinked. The order itself is kept ` +
+    `as an anonymised financial record, which the law requires. This covers this one order; ` +
+    `if you placed others as a guest, look each one up and erase it the same way.`
+  );
+}
+
+/**
+ * #1134 — the "what we hold" and "what erasure removes" lists on /account/data, built from the
+ * store's switches so loyalty and marketing are named only where the store runs them. Joined with
+ * a final "and" (en-GB: "a, b and c"), never stitched from conditional comma fragments in JSX:
+ * that is how the erasure sentence first shipped as "…reviews, basket from this store."
+ */
+export function listPhrase(items: string[]): string {
+  return new Intl.ListFormat("en-GB", { style: "long", type: "conjunction" }).format(items);
+}
+
+export function dataExportItems(flags: { loyalty: boolean; marketing: boolean }): string[] {
+  return [
+    "your account details",
+    "orders",
+    "addresses",
+    "reviews",
+    "basket",
+    ...(flags.loyalty ? ["loyalty points"] : []),
+    ...(flags.marketing ? ["marketing email choices"] : []),
+    "any discount codes you have used",
+  ];
+}
+
+export function dataErasureItems(flags: { loyalty: boolean; marketing: boolean }): string[] {
+  return [
+    "your name",
+    "contact details",
+    "addresses",
+    "reviews",
+    "basket",
+    ...(flags.loyalty ? ["loyalty points"] : []),
+    ...(flags.marketing ? ["marketing email choices"] : []),
+  ];
+}

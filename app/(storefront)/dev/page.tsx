@@ -1,0 +1,153 @@
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { requireRole } from "@/lib/auth-rbac";
+import { getDevDiagnostics } from "@/lib/dev-diagnostics";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { Icon } from "@/components/icons/Icon";
+
+// Reads the session (requireRole) — must render per-request, never prerender.
+export const dynamic = "force-dynamic";
+
+/** #729 — was a hardcoded "Dev — Aheed Food Centre", which rendered under every vendor. */
+export async function generateMetadata() {
+  const profile = await getCurrentVendorProfile();
+  return { title: `Dev — ${profile?.name ?? "Aheed Food Centre"}` };
+}
+
+function environmentName(host: string): string {
+  if (host.includes("staging")) return "Staging";
+  if (host.includes("localhost") || host.includes("127.0.0.1")) return "Local";
+  return host ? "Production" : "Unknown";
+}
+
+const INTEGRATION_LABELS: Record<string, string> = {
+  googleSignIn: "Google sign-in",
+  storage: "Object storage (S3)",
+  email: "Email (Resend)",
+  cdn: "CDN base URL",
+  betterAuthUrl: "BETTER_AUTH_URL",
+};
+
+export default async function DevPage() {
+  const auth = await requireRole("ADMIN");
+  if (!auth.ok) {
+    if (auth.status === 401) redirect("/login");
+    // 403 — signed in but not an admin. Show a message, not the diagnostics.
+    return (
+      <PageContainer width="narrow" className="text-center">
+        <h1 className="text-2xl font-semibold text-primary">Administrators only</h1>
+        <p className="mt-3 text-primary-muted">
+          This area is restricted to admin accounts. You&apos;re signed in, but your role
+          doesn&apos;t have access.
+        </p>
+      </PageContainer>
+    );
+  }
+
+  const host = (await headers()).get("host") ?? "";
+  const diagnostics = getDevDiagnostics();
+  const { user } = auth;
+
+  return (
+    <PageContainer width="narrow">
+      <h1 className="mb-1 text-2xl font-semibold text-primary">Developer diagnostics</h1>
+      <p className="mb-8 text-sm text-primary-muted">
+        Admin-only. Non-secret environment info — never shows secret values.
+      </p>
+
+      <div className="grid gap-6 sm:grid-cols-2">
+        {/* Environment */}
+        <section className="rounded-2xl border border-black/10 p-5">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-primary-muted">
+            Environment
+          </h2>
+          <dl className="flex flex-col gap-2 text-sm">
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">Environment</dt>
+              <dd className="font-semibold text-primary">{environmentName(host)}</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">Host</dt>
+              <dd className="font-mono text-primary">{host || "—"}</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">Deployed commit</dt>
+              <dd className="font-mono text-primary">{diagnostics.commit ?? "— (local)"}</dd>
+            </div>
+          </dl>
+        </section>
+
+        {/* Session */}
+        <section className="rounded-2xl border border-black/10 p-5">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-primary-muted">
+            Your session
+          </h2>
+          <dl className="flex flex-col gap-2 text-sm">
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">Role</dt>
+              <dd className="font-semibold text-primary">{user.role}</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">Email</dt>
+              <dd className="text-primary">{user.email}</dd>
+            </div>
+            <div className="flex justify-between gap-4">
+              <dt className="text-primary-muted">User ID</dt>
+              <dd className="truncate font-mono text-primary" title={user.id}>
+                {user.id}
+              </dd>
+            </div>
+          </dl>
+        </section>
+
+        {/* Integrations */}
+        <section className="rounded-2xl border border-black/10 p-5 sm:col-span-2">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-primary-muted">
+            Integrations (configured for this environment)
+          </h2>
+          <ul className="flex flex-col gap-2 text-sm">
+            {Object.entries(diagnostics.integrations).map(([key, on]) => (
+              <li key={key} className="flex items-center justify-between gap-4">
+                <span className="text-primary-muted">{INTEGRATION_LABELS[key] ?? key}</span>
+                {on ? (
+                  <span className="inline-flex items-center gap-1 font-semibold text-primary">
+                    <Icon name="check" className="h-4 w-4 text-action" /> Configured
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 font-semibold text-danger">
+                    <Icon name="x" className="h-4 w-4" /> Not set
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {/* KMS */}
+        <section className="rounded-2xl border border-black/10 p-5 sm:col-span-2">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-primary-muted">
+            Knowledge Management System (internal docs)
+          </h2>
+          {diagnostics.kmsUrl ? (
+            <a
+              href={diagnostics.kmsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 font-semibold text-action"
+            >
+              Open the KMS internal docs
+              <Icon name="external-link" className="h-4 w-4" />
+            </a>
+          ) : (
+            <p className="text-sm text-primary-muted">
+              KMS link pending setup — set <code className="font-mono">KMS_INTERNAL_URL</code> once
+              the internal docs site has a DNS record and a Cloudflare Access gate (see{" "}
+              <code className="font-mono">kms/site-internal/wrangler.toml</code>).
+            </p>
+          )}
+        </section>
+      </div>
+    </PageContainer>
+  );
+}

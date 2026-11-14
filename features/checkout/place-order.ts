@@ -1,0 +1,278 @@
+"use server";
+
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { getCartRepository } from "@/lib/cart-service";
+import { getOrderRepository } from "@/lib/orders-service";
+import { CheckoutError } from "@/lib/repositories/orders";
+import { getCartIdentity } from "@/lib/cart-identity";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { getDeliveryEligibility } from "@/lib/delivery-eligibility-service";
+import { blocksCheckout, eligibilityMessage } from "@/lib/delivery-eligibility";
+import { getCustomerAddressService } from "@/lib/customer-addresses-service";
+import { calendarDayToUtcMidnight } from "@/lib/local-datetime";
+import { quoteMatches, resolveDeliveryRules } from "@/lib/delivery-pricing";
+import { recordRefusalIfOutside } from "@/lib/delivery-refusals-service";
+import { setDeliveryPostcode } from "@/features/storefront/delivery";
+import { refusalMessage } from "@/lib/discounts";
+import {
+  isCallerThrottledForCodes,
+  recordCallerUnknownCode,
+} from "@/lib/discount-code-throttle-service";
+
+/**
+ * Checkout server action (P3b, #96).
+ *
+ * Money is NEVER read from the form — only contact and address fields are. The
+ * subtotal, delivery fee and total are recomputed server-side from the database
+ * inside the order transaction, so a tampered form cannot change what is charged.
+ */
+
+export type CheckoutState = { error: string | null };
+
+/** Thrown only by `required()` — a missing field is a form problem, not a CheckoutError. */
+class MissingFieldError extends Error {}
+
+const FIELD_LABELS: Record<string, string> = {
+  recipientName: "Full name",
+  email: "Email",
+  phone: "Phone number",
+  line1: "Street address",
+  city: "Town or city",
+  postcode: "Postcode",
+};
+
+function required(form: FormData, field: string): string {
+  const value = String(form.get(field) ?? "").trim();
+  if (!value) throw new MissingFieldError(`${FIELD_LABELS[field] ?? field} is required.`);
+  return value;
+}
+
+/** Absolute origin of this request — the provider needs absolute return URLs. */
+async function currentOrigin(): Promise<string> {
+  const h = await headers();
+  const host = h.get("host") ?? "";
+  const proto = (h.get("x-forwarded-proto") ?? "https").split(",")[0].trim() || "https";
+  return `${proto}://${host}`;
+}
+
+function optional(form: FormData, field: string): string | null {
+  const value = String(form.get(field) ?? "").trim();
+  return value === "" ? null : value;
+}
+
+/**
+ * The one numeric field this action reads from the form (P5a, #135) — and it is
+ * a points COUNT, not money. Anything unparseable is zero rather than an error:
+ * a malformed redemption must not block a checkout that is otherwise valid. The
+ * real defence is downstream — `placeOrder` recomputes the discount from the
+ * persisted balance, so this number is only ever an upper bound on a request.
+ */
+function redeemPointsIntent(form: FormData): number {
+  const raw = String(form.get("redeemPoints") ?? "").trim();
+  if (raw === "") return 0;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
+
+/**
+ * The discount code the shopper typed (P5b, #145) — an intent, like
+ * `redeemPoints`, not an amount. Empty means "no code", which is not an error.
+ *
+ * Unlike a malformed points value, an unusable code does NOT silently become
+ * nothing: `placeOrder` refuses the checkout with the reason. Charging full price
+ * for an order the shopper believes is discounted is the worse failure.
+ */
+function discountCodeIntent(form: FormData): string | null {
+  const raw = String(form.get("discountCode") ?? "").trim();
+  return raw === "" ? null : raw;
+}
+
+export async function placeOrderAction(
+  _prev: CheckoutState,
+  form: FormData,
+): Promise<CheckoutState> {
+  const identity = await getCartIdentity();
+  const cartRepo = getCartRepository();
+  const summary = await cartRepo.getSummary(identity);
+
+  // Inherited from P3a: an order must never be placed against a cart the shopper
+  // never confirmed.
+  if (summary.mergePending) {
+    return { error: "Please choose which cart to keep before checking out." };
+  }
+  if (summary.lines.length === 0) {
+    return { error: "Your cart is empty." };
+  }
+
+  const vendor = await getCurrentVendorProfile();
+  if (!vendor) return { error: "This store is unavailable." };
+
+  let destination: string;
+  try {
+    const rawMethod = form.get("fulfilmentMethod");
+    if (rawMethod !== "DELIVERY" && rawMethod !== "COLLECTION") {
+      throw new MissingFieldError("Please select a delivery or collection method.");
+    }
+    const fulfilmentMethod = rawMethod as "DELIVERY" | "COLLECTION";
+
+    // #890 — Click & Collect is outside per-area pricing and resolves to the vendor defaults (the
+    // profile carries them); a delivery order is re-resolved below from the ADDRESS postcode, the
+    // one actually charged.
+    let deliveryRules = resolveDeliveryRules(vendor, [], null, "COLLECTION");
+
+    let addressInput;
+    if (fulfilmentMethod === "DELIVERY") {
+      const postcode = required(form, "postcode");
+
+      // #764 — one eligibility service, shared with the header and the fulfilment default, so the
+      // three can no longer disagree about the same postcode.
+      //
+      // Only two verdicts refuse an order: a postcode that is definitely not real, and one this
+      // vendor definitely does not serve. UNVERIFIED — reference data not yet imported in this
+      // environment — deliberately does NOT block: a deployment-ordering accident must degrade to
+      // "we could not check", never to a rejected order.
+      const eligibility = await getDeliveryEligibility(postcode);
+      if (blocksCheckout(eligibility)) {
+        // #889 — counts only OUTSIDE_DELIVERY_AREA, and never changes this response if it fails.
+        await recordRefusalIfOutside(eligibility, "CHECKOUT");
+        return { error: eligibilityMessage(eligibility) ?? "We can't deliver to that postcode." };
+      }
+
+      // #890 R23 — the summary the shopper saw was priced from the `delivery-postcode` cookie, and
+      // the address postcode above may differ. Values, not area names, are compared, so a shopper
+      // whose area carries no overrides is never refused. On a mismatch nothing is placed: the
+      // cookie moves to the address postcode so the re-rendered summary shows the real charges.
+      deliveryRules = resolveDeliveryRules(vendor, vendor.deliveryAreas, postcode, "DELIVERY");
+      if (!quoteMatches(optional(form, "quotedDeliveryRules"), deliveryRules)) {
+        const moved = new FormData();
+        moved.set("postcode", postcode);
+        await setDeliveryPostcode(moved);
+        return {
+          error: `The delivery charge for ${eligibility.postcode} is different. Please review your updated total and place the order again.`,
+        };
+      }
+
+      addressInput = {
+        recipientName: required(form, "recipientName"),
+        phone: required(form, "phone"),
+        line1: required(form, "line1"),
+        line2: optional(form, "line2"),
+        city: required(form, "city"),
+        county: optional(form, "county"),
+        postcode,
+        notes: optional(form, "notes"),
+      };
+    } else {
+      // COLLECTION requires no address fields except Name and Phone.
+      addressInput = {
+        recipientName: required(form, "recipientName"),
+        phone: required(form, "phone"),
+        line1: "COLLECTION",
+        line2: null,
+        city: "COLLECTION",
+        county: null,
+        postcode: "COLLECTION",
+        notes: optional(form, "notes"),
+      };
+    }
+
+    const email = identity.userId ? optional(form, "email") : required(form, "email");
+
+    // The cart id is resolved server-side from the identity, never submitted —
+    // and through the repository, so this layer never touches Prisma.
+    const cartId = await cartRepo.getCartId(identity);
+    if (!cartId) return { error: "Your cart is empty." };
+
+    const rawFulfilmentSlotId = optional(form, "fulfilmentSlotId");
+    const rawFulfilmentDate = optional(form, "fulfilmentDate");
+    const isExpress = form.get("isExpress") === "on";
+
+    /*
+     * #811 — `fulfilmentDate` arrives as a bare `YYYY-MM-DD` calendar day and is stored as that
+     * day's UTC MIDNIGHT. It used to be `new Date(rawFulfilmentDate)` over an instant the browser
+     * had built from its own local midnight, so during BST every order was filed against 23:00 on
+     * the preceding day — and `lib/repositories/orders.ts`'s capacity count, which matches this
+     * column by exact equality, counted it there too.
+     *
+     * Refused rather than coerced: a malformed day means the picker and this action disagree about
+     * the wire format, and silently placing the order on some other day is the failure mode the
+     * whole slice exists to remove.
+     */
+    const fulfilmentDate = rawFulfilmentDate ? calendarDayToUtcMidnight(rawFulfilmentDate) : null;
+    if (rawFulfilmentDate && fulfilmentDate === null) {
+      return { error: "Please choose a delivery or collection date." };
+    }
+
+    // #988 — the same unknown-code throttle as the Apply control: placing an order is the other way
+    // to ask whether a code exists. Only consulted when a code was submitted.
+    const discountCode = discountCodeIntent(form);
+    if (discountCode !== null && (await isCallerThrottledForCodes())) {
+      return { error: refusalMessage("TOO_MANY_ATTEMPTS") };
+    }
+
+    const placed = await getOrderRepository().createOrder({
+      cartId,
+      userId: identity.userId,
+      guestEmail: identity.userId ? null : email,
+      address: addressInput,
+      fulfilmentSlotId: rawFulfilmentSlotId,
+      fulfilmentDate,
+      isExpress,
+      rules: {
+        deliveryFeePence: deliveryRules.deliveryFeePence,
+        freeDeliveryThresholdPence: deliveryRules.freeDeliveryThresholdPence,
+        minimumOrderPence: deliveryRules.minimumOrderPence,
+      },
+      redeemPoints: redeemPointsIntent(form),
+      discountCode,
+      vendorSlug: vendor.slug,
+      returnOrigin: await currentOrigin(),
+      fulfilmentMethod,
+    });
+    // #764 — remember the address a signed-in shopper just confirmed, so next time it can be
+    // offered rather than retyped.
+    //
+    // This writes a CustomerAddress row. It does NOT touch the Address snapshot the order above
+    // just created, and nothing links the two: the snapshot records where THIS order goes and is
+    // never rewritten, while the saved address is an editable convenience the shopper owns.
+    // Correcting a typo in the saved copy later changes no past order.
+    //
+    // DELIVERY only — a COLLECTION order's address fields are placeholders, not somewhere anyone
+    // lives. Guests are skipped inside the service, since a saved address needs an owner.
+    // Deliberately not allowed to fail the checkout: the order is already placed and paid for by
+    // this point, and a convenience feature must never be the reason a shopper sees an error.
+    if (fulfilmentMethod === "DELIVERY") {
+      try {
+        await getCustomerAddressService().save(addressInput);
+      } catch (error) {
+        console.error(
+          `could not save the customer address after order ${placed.orderNumber}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // With Stripe configured the shopper goes to hosted Checkout; with the stub
+    // adapter there is nowhere to pay, so they land on the order page directly.
+    //
+    // That fallback MUST carry the capability token too (P9.1, #427). It is not a
+    // rare path — it is every checkout wherever STRIPE_SECRET_KEY is unset, which
+    // is local preview and CI — and without the token the confirmation page
+    // refuses the shopper their own order.
+    destination =
+      placed.redirectUrl ??
+      `/checkout/${placed.orderNumber}?t=${encodeURIComponent(placed.confirmationToken)}`;
+  } catch (error) {
+    if (error instanceof MissingFieldError) return { error: error.message };
+    if (error instanceof CheckoutError) {
+      if (error.reason === "UNKNOWN") await recordCallerUnknownCode();
+      return { error: error.message };
+    }
+    throw error;
+  }
+
+  // Outside the try: redirect() throws a control-flow signal that must not be
+  // caught and reported as a checkout failure.
+  redirect(destination);
+}

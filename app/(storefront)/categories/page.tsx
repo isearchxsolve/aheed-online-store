@@ -1,0 +1,101 @@
+import { getCategoryRepository } from "@/lib/categories-service";
+import { getProductRepository } from "@/lib/products-service";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { getRequestCartQuantities } from "@/lib/cart-summary";
+import { getRequestFavouriteState } from "@/lib/favourites-summary";
+import { getEnv } from "@/lib/config";
+import { composePublicUrl } from "@/lib/storage";
+import { DepartmentScroller } from "@/components/layout/DepartmentScroller";
+import { WhatsappCommunityBanner } from "@/components/layout/WhatsappCommunityBanner";
+import { ProductRow } from "@/components/product/ProductRow";
+import { BundleRow } from "@/components/bundle/BundleRow";
+import { getBundlesForStorefront } from "@/lib/bundles-service";
+import { PageContainer } from "@/components/layout/PageContainer";
+
+// Without this, Next's build-time static optimization tries to prerender this
+// page in plain Node — but lib/db.ts loads Prisma via @prisma/client/wasm,
+// which only works in the Workers runtime, so `next build` hard-fails trying
+// to run it. Same root cause as P1b's /login and /register fix.
+export const dynamic = "force-dynamic";
+
+/**
+ * P8.5f: was a bare `<ul>` of department links; it is now the SHOP page, holding
+ * what the landing page gave up — the department scroller and the New Arrivals /
+ * Featured Products rows. The landing page keeps only its hero and trust strip,
+ * so this is the first stop for anyone actually browsing.
+ *
+ * The title was previously a hardcoded `metadata` export reading "Categories —
+ * Aheed Food Centre", which rendered under SriMart too. Same defect class #239
+ * spent a slice removing, so it is now derived from the vendor like the landing
+ * page's own `generateMetadata`.
+ */
+export async function generateMetadata() {
+  const profile = await getCurrentVendorProfile();
+  const name = profile?.name ?? "Aheed Food Centre";
+  return { title: `Shop — ${name}` };
+}
+
+export default async function CategoriesPage() {
+  const productsRepo = getProductRepository();
+  const [profile, categories, newArrivalsPage, featuredPage, bundles] = await Promise.all([
+    getCurrentVendorProfile(),
+    getCategoryRepository().listTopLevel(),
+    productsRepo.list({ take: 8 }), // recent products (#511 — 8, not 4: a scroller over 4 has nothing to scroll)
+    productsRepo.list({ take: 8, isFeatured: true }), // vendor-curated featured products (#511)
+    // P8.5c (#347): one nested query for every bundle and its constituents —
+    // adding a fourth bundle adds no query.
+    getBundlesForStorefront(),
+  ]);
+  // P8.5a (#345): request-memoised, shared with the header's cart read — the
+  // cards need it to render the cart-aware stepper rather than a plain add.
+  const cartQuantities = await getRequestCartQuantities();
+  // #232 — request-memoised, so both product rows below share ONE favourite query.
+  const favouriteState = await getRequestFavouriteState();
+  const { CDN_BASE_URL } = getEnv();
+  const qrImageUrl =
+    profile?.whatsappCommunityQrKey && CDN_BASE_URL
+      ? composePublicUrl(CDN_BASE_URL, profile.whatsappCommunityQrKey)
+      : null;
+
+  return (
+    <PageContainer width="wide" padY="tight" className="space-y-8">
+      <section className="bg-white rounded-2xl border border-black/10 p-5 shadow-sm">
+        <h1 className="mb-4 text-xl font-bold text-primary">Shop by department</h1>
+        <DepartmentScroller categories={categories} use3D />
+      </section>
+
+      <WhatsappCommunityBanner
+        vendorName={profile?.name ?? ""}
+        whatsappCommunityUrl={profile?.whatsappCommunityUrl ?? null}
+        qrImageUrl={qrImageUrl}
+      />
+
+      {/* P8.5c (#347): after the departments, before the product rows — the
+          shop page's merchandising slot. The landing page stays as P8.5f left
+          it: hero and trust strip only. */}
+      <BundleRow
+        title="Value Bundles"
+        bundles={bundles}
+        cdnBaseUrl={CDN_BASE_URL ?? ""}
+        viewAllLink="/bundles"
+      />
+
+      <ProductRow
+        title="New Arrivals"
+        products={newArrivalsPage.items}
+        cdnBaseUrl={CDN_BASE_URL ?? ""}
+        viewAllLink="/search"
+        cartQuantities={cartQuantities}
+        favouriteState={favouriteState}
+      />
+      <ProductRow
+        title="Featured Products"
+        products={featuredPage.items}
+        cdnBaseUrl={CDN_BASE_URL ?? ""}
+        viewAllLink="/search?featured=1"
+        cartQuantities={cartQuantities}
+        favouriteState={favouriteState}
+      />
+    </PageContainer>
+  );
+}

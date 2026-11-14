@@ -1,0 +1,366 @@
+"use client";
+
+import Link from "next/link";
+import { AddToCartButton } from "@/components/cart/AddToCartButton";
+import { CartQuantityStepper } from "@/components/cart/CartQuantityStepper";
+import { FavouriteButton } from "./FavouriteButton";
+import type { FavouriteState } from "@/lib/favourites";
+import { RestockNotice } from "@/components/product/RestockNotice";
+import { Card } from "@/components/ui/Card";
+import { ProductImage } from "./ProductImage";
+import { ProductRating } from "./ProductRating";
+import { useQuickView } from "./quick-view-context";
+import { composePublicUrl } from "@/lib/storage";
+import { showsLowStock } from "@/lib/cart-rules";
+import { tierThresholdQuantity } from "@/lib/tier-pricing";
+import { formatPrice } from "./format-price";
+import { deriveUnitPriceLabel } from "./unit-price";
+import type { ProductSummary } from "@/lib/repositories/products";
+import { Icon } from "@/components/icons/Icon";
+
+/**
+ * P8.5a (#345) — the skewed card.
+ *
+ * Geometry lives in `app/globals.css` (`.skew-card*`), not in Tailwind classes,
+ * because the counter-skew is a parent/child relationship rather than a set of
+ * utilities: the card skews and every `.skew-card-inner` inside it skews back.
+ * That file also carries the reduced-motion opt-out and the reasoning for both.
+ *
+ * `cartQuantity` comes from the page's request-memoised cart read
+ * (`lib/cart-summary.ts`), so a grid of these costs no extra query — the header
+ * on the same page already resolved the cart.
+ *
+ * #351/#656/#955 — TITLE-ONLY ANCHOR, NOT A CARD-WIDE ONE. `AddToCartButton` and
+ * `CartQuantityStepper` render real `<button>` elements, and HTML forbids
+ * interactive content inside `<a>`. The card used to wrap everything in one
+ * `<Link>` and rely on every handler calling `preventDefault()`/
+ * `stopPropagation()` to stop the click reaching the anchor — correctness
+ * resting entirely on that discipline never lapsing. `Card`'s `variant="product"`
+ * now carries `.skew-card` + `group` on a plain `<div>` (exactly the shape
+ * `components/bundle/BundleCard.tsx` already uses in production), and the
+ * price/cart controls stay a SIBLING of the title link rather than a
+ * descendant of it, carrying `relative z-10`.
+ *
+ * HISTORY WORTH KNOWING, because this comment has been wrong before. #351/#656
+ * made the title a stretched link covering the whole card via `after:absolute
+ * after:inset-0`. #830 then replaced the link with a `<button>` that opened
+ * Quick View and left this paragraph describing the stretched link as though it
+ * were still there — so the file simultaneously claimed the title was "the only
+ * `<Link>`" and, twelve lines above the markup, that there was "no navigation to
+ * separate product detail page". #955 restored a real `href` (a crawler and a
+ * no-JS visitor had no route to a product page at all), but deliberately
+ * WITHOUT the `after:inset-0` overlay, so the anchor is the title text only.
+ * The `relative z-10` on the price/cart row is therefore no longer load-bearing
+ * for click routing; it is kept because it is harmless and because a future
+ * slice may restore the stretched variant, which would need it again.
+ */
+export function ProductCard({
+  product,
+  cdnBaseUrl,
+  cartQuantity = 0,
+  favouriteState,
+}: {
+  product: ProductSummary;
+  cdnBaseUrl: string;
+  /** Quantity of this product currently in the cart; 0 when it isn't. */
+  cartQuantity?: number;
+  /**
+   * #232 — whether this product is favourited, or the shopper is signed out. ONE prop rather than
+   * an `isFavourite`/`canFavourite` pair, which would admit a meaningless fourth combination
+   * (favourited but signed out) that every reader would have to interpret. Resolved once per page
+   * render from `listFavouriteProductIds`, never once per card.
+   */
+  favouriteState: FavouriteState;
+}) {
+  const { openQuickView } = useQuickView();
+  const hasDiscount = product.originalPrice != null && product.originalPrice > product.basePrice;
+  const saving = hasDiscount ? product.originalPrice! - product.basePrice : 0;
+  /**
+   * P8.5d (#348) — the multi-buy tier, e.g. "3 for £10.00".
+   *
+   * A SEPARATE CLAIM FROM `hasDiscount` ABOVE, and deliberately rendered as one.
+   * `originalPrice` is a single-unit markdown ("this £4.00 item is down from
+   * £5.00"); a tier is a quantity offer ("three of them cost £10.00"). A product
+   * can carry both, and they describe different things — so no figure is counted
+   * in both places: the markdown keeps its "Save £X" image badge and its
+   * struck-through price, and the tier gets its own badge in the price row
+   * naming a quantity. Collapsing them into one "saving" would state something
+   * false for whichever shopper isn't buying the group quantity.
+   */
+  const tierQuantity = tierThresholdQuantity(product.tier);
+  const hasTier = tierQuantity !== null && product.tier !== null;
+  // #1211 — one rule (lib/cart-rules.ts): TRACKED stock only, and only while
+  // there is still stock to run out of.
+  const isLowStock = showsLowStock(product);
+  // #398 (derivation half), R34 — the derived unit price where a product HAS net content,
+  // computed at render time (never from the stored sort-key column, R32); unitLabel unchanged
+  // otherwise. `product.netContentAmount`/`netContentUnit` are both null or both set.
+  const unitDisplay =
+    product.netContentAmount !== null && product.netContentUnit !== null
+      ? (deriveUnitPriceLabel(product.basePrice, {
+          amount: product.netContentAmount,
+          unit: product.netContentUnit,
+        }) ?? product.unitLabel)
+      : product.unitLabel;
+
+  return (
+    <div className="skew-card-wrap h-full">
+      <Card variant="product">
+        {/* Top badges */}
+        <div className="absolute top-2.5 left-2.5 z-10 flex flex-wrap gap-1">
+          {product.isHalal && (
+            <span className="skew-card-badge flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+              <span className="h-1.5 w-1.5 rounded-full bg-action-tint"></span>
+              Halal
+            </span>
+          )}
+          {product.isFresh && (
+            <span className="skew-card-badge rounded-full bg-action px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+              Fresh
+            </span>
+          )}
+          {/*
+            #608 — filterable since #569, invisible until now: a shopper could narrow a listing to
+            gluten-free products and read nothing on any card saying which ones were. Each badge
+            carries its meaning as TEXT, not colour alone — `bg-surface-muted` here is decoration,
+            and removing every colour from this card would leave all three still readable.
+
+            HMC is a NAMED CERTIFYING BODY, not a synonym for Halal, and #239 was a real incident
+            of this codebase asserting an HMC claim with nothing behind it. The badge is legitimate
+            here because there is per-product data behind it (lib/catalogue-form.ts requires
+            `hmcReference` whenever the flag is ticked), but the reference itself is rendered on
+            the detail page rather than crammed onto a card.
+          */}
+          {product.isVegetarian && (
+            <span className="skew-card-badge rounded-full bg-surface-muted px-2 py-0.5 text-[10px] font-semibold text-primary shadow-sm">
+              Vegetarian
+            </span>
+          )}
+          {product.isGlutenFree && (
+            <span className="skew-card-badge rounded-full bg-surface-muted px-2 py-0.5 text-[10px] font-semibold text-primary shadow-sm">
+              Gluten free
+            </span>
+          )}
+          {product.isHmcCertified && (
+            <span className="skew-card-badge rounded-full bg-surface-muted px-2 py-0.5 text-[10px] font-semibold text-primary shadow-sm">
+              HMC certified
+            </span>
+          )}
+          {hasDiscount && (
+            <span className="skew-card-badge rounded-full bg-accent px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+              Offer
+            </span>
+          )}
+        </div>
+
+        {/* Image container */}
+        <div className="relative aspect-4/3 w-full shrink-0 overflow-hidden bg-surface-muted">
+          <div className="skew-card-inner h-full w-full">
+            {product.primaryImage ? (
+              // #502: ProductImage is a thin client boundary that swaps to the
+              // no-image box below if the object turns out not to exist in this
+              // environment's bucket. Everything else about this card stays
+              // server-rendered.
+              <ProductImage
+                src={composePublicUrl(cdnBaseUrl, product.primaryImage.storageKey)}
+                alt={product.primaryImage.alt}
+                className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105 motion-reduce:group-hover:scale-100"
+              />
+            ) : (
+              <div className="h-full w-full bg-surface-muted" />
+            )}
+          </div>
+          {hasDiscount && (
+            <div className="skew-card-badge absolute right-2 bottom-2 rounded bg-danger px-1.5 py-0.5 text-[11px] font-bold text-white">
+              Save {formatPrice(saving)}
+            </div>
+          )}
+
+          {/* Desktop Quick View overlay: reveals on card hover with smooth, subtle hover transition */}
+          <div className="skew-card-inner absolute inset-0 hidden sm:flex items-center justify-center bg-black/25 opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100 focus-within:opacity-100 pointer-events-none group-hover:pointer-events-auto focus-within:pointer-events-auto z-20">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                openQuickView(product.slug, product);
+              }}
+              className="flex items-center gap-1.5 rounded-full bg-white/95 px-3.5 py-1.5 text-xs font-bold text-primary shadow-md backdrop-blur-xs transition-transform duration-200 hover:scale-105 motion-reduce:hover:scale-100 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
+            >
+              <Icon name="eye" className="h-3.5 w-3.5" />
+              <span>Quick View</span>
+            </button>
+          </div>
+
+          {/* Mobile / Touch: Always show a compact Quick View button/icon.
+              #961 — the BUTTON is the 44px (`tap`) hit area; the visible circle inside it stays
+              28px. Anchored at top-0/right-0, the 44px box centres the circle 8px in from the
+              corner, exactly where the old top-2/right-2 placed it. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              openQuickView(product.slug, product);
+            }}
+            aria-label={`Quick view ${product.name}`}
+            className="group/qv sm:hidden absolute top-0 right-0 z-20 flex size-tap items-center justify-center rounded-full"
+          >
+            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-primary shadow-md backdrop-blur-xs transition group-active/qv:scale-95 motion-reduce:group-active/qv:scale-100">
+              <Icon name="eye" className="h-4 w-4" />
+            </span>
+          </button>
+
+          {/* #232 — the favourite control. It owns its own absolute placement because that
+              placement is a function of the quick-view button directly above: one 44px box inboard
+              below `sm`, the corner itself from `sm` up, where that button is hidden. See
+              FavouriteButton.tsx. */}
+          <FavouriteButton
+            productId={product.id}
+            productName={product.name}
+            state={favouriteState}
+          />
+        </div>
+
+        {/* Content */}
+        <div className="skew-card-inner flex flex-1 flex-col justify-between p-3.5">
+          <div>
+            {/* Rating & Origin */}
+            <div className="mb-1 flex items-center justify-between text-xs text-black/60">
+              <ProductRating
+                averageRating={product.averageRating}
+                reviewCount={product.reviewCount}
+              />
+              {product.origin && (
+                <span className="max-w-[100px] truncate text-[11px]" title={product.origin}>
+                  {product.origin}
+                </span>
+              )}
+            </div>
+
+            {/* #608 — the brand, filterable since #569 and until now not shown anywhere. */}
+            {product.brand && (
+              <div
+                className="mb-1 truncate text-[11px] font-medium text-black/60"
+                title={product.brand.name}
+              >
+                {product.brand.name}
+              </div>
+            )}
+
+            {/*
+              Title — a REAL link to the product page, with Quick View layered on top as a
+              JavaScript enhancement (#955, owner ruling 2026-10-04).
+
+              A left-click still opens the drawer, because the handler calls `preventDefault()`
+              first; everything that does not run that handler — a crawler, a visitor with
+              JavaScript off, a middle-click, a ⌘/Ctrl-click — follows the `href` to
+              `/products/[slug]` instead. That is the whole point: between #830 and this change a
+              listing page contained zero `href="/products/…"`, so product pages were unreachable
+              from anywhere a shopper or a crawler actually starts.
+
+              THE ANCHOR COVERS THE TITLE TEXT ONLY — no `after:absolute after:inset-0`. The
+              stretched variant described in this file's header comment was considered and
+              rejected at /propose: it would re-enable card-wide hit-testing that #830 removed and
+              that #964/#979 never measured in that shape.
+            */}
+            <h3 className="line-clamp-2 text-sm leading-tight font-semibold text-black/90 transition-colors group-hover:text-primary">
+              <Link
+                href={`/products/${product.slug}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  openQuickView(product.slug, product);
+                }}
+                className="text-left font-semibold text-black/90 transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action rounded-xs"
+              >
+                {product.name}
+              </Link>
+            </h3>
+
+            <p className="mt-0.5 text-xs text-black/60">{unitDisplay}</p>
+
+            {/*
+              #918 — values of the filters the vendor marked "Show on product cards". Up to three
+              on the line (a card has room for no more); the full "Name: Value" list is in the
+              title. Absent entirely when there are none, so a grocery card is unchanged.
+            */}
+            {product.cardSpecifications.length > 0 && (
+              <p
+                data-card-specs
+                className="mt-0.5 truncate text-[11px] text-black/60"
+                title={product.cardSpecifications
+                  .map((spec) => `${spec.name}: ${spec.value}`)
+                  .join(" · ")}
+              >
+                {product.cardSpecifications
+                  .slice(0, 3)
+                  .map((spec) => spec.value)
+                  .join(" · ")}
+              </p>
+            )}
+
+            {isLowStock && (
+              <p className="mt-1.5 flex items-center gap-1 text-[11px] font-semibold text-danger">
+                <Icon name="triangle-alert" className="h-3 w-3" />
+                Only {product.stockQuantity} left
+              </p>
+            )}
+            {!product.inStock && product.expectedRestockDay !== null && (
+              <p className="mt-1.5">
+                <RestockNotice
+                  day={product.expectedRestockDay}
+                  className="text-[11px]"
+                  iconClassName="h-3 w-3"
+                />
+              </p>
+            )}
+          </div>
+
+          {/* Price & cart controls — a SIBLING of the title link, never a descendant of it
+              (R11): these render real `<button>` elements and HTML forbids interactive content
+              inside an `<a>`. `relative z-10` no longer has an overlay to sit above, since
+              #955's anchor covers the title text only; it is kept deliberately — see this
+              file's header comment. */}
+          <div className="relative z-10 mt-3 flex flex-col gap-2 border-t border-black/5 pt-2">
+            <div className="skew-card-price flex flex-wrap items-baseline gap-1.5">
+              <span className="text-base font-bold text-primary">
+                {formatPrice(product.basePrice)}
+              </span>
+              {hasDiscount && (
+                <span className="text-xs text-black/60 line-through">
+                  {formatPrice(product.originalPrice!)}
+                </span>
+              )}
+            </div>
+
+            {hasTier && (
+              <p className="skew-card-price -mt-1 text-[11px] font-semibold text-action">
+                {tierQuantity} for {formatPrice(product.tier!.groupPricePence)}
+              </p>
+            )}
+
+            {/*
+              In the cart -> the stepper mutates it. Not in the cart -> the
+              existing add control, unchanged. An out-of-stock product always
+              gets the disabled add control and never a stepper (R13).
+            */}
+            {product.inStock && cartQuantity > 0 ? (
+              <CartQuantityStepper
+                productId={product.id}
+                quantity={cartQuantity}
+                stock={product.stockQuantity}
+                productName={product.name}
+              />
+            ) : (
+              <AddToCartButton
+                productId={product.id}
+                productName={product.name}
+                disabled={!product.inStock}
+                label={`Add ${product.name} to cart`}
+                variant="card"
+              />
+            )}
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}

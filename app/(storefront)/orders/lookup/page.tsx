@@ -1,0 +1,300 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { headers } from "next/headers";
+import { getCurrentVendorId } from "@/lib/tenant";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { vendorOrderPrefix } from "@/lib/order-totals";
+import { getGuestOrderLookupService } from "@/lib/orders-service";
+import type { GuestLookupOrder } from "@/lib/repositories/orders";
+import { checkOrderLookupRateLimitForVendor } from "@/lib/order-lookup-rate-limit-service";
+import { formatPrice } from "@/components/product/format-price";
+import { GuestEraseForm } from "@/components/orders/GuestEraseForm";
+import { PageContainer } from "@/components/layout/PageContainer";
+import { Icon } from "@/components/icons/Icon";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Track Your Order — Guest Order Lookup",
+  description: "Track your order status using your Order Number and Email.",
+};
+
+interface LookupPageProps {
+  searchParams: Promise<{
+    orderNumber?: string;
+    email?: string;
+  }>;
+}
+
+/**
+ * Cloudflare always sets CF-Connecting-IP on a real request (staging/production
+ * are never plain HTTP behind a proxy that would strip it — same reasoning
+ * lib/auth-origin.ts's docstring gives for x-forwarded-proto). x-forwarded-for
+ * is the fallback for `next dev`/local tooling, where lookups aren't internet-
+ * facing and coarse-grained throttling is acceptable.
+ */
+async function resolveClientIp(): Promise<string> {
+  const h = await headers();
+  return h.get("cf-connecting-ip") ?? h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+}
+
+export default async function OrderLookupPage({ searchParams }: LookupPageProps) {
+  const { orderNumber = "", email = "" } = await searchParams;
+
+  let orderResult: GuestLookupOrder | null = null;
+  let errorMsg = null;
+  let rateLimited = false;
+
+  if (orderNumber.trim()) {
+    const vendorId = await getCurrentVendorId();
+
+    const { allowed } = await checkOrderLookupRateLimitForVendor(vendorId, await resolveClientIp());
+    if (!allowed) {
+      rateLimited = true;
+    } else if (!email.trim()) {
+      // requirements.md §4.1: Order Number + Email is the credential pair —
+      // email is not an optional refinement, it IS half the credential.
+      errorMsg = "Enter both your order number and the email used to place the order.";
+    } else {
+      const found = await getGuestOrderLookupService().find(orderNumber.trim(), email.trim());
+      if (found) {
+        orderResult = found;
+      } else {
+        errorMsg = "Order number and email combination did not match our records.";
+      }
+    }
+  }
+
+  /*
+   * #1043 — the example order number belongs to whichever vendor is being viewed.
+   *
+   * Aheed's own three-letter prefix was hardcoded here, but no prefix is a platform constant:
+   * `vendorOrderPrefix` derives each one from
+   * the vendor's slug, so every store except Aheed showed guests an example that could never be
+   * theirs (same class as #729/#239). `getCurrentVendorProfile()` is `cache()`d and the
+   * `(storefront)` layout has already called it on this request, so this adds no query. The `?? ""`
+   * yields the helper's own `ORD` fallback for an unresolved host, which the layout redirects to
+   * `/coming-soon` before this page renders anyway.
+   */
+  const profile = await getCurrentVendorProfile();
+  const examplePrefix = vendorOrderPrefix(profile?.slug ?? "");
+
+  const steps = [
+    { status: "CONFIRMED", label: "Order Confirmed", desc: "Store staff preparing items" },
+    {
+      status: "OUT_FOR_DELIVERY",
+      label: "Out for Delivery",
+      desc: "En route with local delivery team",
+    },
+    { status: "DELIVERED", label: "Delivered", desc: "Handed safely to customer" },
+  ];
+
+  const getStepIndex = (status: string) => {
+    if (status === "CONFIRMED" || status === "PENDING_PAYMENT") return 0;
+    if (status === "OUT_FOR_DELIVERY") return 1;
+    if (status === "DELIVERED") return 2;
+    return 0;
+  };
+
+  const currentIndex = orderResult ? getStepIndex(orderResult.status) : 0;
+
+  return (
+    <PageContainer width="narrow" className="text-primary">
+      <nav className="mb-6 text-xs text-primary-muted">
+        <Link href="/" className="hover:underline">
+          Home
+        </Link>{" "}
+        / <span className="text-primary font-medium">Order Lookup</span>
+      </nav>
+
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        {/* Header */}
+        <div className="p-6 bg-primary text-white">
+          <span className="text-[10px] uppercase tracking-wider font-bold text-emerald-200">
+            Delivery progress
+          </span>
+          <h1 className="text-xl font-extrabold mt-0.5">Track Your Order</h1>
+        </div>
+
+        {/* Lookup Form */}
+        <form method="GET" className="p-6 border-b border-slate-100 bg-slate-50/50 space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="orderNumber" className="block text-xs font-bold text-slate-700 mb-1">
+                Order Number
+              </label>
+              <input
+                type="text"
+                id="orderNumber"
+                name="orderNumber"
+                defaultValue={orderNumber}
+                placeholder={`e.g. ${examplePrefix}-20260813-K4M2XQ`}
+                required
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+              />
+            </div>
+            <div>
+              <label htmlFor="email" className="block text-xs font-bold text-slate-700 mb-1">
+                Email Address
+              </label>
+              <input
+                type="email"
+                id="email"
+                name="email"
+                defaultValue={email}
+                placeholder="shopper@example.com"
+                required
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action focus-visible:ring-offset-2"
+              />
+            </div>
+          </div>
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-primary/90 transition-colors"
+          >
+            <Icon name="search" className="w-4 h-4" />
+            <span>Track Order</span>
+          </button>
+        </form>
+
+        {/* Rate-Limited State */}
+        {rateLimited && (
+          <div className="p-6 bg-red-50 text-red-900 flex items-start gap-3 border-b border-red-100">
+            <Icon name="circle-alert" className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div className="text-xs">
+              <p className="font-bold">Too many attempts</p>
+              <p className="mt-0.5 text-red-700">
+                Too many lookup attempts. Please wait a minute and try again.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Error State */}
+        {errorMsg && (
+          <div className="p-6 bg-red-50 text-red-900 flex items-start gap-3 border-b border-red-100">
+            <Icon name="circle-alert" className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div className="text-xs">
+              <p className="font-bold">Lookup Failed</p>
+              <p className="mt-0.5 text-red-700">{errorMsg}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Order Details Result */}
+        {orderResult && (
+          <div className="p-6 space-y-6">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <p className="text-xs text-slate-500 font-medium">Order Number</p>
+                <p className="text-base font-extrabold text-primary">#{orderResult.orderNumber}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-slate-500 font-medium">Status</p>
+                <span className="inline-block rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-primary mt-0.5">
+                  {orderResult.status}
+                </span>
+              </div>
+            </div>
+
+            {/* 3-Step Pipeline Visualizer */}
+            <h2 className="sr-only">Delivery Status</h2>
+            <div className="relative space-y-6 pl-4 border-l-2 border-slate-200 my-4">
+              {steps.map((step, idx) => {
+                const isCompleted = idx <= currentIndex;
+                const isCurrent = idx === currentIndex;
+
+                return (
+                  <div key={step.status} className="relative flex items-start gap-4">
+                    <div
+                      className={`absolute -left-[25px] top-0.5 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition ${
+                        isCompleted
+                          ? "bg-primary text-white ring-4 ring-emerald-100 shadow-sm"
+                          : "bg-slate-200 text-slate-500"
+                      }`}
+                    >
+                      {isCompleted ? <Icon name="circle-check" className="w-3.5 h-3.5" /> : idx + 1}
+                    </div>
+
+                    <div className="pl-2">
+                      <h3
+                        className={`font-bold text-sm leading-tight ${
+                          isCurrent
+                            ? "text-primary"
+                            : isCompleted
+                              ? "text-slate-800"
+                              : "text-slate-400"
+                        }`}
+                      >
+                        {step.label}
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">{step.desc}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Items Summary */}
+            <h2 className="sr-only">Order Items</h2>
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 space-y-3">
+              <h3 className="text-xs font-bold text-slate-900">Items Ordered</h3>
+              <div className="space-y-2">
+                {orderResult.items.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between text-xs text-slate-700"
+                  >
+                    <span>
+                      {item.quantity} × {item.productName}
+                    </span>
+                    <span className="font-semibold text-slate-900">
+                      {formatPrice(item.lineTotalPence)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-2 border-t border-slate-200 flex justify-between font-bold text-sm text-slate-900">
+                <span>Total Amount:</span>
+                <span className="text-primary">{formatPrice(orderResult.totalPence)}</span>
+              </div>
+            </div>
+
+            {/*
+              Art. 15 for guests (#253). Rendered only under a proven
+              order-number/email pair, like the erase form below it — and the
+              route re-proves the pair rather than trusting these values, which
+              is why passing them in the query string is safe: they are a
+              convenience for the link, never the authorisation.
+
+              A plain <a download>, not a fetch: the response carries
+              Content-Disposition, so the browser saves it with no client JS.
+            */}
+            <div className="mt-6 pt-4 border-t border-slate-200">
+              <a
+                href={`/orders/lookup/export?orderNumber=${encodeURIComponent(
+                  orderResult.orderNumber,
+                )}&email=${encodeURIComponent(email.trim())}`}
+                download
+                className="inline-flex items-center gap-2 text-sm font-medium text-action hover:text-action-hover underline"
+              >
+                <Icon name="download" className="h-4 w-4" />
+                Download this order&rsquo;s data (JSON)
+              </a>
+              <p className="mt-1 text-xs text-slate-600">
+                A machine-readable copy of this one order, under UK GDPR Article 15.
+              </p>
+            </div>
+
+            {/*
+              Art. 17 for guests (#251 / #222). Rendered only under a proven
+              order-number/email pair — the same credential the lookup required —
+              and the action re-proves it rather than trusting these fields.
+            */}
+            <GuestEraseForm orderNumber={orderResult.orderNumber} email={email.trim()} />
+          </div>
+        )}
+      </div>
+    </PageContainer>
+  );
+}

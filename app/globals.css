@@ -1,0 +1,404 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@import "../design-system/tokens/tokens.css";
+
+/*
+ * The storefront is a light-only design (no dark-mode styles yet). Declaring
+ * `light dark` previously let a dark-mode browser paint a dark canvas, which
+ * made dark brand text on transparent surfaces (e.g. the category cards)
+ * unreadable. Force light and set an explicit white background + brand ink
+ * text (#212121, brand kit "Text / Dark") so contrast holds everywhere.
+ */
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: #ffffff;
+  color: #212121;
+}
+
+/* Hide the scrollbar on horizontal scroll strips (e.g. the department scroller,
+   which is driven by ‹ › arrow buttons instead). Content still scrolls. */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * P8.5a (#345) — skewed product card.
+ *
+ * The card rests at a -2deg skew on a perspective plane and straightens on
+ * hover; its content is counter-skewed +2deg so text and images stay
+ * rectangular at rest. Badges and the price tag carry their own steeper skew,
+ * which is why they are separate classes rather than inheriting the card's.
+ *
+ * TRANSITIONS NAME THEIR PROPERTIES. `transition-all` and global
+ * element-selector transition rules are both banned here — a global rule was
+ * the cause of the page-refresh layout thrashing removed in #324, and the
+ * `transition-all` sweep that followed is what broke the carousel dot in #326.
+ * `transform` and `box-shadow` are the only animated properties, and neither
+ * affects layout, so nothing here can shift the page.
+ *
+ * COLOUR IS TOKEN-DERIVED. The reference implementation
+ * (docs/ui-ref-revised/src/index.css:183-230) hardcodes rgba(27, 94, 32, .18) —
+ * Aheed's green — for the hover shadow. SriMart renders blue/purple/red, so the
+ * shadow is mixed from --color-primary instead, which brandStyle() overrides
+ * per vendor.
+ */
+.skew-card-wrap {
+  perspective: 1200px;
+}
+
+.skew-card {
+  transform: skewX(-2deg);
+  transform-origin: center center;
+  transition:
+    transform 380ms ease-out,
+    box-shadow 380ms ease-out,
+    border-color 300ms ease;
+}
+
+.skew-card-inner {
+  transform: skewX(2deg);
+  transition: transform 380ms ease-out;
+}
+
+.skew-card-badge {
+  transform: skewX(-6deg);
+  transition: transform 350ms ease-out;
+}
+
+.skew-card-price {
+  transform: skewX(-4deg);
+  transition: transform 350ms ease-out;
+}
+
+.skew-card:hover {
+  transform: skewX(0deg) translateY(-6px);
+  box-shadow:
+    0 20px 35px -8px color-mix(in srgb, var(--color-primary) 22%, transparent),
+    0 10px 15px -5px color-mix(in srgb, var(--color-primary) 10%, transparent);
+}
+
+.skew-card:hover .skew-card-inner,
+.skew-card:hover .skew-card-badge,
+.skew-card:hover .skew-card-price {
+  transform: skewX(0deg);
+}
+
+/*
+ * The repo's FIRST CSS reduced-motion block. DepartmentHero.tsx handles the
+ * preference in JS (matchMedia) because it governs an auto-rotating timer;
+ * this one governs a purely CSS effect, so it belongs here. Both the skew and
+ * the hover lift are removed — the card keeps its hover shadow and border, so
+ * hover is still perceivable without motion.
+ *
+ * THIS BLOCK IS CLASS-SCOPED, AND THAT IS A REAL LIMIT, NOT AN OVERSIGHT (#651).
+ * It can only reach the `.skew-card*` classes named below. A transform written
+ * as a Tailwind utility — `group-hover:scale-105` on the card's own image, or
+ * `active:scale-95` on a submit button — is NOT in that family, and `transform`
+ * is not an inherited property, so `transform: none` here does nothing for a
+ * descendant carrying its own. Those 24 sites use the `motion-reduce:` variant
+ * at the call site instead, pinned by tests/motion-reduce-coverage.test.ts.
+ *
+ * WIDENING THIS TO A GLOBAL SELECTOR WAS CONSIDERED AND REJECTED. Two reasons,
+ * both load-bearing: a blanket `transition-duration: 0.01ms` would also remove
+ * the box-shadow and border-color transitions this block deliberately KEEPS
+ * (that is what "hover is still perceivable" above depends on); and any blanket
+ * `transform: none` would break the seven STATIC `-translate-y-1/2` centring
+ * transforms in this repo — search icons would detach from their inputs and the
+ * carousel controls would mis-position, for reduced-motion users only.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .skew-card,
+  .skew-card-inner,
+  .skew-card-badge,
+  .skew-card-price,
+  .skew-card:hover,
+  .skew-card:hover .skew-card-inner,
+  .skew-card:hover .skew-card-badge,
+  .skew-card:hover .skew-card-price {
+    transform: none;
+    transition:
+      box-shadow 380ms ease-out,
+      border-color 300ms ease;
+  }
+}
+
+/*
+ * P8.5b (#346) — the department hero's chevron cutout.
+ *
+ * A clip-path polygon rather than a background image: it costs no bytes, takes
+ * the vendor's palette from the panel behind it, and sidesteps the CSP entirely
+ * (img-src allows only 'self' and the CDN, which is why the prototype's 39
+ * unsplash URLs could never have shipped).
+ *
+ * The expand-on-hover lives here rather than as a Tailwind `group-hover:`
+ * variant because `clip-path` is set as an inline style in the component and a
+ * utility cannot override that on hover. Only `clip-path` transitions, and it
+ * is not a layout property, so this cannot shift the page.
+ */
+.dept-chevron {
+  clip-path: polygon(28% 0%, 100% 0%, 100% 100%, 0% 100%);
+  transition: clip-path 500ms ease-out;
+}
+
+.dept-panel:hover .dept-chevron {
+  /* The leading edge slides left, widening the cut. */
+  clip-path: polygon(8% 0%, 100% 0%, 100% 100%, 0% 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dept-chevron,
+  .dept-panel:hover .dept-chevron {
+    transition: none;
+  }
+}
+
+/*
+ * P9.2 (#818) — the customer-feedback card stack.
+ *
+ * The geometry (per-card translate/scale/z-index) is inline in
+ * components/ui/CardStack.tsx, because it is computed per card from its depth and a utility
+ * class cannot express an arbitrary per-item transform. What lives here is everything a
+ * media query has to be able to switch off.
+ *
+ * THE REDUCED-MOTION FALLBACK IS A REAL MEDIA QUERY, NOT A JS CHECK OR AN OPT-OUT CLASS.
+ * This project's existing class-scoped opt-out was found missing 24 utility transforms
+ * (Discover, 2026-09-07): an opt-out can forget a transform, a media query that clears
+ * `transform` on the item selector cannot. Under `reduce` the stack stops being a stack —
+ * it becomes an ordinary horizontally scrollable row with native scrolling, which is both
+ * motion-free and fully operable.
+ */
+.card-stack {
+  position: relative;
+  display: grid;
+  min-height: 16rem;
+  perspective: 1200px;
+  perspective-origin: center center;
+  transform-style: preserve-3d;
+}
+
+.card-stack:focus-visible {
+  outline: 2px solid var(--color-action);
+  outline-offset: 4px;
+  border-radius: var(--radius-2xl);
+}
+
+.card-stack-item {
+  grid-area: 1 / 1;
+  touch-action: pan-y;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-stack {
+    display: flex;
+    gap: 1rem;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    min-height: 0;
+    perspective: none !important;
+    transform-style: flat !important;
+  }
+
+  .card-stack-item {
+    /* Clears the inline transform from the component: no fan, no scale, no motion. */
+    transform: none !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    transition: none !important;
+    flex: 0 0 min(22rem, 85%);
+    scroll-snap-align: start;
+  }
+}
+
+/*
+ * #1173 — the header search's department selector: compact, and a modern list where the browser
+ * allows. It stays a NATIVE <select> (#1131: works with JavaScript off, a phone opens its own
+ * picker, keyboard and screen-reader behaviour come built in).
+ *
+ * 1. Every browser: a compact fixed width (was w-24 / sm:w-36).
+ * 2. `field-sizing: content` (Chromium): sized to the selected option, so "All" is a small button.
+ * 3. `appearance: base-select` (Chrome/Edge 135+): the button and the open list become stylable
+ *    (`::picker(select)`). Safari and Firefox skip the block and keep their native list.
+ *
+ * Colours are design tokens only, so `brandStyle()` gives each vendor its own; the one literal is a
+ * neutral low-alpha shadow. The picker's transitions name their properties and stop under reduced
+ * motion (design-system "Motion").
+ */
+.department-select {
+  width: 5.5rem;
+}
+
+@supports (field-sizing: content) {
+  .department-select {
+    field-sizing: content;
+    width: auto;
+    min-width: 3.5rem;
+    max-width: 10rem;
+  }
+}
+
+@supports (appearance: base-select) {
+  .department-select,
+  .department-select::picker(select) {
+    appearance: base-select;
+  }
+
+  /* The base-select button lays its label and arrow out as blocks, so without this the label sits
+     at the top of the control and, at its narrowest, the arrow wraps under it (#1173 Validate). */
+  .department-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+  }
+
+  .department-select::picker-icon {
+    color: var(--color-primary-muted);
+    transition: rotate 150ms ease;
+  }
+
+  .department-select:open::picker-icon {
+    rotate: 180deg;
+  }
+
+  .department-select::picker(select) {
+    margin-top: 0.375rem;
+    min-width: 14rem;
+    max-height: 22rem;
+    overflow-y: auto;
+    padding: 0.375rem;
+    border: 1px solid color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border-radius: 0.75rem;
+    background: var(--color-white);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.14);
+  }
+
+  .department-select option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.5rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-primary);
+    transition: background-color 120ms ease;
+  }
+
+  .department-select option:hover,
+  .department-select option:focus-visible {
+    background: var(--color-action-tint);
+    outline: none;
+  }
+
+  .department-select option:checked {
+    font-weight: 700;
+    background: var(--color-surface-muted);
+  }
+
+  .department-select option::checkmark {
+    content: "✓";
+    order: 1;
+    margin-left: auto;
+    color: var(--color-action);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .department-select::picker-icon,
+  .department-select option {
+    transition: none;
+  }
+}
+
+/*
+ * #1173 — the collapsible browse sidebar (`CollapsibleSidebar`) on /search and /categories/[slug].
+ * Keyed off `html[data-filters-collapsed]`, which an inline script sets before paint, so a tab that
+ * collapsed earlier paints collapsed with no flash. Desktop only (`md` and up): below `md` the
+ * attribute changes nothing, and the mobile filter `details` and Browse render as always.
+ * `width` is the only transitioned property (design-system "Motion").
+ */
+@media (min-width: 48rem) {
+  .filters-sidebar {
+    width: 15rem;
+    transition: width 200ms ease;
+  }
+
+  html[data-filters-collapsed] .filters-sidebar {
+    width: 2.75rem;
+  }
+
+  html[data-filters-collapsed] .filters-sidebar [data-filters-content] {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .filters-sidebar {
+    transition: none;
+  }
+}
+
+/*
+ * #1173 — one more product per row while the sidebar is collapsed, so hiding it shows MORE items
+ * rather than wider (taller) cards. Scoped to the collapsible layout (`data-filters-layout`), so
+ * /bundles and every other grid keep `productGridClassName`'s columns. Owner ruling: Standard 4→5,
+ * Compact 4→5 (lg) and 6→7 (xl), Spacious 2→3 (lg) and 4→5 (xl). Below `lg`, nothing changes.
+ */
+@media (min-width: 64rem) {
+  html[data-filters-collapsed] [data-filters-layout] [data-product-grid][data-density="STANDARD"],
+  html[data-filters-collapsed] [data-filters-layout] [data-product-grid][data-density="COMPACT"] {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  html[data-filters-collapsed] [data-filters-layout] [data-product-grid][data-density="SPACIOUS"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 80rem) {
+  html[data-filters-collapsed] [data-filters-layout] [data-product-grid][data-density="COMPACT"] {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  html[data-filters-collapsed] [data-filters-layout] [data-product-grid][data-density="SPACIOUS"] {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+/*
+ * #1254 — 3D icon popping keyframe animation. Applied via CSS class so no inline <style>
+ * text pollutes parent link textContent or accessible label computations (WCAG 2.5.3).
+ */
+@keyframes icon-pop {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-icon-pop {
+  animation: icon-pop 1s cubic-bezier(0.175, 0.885, 0.32, 1.275) infinite;
+  transform-origin: center center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-icon-pop {
+    animation: none !important;
+    transform: none !important;
+  }
+}

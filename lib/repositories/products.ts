@@ -1,0 +1,3152 @@
+import type { Prisma } from "@prisma/client";
+import type { getPrisma, getPrismaWs } from "@/lib/db";
+import { isUniqueViolation } from "@/lib/repositories/prisma-errors";
+import { visibleCategoryWhere } from "@/lib/category-visibility";
+import { keysetCursorArgs, runKeysetPage } from "@/lib/repositories/pagination";
+import {
+  comparePackSizes,
+  deriveUnitPricePenceForSort,
+  type NetContent,
+  type NetContentUnit,
+} from "@/components/product/unit-price";
+import {
+  ELIGIBILITY_SELECT,
+  PURCHASABILITY_SELECT,
+  purchasableQuantity,
+  stockModeOf,
+  type ProductRestriction,
+  type StockMode,
+} from "@/lib/cart-rules";
+import { restrictedEnableError } from "@/lib/product-restriction";
+import { restockDayFromStored } from "@/lib/restock";
+import { calendarDayToUtcMidnight } from "@/lib/local-datetime";
+import { CANDIDATE_QUERY_LIMIT, type ListCandidate } from "@/lib/shopping-list";
+import { parseSearchQuery } from "@/lib/search-query";
+import { hasNameTierCandidate, rankSearchCandidates } from "@/lib/search-ranking";
+import { correctTerms } from "@/lib/search-typo-correction";
+import {
+  expandSearchTerms,
+  flattenVariants,
+  toUnexpandedGroups,
+  type SearchTermGroup,
+} from "@/lib/search-expansion";
+import { listApprovedAliasMap } from "@/lib/repositories/search-synonyms";
+import {
+  MAX_IMAGE_ATTEMPT_FAILURES,
+  PLACEHOLDER_IMAGE_SUFFIX,
+  isPlaceholderImageKey,
+  nextConfirmedPhotoSource,
+  type ProductImageSource,
+} from "@/lib/product-image";
+import type { ProductTier } from "@/lib/tier-pricing";
+import { NOTE_ACCEPTANCE_SELECT, productAcceptsNote } from "@/lib/custom-note";
+import type { AttributeValueWrite } from "@/lib/product-attribute-form";
+import { formatAttributeNumber } from "@/lib/attribute-number";
+import {
+  deleteProductTier,
+  getTierForProduct,
+  listActiveTiersForProducts,
+  upsertProductTier,
+} from "@/lib/repositories/product-tiers";
+
+export interface ProductImageSummary {
+  storageKey: string;
+  alt: string;
+  isPrimary: boolean;
+}
+
+/**
+ * The admin gallery (#211) needs to target one specific row, which the
+ * public-facing ProductImageSummary deliberately doesn't carry — storefront
+ * reads never need a row's id.
+ */
+export interface AdminProductImage extends ProductImageSummary {
+  id: string;
+  sortOrder: number;
+  /** #900 — provenance, shown to staff and gating the confirm-as-real-photo control. */
+  source: ProductImageSource;
+}
+
+export interface ProductSummary {
+  id: string;
+  slug: string;
+  name: string;
+  basePrice: number;
+  unitLabel: string;
+  /** #398 (derivation half) — see components/product/unit-price.ts. Both null or both set. */
+  netContentAmount: number | null;
+  netContentUnit: NetContentUnit | null;
+  primaryImage: ProductImageSummary | null;
+  origin: string | null;
+  originalPrice: number | null;
+  isHalal: boolean;
+  isFresh: boolean;
+  isOrganic: boolean;
+  /**
+   * #608 — the facets `#569` made FILTERABLE but never made visible. A shopper could narrow a
+   * listing to gluten-free products and then read nothing on any card saying which ones were.
+   * These live on the summary rather than only on the detail page because the card is where the
+   * filtered result is actually read.
+   */
+  isVegetarian: boolean;
+  isGlutenFree: boolean;
+  isHmcCertified: boolean;
+  /** #608 — null when the product has no brand; the same shape `getAvailableFacets` returns. */
+  brand: { id: string; name: string; slug: string } | null;
+  averageRating: number;
+  reviewCount: number;
+  /** P3a — cards need this to render the add-to-cart out-of-stock state. */
+  inStock: boolean;
+  /**
+   * P8.5a (#345) — the card's low-stock urgency badge needs the COUNT, not just
+   * `inStock`. Both come from the `Inventory` row that was already joined for
+   * `inStock`, so this adds no query and no migration.
+   *
+   * `stockQuantity` comes from `purchasableQuantity()` (#1211), so a negative,
+   * null or UNKNOWN inventory reads as 0 rather than leaking a nonsense number
+   * into the UI, and an UNTRACKED product reads as the per-line cap. `lowStockThreshold` falls back to the schema default (3) when there is
+   * no inventory row at all — a product with no inventory is out of stock, so
+   * the threshold is never actually consulted for it, but a number keeps the
+   * type honest and the card free of null handling.
+   */
+  stockQuantity: number;
+  lowStockThreshold: number;
+  /**
+   * #1211 — whether `stockQuantity` is a real count. Only a TRACKED product may show "Only N
+   * left" or the low-stock badge; an UNTRACKED one's quantity is the per-line cap, not stock.
+   */
+  stockMode: StockMode;
+  /**
+   * #876 — the vendor-local day (`YYYY-MM-DD`) the product is expected back, or null. Mapped here
+   * from the same joined `Inventory` row as `inStock`. The repository returns whatever is stored;
+   * hiding a day that has passed needs the vendor's "today", so `lib/products-service.ts` does it.
+   */
+  expectedRestockDay: string | null;
+  /**
+   * P8.5d (#348) — the product's active multi-buy tier, or null.
+   *
+   * The card advertises it ("3 for £10.00") without knowing any quantity, which
+   * is why the tier itself travels rather than a computed saving: a saving needs
+   * a line quantity and a card has none. `lib/tier-pricing.ts` does the
+   * arithmetic wherever a quantity actually exists (the cart, the order).
+   */
+  tier: ProductTier | null;
+  /**
+   * #918 — the product's values for filters the vendor marked "Show on product cards", in the
+   * vendor's filter order, already formatted ("White", "65 W"). Empty when there are none.
+   */
+  cardSpecifications: { name: string; value: string }[];
+}
+
+/**
+ * Mirrors `Inventory.lowStockThreshold`'s schema default. Used only when a
+ * product has no inventory row; see ProductSummary's note.
+ */
+const DEFAULT_LOW_STOCK_THRESHOLD = 3;
+
+export interface ProductDetail extends ProductSummary {
+  description: string;
+  images: ProductImageSummary[];
+  /**
+   * #608/#239 — the HMC certification reference, so the claim never travels without its
+   * provenance. `lib/catalogue-form.ts` requires this whenever `isHmcCertified` is ticked and
+   * nulls it when it is not, so a true flag always has a reference behind it. Detail-page only:
+   * a card has no room for provenance, and #239 was a real incident of this codebase asserting an
+   * HMC claim with nothing behind it.
+   */
+  hmcReference: string | null;
+  /**
+   * #912 — the product's vendor-filter values ("Colour: Black"), in the vendor's filter order, so
+   * a shopper who filtered by one sees the same value on the product they open (the display gap
+   * #569's facets shipped with). Detail page only; empty when the product carries none.
+   */
+  specifications: { name: string; value: string }[];
+  /**
+   * #1135 — whether a shopper may attach a note to this product's basket line
+   * (`productAcceptsNote`). Detail page only; cards and Quick View get no note box.
+   */
+  acceptsNote: boolean;
+}
+
+export interface ProductPage {
+  items: ProductSummary[];
+  nextCursor: string | null;
+  /**
+   * P2.6 slice 1 (#564) — true when and only when MORE results exist than
+   * `searchProducts` was willing to rank, so the page can say so rather than
+   * presenting a partial set as if it were complete.
+   *
+   * Set by a SENTINEL ROW, not by the cap being reached: the fetch asks for
+   * `SEARCH_CANDIDATE_LIMIT + 1` rows and this is `rows.length > limit`.
+   * Defining it as "the cap was reached" would make it LIE when the catalogue
+   * holds exactly `SEARCH_CANDIDATE_LIMIT` matches — nothing would be missing,
+   * yet the shopper would be told the list is incomplete. One extra row buys a
+   * flag that means what it says.
+   *
+   * Always `false` for the keyset-paginated paths (`listProducts`,
+   * `listProductsByCategory`), which are not capped at all.
+   */
+  truncated: boolean;
+  /**
+   * P2.6 slice 2 (#565) — the DIRECT (#564) search's own candidate count, captured before any
+   * zero-result-ladder rung runs (capped at `SEARCH_CANDIDATE_LIMIT`, same as `truncated`'s
+   * source count). Exists so `lib/products-service.ts`'s query-log write can log a real count
+   * without a second query to re-derive one. Always `0` for `listProducts`/`listProductsByCategory`
+   * — meaningless there, present only so every `ProductPage` has the same shape.
+   */
+  directResultCount: number;
+  /**
+   * P2.6 slice 2 (#565) — `null` when the direct search already found something (the ladder never
+   * ran). `{ rung: "none" }` means every rung was tried and none found anything. Always `null` for
+   * `listProducts`/`listProductsByCategory`.
+   */
+  recovery: SearchRecoveryInfo | null;
+  /**
+   * P2.6 slice 3 (#580) — did the DIRECT search match anything on NAME (ranking tier 0-2), rather
+   * than only through some product's description prose?
+   *
+   * `directResultCount` cannot express this: a query returning one tangential description hit and a
+   * query that worked perfectly both report a positive count. This is what
+   * `lib/products-service.ts` writes to `SearchQueryLog.directNameMatch`, and what the thin-result
+   * suggestions below are triggered by. Always `false` for `listProducts`/`listProductsByCategory`,
+   * where it is meaningless.
+   */
+  directNameMatch: boolean;
+  /**
+   * P2.6 slice 3 (#580) — set when the direct search returned candidates but NONE of them matched
+   * on name, so the shopper is looking at results that are probably not what they asked for.
+   *
+   * This is deliberately NOT a ladder rung. The ladder REPLACES the result set, which is right for
+   * a query that found nothing and wrong for one that found something tangential: a shopper with
+   * fifty description-only matches must not have all fifty swapped out. Recovery must never
+   * subtract. So the page renders every direct result AND these suggestions beside them.
+   *
+   * `null` when the direct search found a name match, when it found nothing at all (the ladder
+   * handles that case), or on the non-search paths.
+   */
+  suggestions: SearchSuggestions | null;
+}
+
+/**
+ * Ways out of a thin result (P2.6 slice 3, #580), each rendered as a link to that search.
+ *
+ * Both fields are independently nullable, and BOTH being null is a meaningful, common state rather
+ * than an empty result: the notice still renders, because telling a shopper their results are only
+ * loosely related is the substance of #580 even when nothing better can be named.
+ */
+export interface SearchSuggestions {
+  /**
+   * The query rewritten in the catalogue's own vocabulary, when an approved synonym covers one of
+   * its terms — "haldi" offered as "turmeric".
+   */
+  canonicalQuery: string | null;
+  /**
+   * The query with each correctable term replaced by its nearest product-name token, when one is
+   * within the edit-distance budget. Same deterministic machinery as the ladder's typo rung.
+   */
+  correctedQuery: string | null;
+}
+
+/**
+ * See `ProductPage.recovery`. The ladder has three rungs — "typo", "identity", "broad" — tried in
+ * that order; "none" means all three ran and found nothing.
+ *
+ * #566 did NOT add a synonym rung, which an earlier version of this comment predicted it would.
+ * Synonyms widen the DIRECT predicate instead (`buildDirectSearchWhere` over term groups), so an
+ * alias-matched product is a first-class result ranked on its merits rather than a consolation
+ * prize reached only after the direct search had already failed.
+ */
+export type SearchRecoveryRung = "typo" | "identity" | "broad" | "none";
+
+export interface SearchRecoveryInfo {
+  rung: SearchRecoveryRung;
+  /** Only set when `rung === "typo"`. */
+  correctedTerms?: string[];
+}
+
+/** Shared filter shape for listByCategory(), search() and list() — one definition, not three. */
+export interface ProductFilters {
+  minPricePence?: number;
+  maxPricePence?: number;
+  inStockOnly?: boolean;
+  isHalal?: boolean;
+  isFresh?: boolean;
+  isOrganic?: boolean;
+  isFeatured?: boolean;
+  /** P2.6 slice 6 (#569) — dietary facets, same boolean shape as the three flags above. */
+  isVegetarian?: boolean;
+  isGlutenFree?: boolean;
+  isHmcCertified?: boolean;
+  /**
+   * #569 — "on offer": a single-unit markdown OR a multi-buy tier. One toggle, because both are
+   * genuine savings and a shopper filtering for offers wants "3 for GBP 10" as much as a
+   * struck-through price. See `buildFilterWhere` for why this one cannot be a top-level `OR`.
+   */
+  onOffer?: boolean;
+  /**
+   * #569 — country of origin, matched exactly against `Product.origin`. A raw string, NOT resolved
+   * against a taxonomy: unlike `categoryIds` there is nothing to resolve, so an unrecognised value
+   * legitimately matches nothing, exactly as an over-narrow price range does.
+   */
+  origin?: string;
+  /**
+   * #569 — brand, as an ID rather than a slug, for the identical reason `categoryIds` is:
+   * resolving a slug needs a second query, which belongs to the caller that already holds a
+   * repository. An unresolvable slug therefore reaches here as `undefined` — no predicate — rather
+   * than as a value that would silently empty the catalogue.
+   */
+  brandId?: string;
+  /**
+   * #397 — pack size, as a net-content amount AND unit together. Never one alone: `500` is not a
+   * pack size, and narrowing on the amount by itself would match 500g, 500ml and a 500-pack. See
+   * `buildFilterWhere`, where both columns are emitted from a single guarded block.
+   */
+  packSize?: NetContent;
+  /**
+   * P2.6 slice 5 (#568) — category drill-down from within search results. Ids rather than a slug
+   * so this stays a pure predicate: resolving a slug (and expanding it to its children) needs a
+   * second query, which belongs to the caller that already holds a category repository.
+   *
+   * Absent or empty means "no category predicate" — NOT "match nothing". An unknown slug is
+   * ignored by the page rather than 404ing, so an empty array reaching here is the normal
+   * expression of that, and narrowing on it would silently empty the catalogue instead.
+   */
+  categoryIds?: readonly string[];
+  /**
+   * #912/#918 — vendor LIST filters, ONE GROUP per filter the shopper applied, holding the option
+   * ids of every value they ticked in it — already resolved from `attr_*` slugs by the page
+   * (`lib/attribute-filters.ts`). A product must carry ANY option of a group (values within one
+   * filter widen) and match EVERY group (filters narrow). Absent or empty emits nothing — an
+   * unresolved slug reaches here as no id at all, never as a value that would empty the catalogue.
+   */
+  attributeOptionGroups?: readonly (readonly string[])[];
+  /**
+   * #918 — vendor NUMBER filters, one entry per filter with a from and/or to bound, each bound a
+   * string passing lib/attribute-number.ts's rule. A product must carry a number within every range.
+   */
+  attributeRanges?: readonly { attributeId: string; min?: string; max?: string }[];
+}
+
+/**
+ * P8.5b (#346) — one department's headline product, for the hero's live price
+ * callout. Deliberately smaller than ProductSummary: the hero shows a name, a
+ * price and a link, and carrying rating/stock/badges it never renders would
+ * invite them onto the panel later without anyone deciding to put them there.
+ */
+export interface CategorySpotlight {
+  categoryId: string;
+  name: string;
+  slug: string;
+  basePrice: number;
+  originalPrice: number | null;
+  unitLabel: string;
+}
+
+/** Which speciality attributes the current vendor actually uses (≥1 active product). */
+/**
+ * Which facet controls to offer for the current result context.
+ *
+ * RENAMED from `AvailableSpecialities` in #569: it no longer reports only specialities. Same
+ * precedent as #568 renaming `directSearchPredicate` to `buildDirectSearchWhere` — a helper whose
+ * role widens gets a name that still describes it, rather than one that quietly misleads at every
+ * call site.
+ */
+export interface AvailableFacets {
+  halal: boolean;
+  fresh: boolean;
+  organic: boolean;
+  vegetarian: boolean;
+  glutenFree: boolean;
+  hmcCertified: boolean;
+  /** At least one product in this context is marked down or carries a multi-buy tier. */
+  onOffer: boolean;
+  /** Distinct non-null `Product.origin` values in this context, alphabetical. */
+  origins: string[];
+  /** Distinct brands with at least one product in this context, by name. */
+  brands: { id: string; name: string; slug: string }[];
+  /**
+   * #397 — distinct pack sizes in this context, ordered by `comparePackSizes` (grouped by
+   * reference unit, smallest first within a group) rather than by raw amount, so `500g` precedes
+   * `1kg`. Empty when no product in context carries net content, which hides the control entirely.
+   */
+  packSizes: NetContent[];
+  /**
+   * #912 — the vendor's own filters that at least one product in this context carries a value for,
+   * each listing only the values actually carried, in the vendor's order. Empty hides them all.
+   */
+  attributes: FacetAttribute[];
+}
+
+export interface FacetAttribute {
+  slug: string;
+  name: string;
+  /** #918 — LIST renders a checkbox per option; NUMBER renders a from/to pair. */
+  kind: "LIST" | "NUMBER";
+  unit: string | null;
+  /** Always empty for a NUMBER filter. */
+  options: { slug: string; name: string }[];
+}
+
+export interface ProductRepository {
+  listByCategory(
+    categoryIds: string[],
+    opts: { take: number; cursor?: string } & ProductFilters,
+  ): Promise<ProductPage>;
+  search(
+    query: string,
+    opts: { take: number; cursor?: string } & ProductFilters,
+  ): Promise<ProductPage>;
+  /**
+   * Filtered product listing with NO text query and no category constraint
+   * (#211) — for the shop page's "recent"/"featured" rows, which need "products
+   * matching these filters", not "products matching this search term". Kept
+   * separate from search() rather than teaching it to treat "" as "no text
+   * filter", and that separation still stands: searchProducts()'s empty-query
+   * guard is untouched and is correct for what search() means.
+   *
+   * #501 — this docstring used to justify the split by asserting that on the
+   * /search page "an empty box means 'nothing searched yet', not 'browse
+   * everything'". That is no longer true of the page, and leaving the sentence
+   * here would have left the doc contradicting the code beside it. Bare
+   * /search rendered no products at all, which made the shop page's "View all"
+   * a dead end, so `app/(storefront)/search/page.tsx` now BRANCHES to list()
+   * for its browse mode. The structural decision survives — two functions, the
+   * guard intact; only the page's reading of an empty box changed.
+   */
+  list(opts: { take: number; cursor?: string } & ProductFilters): Promise<ProductPage>;
+  getBySlug(slug: string): Promise<ProductDetail | null>;
+  /**
+   * #955 — every active product's slug, unpaginated, for `app/sitemap.ts`. See
+
+   */
+  listActiveSlugs(): Promise<string[]>;
+  /**
+   * Drives per-vendor filter visibility — a food vendor shows Halal/Fresh/Organic; a tech one
+   * shows none. Since #568 it also narrows to the CURRENT result context (search terms, category,
+   * price, in-stock), so a control that would return nothing is not offered. Omit the argument for
+   * the vendor-wide answer, which is the pre-#568 behaviour.
+   *
+   * #569 widened it beyond specialities to dietary flags, offers, origins and brands, hence the
+   * rename from `availableSpecialities`.
+   */
+  availableFacets(context?: FacetContext): Promise<AvailableFacets>;
+  /**
+   * Autocomplete product suggestions (#568). `candidateLimit` is passed in rather than fixed here
+   * so the bound lives with the public route that owns the exposure — see `suggestProducts`.
+   */
+  suggestProducts(query: string, candidateLimit: number): Promise<ProductSuggestion[]>;
+  /**
+   * Candidate products for a whole "Shop your list" paste (P3d, #114), in ONE
+   * query for the entire list rather than one per line. Deliberately separate
+   * from search(): it matches `name` only (a term hitting prose in a
+   * description yields a confident-looking wrong product) and leaves the
+   * per-line all-terms decision to lib/shopping-list.ts.
+   */
+  matchListTerms(terms: string[]): Promise<ListCandidate[]>;
+  /**
+   * P2.6 slice 3 (#566, #396) — the SAME approved alias map `matchListTerms` (and `searchProducts`)
+   * already widens its own query with, exposed so `lib/shopping-list.ts`'s `resolveLines` can widen
+   * its per-LINE decision the same way. `matchListTerms` fetches ONE candidate pool across every
+   * distinct term in the whole list; `resolveLines` then re-checks each candidate against its own
+   * line's terms — a step this repository has no visibility into, so it cannot make that re-check
+   * alias-aware on its own. Without this, a candidate found only via an alias (`dhania` → a product
+   * named "Fresh Coriander") reaches the pool but is silently re-rejected as unmatched, because the
+   * re-check compares the candidate's name against the shopper's literal, unexpanded word.
+   */
+  synonymAliasMap(): Promise<Map<string, string>>;
+  /**
+   * P8.5b (#346) — one headline product per department for the homepage hero,
+   * in a single query. Keyed by category id.
+   */
+  categorySpotlights(categoryIds: readonly string[]): Promise<Map<string, CategorySpotlight>>;
+  /**
+   * #1233 — active products on offer (`originalPrice` markdown or active `priceTier`), carrying
+   * their `categoryId` so `/whatsapp-offers` can group them by top-level department in one query.
+   */
+  listOfferProducts(take: number): Promise<OfferProductWithCategory[]>;
+}
+
+export interface OfferProductWithCategory {
+  product: ProductSummary;
+  categoryId: string;
+}
+
+const productImageSelect = { storageKey: true, alt: true, isPrimary: true } as const;
+
+/** productImageSelect plus id/sortOrder — see AdminProductImage. */
+const adminProductImageSelect = {
+  id: true,
+  storageKey: true,
+  alt: true,
+  isPrimary: true,
+  sortOrder: true,
+  source: true,
+} as const;
+
+/**
+ * Exported for `tests/search-repository.test.ts` (#564, R8), which asserts that
+ * `searchProducts`'s composed `where` still contains every filter by comparing
+ * against this helper's own output rather than against a hand-written copy of
+ * it. A hand-written expectation is what lets a filter silently stop being
+ * applied: it drifts from the helper and the test keeps passing.
+ */
+export function buildFilterWhere(filters: ProductFilters): Prisma.ProductWhereInput {
+  const where: Prisma.ProductWhereInput = {};
+  if (filters.minPricePence !== undefined || filters.maxPricePence !== undefined) {
+    where.basePrice = {
+      ...(filters.minPricePence !== undefined ? { gte: filters.minPricePence } : {}),
+      ...(filters.maxPricePence !== undefined ? { lte: filters.maxPricePence } : {}),
+    };
+  }
+  if (filters.inStockOnly) {
+    // #1211 — the stock half of purchasableQuantity() as a predicate: UNTRACKED, or TRACKED with
+    // stock. UNKNOWN never matches. The OR is nested under `inventory`, never top-level, so it
+    // cannot collide with another filter's OR (architecture.md "Composing `where` fragments").
+    where.inventory = {
+      OR: [{ stockMode: "UNTRACKED" }, { stockMode: "TRACKED", quantity: { gt: 0 } }],
+    };
+  }
+  if (filters.isHalal) where.isHalal = true;
+  if (filters.isFresh) where.isFresh = true;
+  if (filters.isOrganic) where.isOrganic = true;
+  if (filters.isFeatured) where.isFeatured = true;
+  // #569 — dietary facets.
+  if (filters.isVegetarian) where.isVegetarian = true;
+  if (filters.isGlutenFree) where.isGlutenFree = true;
+  if (filters.isHmcCertified) where.isHmcCertified = true;
+  if (filters.origin) where.origin = filters.origin;
+  if (filters.brandId) where.brandId = filters.brandId;
+  // #397 — both columns or neither. An amount without a unit matches 500g, 500ml and a 500-pack
+  // alike, which is not a pack-size filter; `ProductFilters.packSize` carries them as one value
+  // so this cannot be half-applied.
+  if (filters.packSize) {
+    where.netContentAmount = filters.packSize.amount;
+    where.netContentUnit = filters.packSize.unit;
+  }
+  /*
+   * #569 — "on offer", and THE ONE FILTER THAT MUST NOT BE WRITTEN THE OBVIOUS WAY.
+   *
+   * The natural expression is `where.OR = [...]`. It would be silently wrong. `fetchSearchCandidates`
+   * composes its query as `{ ...buildFilterWhere(filters), ...predicate }`, and the #565 zero-result
+   * ladder's `identitySearchPredicate` and `broadSearchPredicate` BOTH return a top-level `OR` —
+   * spread second, so theirs would overwrite this one outright. The offers filter would then
+   * silently stop applying on exactly the two recovery rungs, handing the shopper products that
+   * are not on offer while the chip still reported the filter as active. Both objects are valid
+   * `Prisma.ProductWhereInput`, so nothing in lint, typecheck, test or build would say a word.
+   *
+   * Nesting under `AND` composes instead of colliding: Prisma ANDs the top-level keys together, so
+   * this clause and a rung's own `OR` coexist. `tests/search-repository.test.ts` pins both halves —
+   * that no top-level `OR` key is emitted, and that all three search paths retain both predicates.
+   *
+   * `originalPrice: { not: null }` is EXACT, not an approximation: lib/catalogue-form.ts already
+   * rejects a was-price at or below the current price, so a non-null value always means a real
+   * markdown. That matters because Prisma cannot compare two columns in a `where` at all.
+   */
+  // #912 — both `onOffer` and the vendor filters need `AND`, so they share ONE array rather than
+  // each assigning it: a second assignment would silently discard the first, the exact collision
+  // specs/architecture.md's `combineWhere` rule exists for, one level down. Each vendor filter is
+  // its own `some` clause because they all use the same `attributeValues` relation key.
+  //
+  // #918 — a list filter's ticked values are ONE clause (`in`: any of them), and a number range is
+  // one clause holding both bounds, so both bounds apply to the same value row.
+  const and: Prisma.ProductWhereInput[] = [];
+  if (filters.onOffer) {
+    and.push({ OR: [{ originalPrice: { not: null } }, { priceTier: { isNot: null } }] });
+  }
+  for (const group of filters.attributeOptionGroups ?? []) {
+    if (group.length === 0) continue;
+    and.push({ attributeValues: { some: { optionId: { in: [...group] } } } });
+  }
+  for (const range of filters.attributeRanges ?? []) {
+    if (range.min === undefined && range.max === undefined) continue;
+    and.push({
+      attributeValues: {
+        some: {
+          attributeId: range.attributeId,
+          numericValue: {
+            ...(range.min !== undefined ? { gte: range.min } : {}),
+            ...(range.max !== undefined ? { lte: range.max } : {}),
+          },
+        },
+      },
+    });
+  }
+  if (and.length > 0) where.AND = and;
+  // #568 — an empty array emits NOTHING, deliberately. See ProductFilters.categoryIds: an unknown
+  // slug resolves to no ids, and `categoryId: { in: [] }` would match zero rows rather than
+  // leaving the catalogue unfiltered.
+  if (filters.categoryIds && filters.categoryIds.length > 0) {
+    where.categoryId = { in: [...filters.categoryIds] };
+  }
+  return where;
+}
+
+/**
+ * #912/#918 — what a product's filter value needs to be DISPLAYED ("Colour: Black", "Power: 65 W"),
+ * shared by the detail page's Specifications and the card's `cardSpecifications`.
+ */
+const attributeValueDisplaySelect = {
+  attribute: { select: { name: true, sortOrder: true, unit: true, showOnCard: true } },
+  option: { select: { name: true } },
+  numericValue: true,
+} as const;
+
+type AttributeValueDisplayRow = Prisma.ProductAttributeValueGetPayload<{
+  select: typeof attributeValueDisplaySelect;
+}>;
+
+/**
+ * Display rows in the vendor's filter order (`sortOrder`, then name) — ordered here because Prisma
+ * cannot order a relation list by a field of a further relation. A number is formatted from its
+ * STRING form, so no Prisma `Decimal` leaves this module (lib/attribute-number.ts). A row with
+ * neither value cannot exist (ProductAttributeValue_one_value_check); it is skipped, not rendered.
+ */
+function toSpecifications(
+  rows: readonly AttributeValueDisplayRow[],
+): { name: string; value: string }[] {
+  return rows
+    .flatMap((row) => {
+      const value =
+        row.option !== null
+          ? row.option.name
+          : row.numericValue !== null
+            ? formatAttributeNumber(row.numericValue.toString(), row.attribute.unit)
+            : null;
+      return value === null ? [] : [{ ...row.attribute, value }];
+    })
+    .sort(bySortOrderThenName)
+    .map(({ name, value }) => ({ name, value }));
+}
+
+/**
+ * The columns every storefront ProductSummary is built from. One definition, so
+ * the keyset path and the ranked search path cannot select different shapes and
+ * drift into returning different fields (#564, R18).
+ */
+const productSummarySelect = {
+  id: true,
+  slug: true,
+  name: true,
+  basePrice: true,
+  unitLabel: true,
+  netContentAmount: true,
+  netContentUnit: true,
+  origin: true,
+  originalPrice: true,
+  isHalal: true,
+  isFresh: true,
+  isOrganic: true,
+  // #608 — filterable since #569, invisible until now.
+  isVegetarian: true,
+  isGlutenFree: true,
+  isHmcCertified: true,
+  brand: { select: { id: true, name: true, slug: true } },
+  averageRating: true,
+  reviewCount: true,
+  images: { where: { isPrimary: true }, take: 1, select: productImageSelect },
+  // #1211 — isActive and restriction travel for purchasableQuantity(), not for display.
+  ...ELIGIBILITY_SELECT,
+  inventory: {
+    select: {
+      quantity: true,
+      stockMode: true,
+      lowStockThreshold: true,
+      expectedRestockDate: true,
+    },
+  },
+  // #918 — only the values of filters the vendor marked "Show on product cards". A vendor with no
+  // such filter (Aheed today) gets an empty list back from the same query.
+  attributeValues: {
+    where: { attribute: { showOnCard: true } },
+    select: attributeValueDisplaySelect,
+  },
+} as const;
+
+/** A row as selected by `productSummarySelect`. */
+type ProductSummaryRow = Prisma.ProductGetPayload<{ select: typeof productSummarySelect }>;
+
+/**
+ * Row to ProductSummary. Shared by `findPage` and `searchProducts` (#564, R18):
+ * this mapping used to be inline in `findPage`, so the ranked search path would
+ * have needed a second copy, and two copies of a fifteen-field mapping is how
+ * one storefront surface quietly starts rendering a field the other does not.
+ *
+ * `tier` is a parameter because the two paths resolve tiers at different points
+ * — `findPage` after slicing its keyset page, search after slicing its RANKED
+ * page — but both look them up for at most `take` products, never for the whole
+ * candidate set.
+ */
+function toProductSummary(row: ProductSummaryRow, tier: ProductTier | null): ProductSummary {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    basePrice: row.basePrice,
+    unitLabel: row.unitLabel,
+    netContentAmount: row.netContentAmount,
+    netContentUnit: row.netContentUnit,
+    origin: row.origin,
+    originalPrice: row.originalPrice,
+    isHalal: row.isHalal,
+    isFresh: row.isFresh,
+    isOrganic: row.isOrganic,
+    isVegetarian: row.isVegetarian,
+    isGlutenFree: row.isGlutenFree,
+    isHmcCertified: row.isHmcCertified,
+    brand: row.brand,
+    averageRating: row.averageRating,
+    reviewCount: row.reviewCount,
+    primaryImage: row.images[0] ?? null,
+    inStock: purchasableQuantity(row) > 0,
+    stockQuantity: purchasableQuantity(row),
+    stockMode: stockModeOf(row.inventory),
+    lowStockThreshold: row.inventory?.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD,
+    expectedRestockDay: restockDayFromStored(row.inventory?.expectedRestockDate),
+    tier,
+    cardSpecifications: toSpecifications(row.attributeValues),
+  };
+}
+
+/**
+ * Storefront product reads (#252). Every one takes `prisma` and `vendorId` as
+ * explicit arguments and reads no request context — the request-scoped facade
+ * that resolves both lives in `lib/products-service.ts`.
+ */
+async function findPage(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  where: Prisma.ProductWhereInput,
+  { take, cursor }: { take: number; cursor?: string },
+): Promise<ProductPage> {
+
+  // specs/architecture.md's pagination strategy. Over-fetch by one to
+  // know whether a next page exists without a separate count query.
+  //
+  // #564 amended that rule for `searchProducts` ALONE, which cannot use this
+  // function because its sort key is computed rather than stored. Nothing here
+  // changed: this is still keyset, and it is still what every browse and
+  // category listing uses.
+  const rows = await runKeysetPage(keysetCursorArgs(cursor), (pageArgs) =>
+    prisma.product.findMany({
+      where,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: take + 1,
+      ...pageArgs,
+      select: productSummarySelect,
+    }),
+  );
+
+  const hasMore = rows.length > take;
+  const page = hasMore ? rows.slice(0, take) : rows;
+
+  // One query for the page's tiers, then a lookup per card — never one per row.
+  const tiers = await listActiveTiersForProducts(
+    prisma,
+    vendorId,
+    page.map((p) => p.id),
+  );
+
+  return {
+    items: page.map((p) => toProductSummary(p, tiers.get(p.id) ?? null)),
+    nextCursor: hasMore ? page[page.length - 1].id : null,
+    // Never capped — this path pages through everything by keyset.
+    truncated: false,
+    // No zero-result ladder outside searchProducts() — see ProductPage's docstring.
+    directResultCount: 0,
+    recovery: null,
+    // Relevance is not computed on the browse paths, so there is no name-tier notion to report
+    // and no thin-result case to rescue (#580).
+    directNameMatch: false,
+    suggestions: null,
+  };
+}
+
+/**
+ * #398 (derivation half), R37 — proves `Product.unitPricePencePerBaseUnit` (the derived sort key,
+ * R30) is genuinely queryable in the database, ahead of any sort CONTROL — deliberately not built
+
+
+ * work). This is not wired into `findPage`/`listProducts`/`listProductsByCategory` for that reason.
+ *
+ * Ordered ascending (cheapest per base unit first) with NULLs excluded — a product with no net
+ * content has nothing to rank by, and `ORDER BY ... ASC` would otherwise surface every null-priced
+ * row before any real value under Postgres's default NULLS LAST-for-DESC/FIRST-for-ASC behaviour.
+ * `scripts/verify-unit-price-sort.ts` runs this against a real database and prints the ordering.
+ */
+export async function listProductsByUnitPrice(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  take: number,
+): Promise<ProductSummary[]> {
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      unitPricePencePerBaseUnit: { not: null },
+    },
+    orderBy: { unitPricePencePerBaseUnit: "asc" },
+    take,
+    select: productSummarySelect,
+  });
+
+  const tiers = await listActiveTiersForProducts(
+    prisma,
+    vendorId,
+    rows.map((r) => r.id),
+  );
+
+  return rows.map((r) => toProductSummary(r, tiers.get(r.id) ?? null));
+}
+
+/**
+ * #232 — the summaries for a known set of product ids, for a surface that already decided WHICH
+ * products it wants and in what order (today: `lib/repositories/favourites.ts`).
+ *
+ * LIVES HERE RATHER THAN IN THE CALLER, because this file owns what a product summary is: the
+ * `productSummarySelect` shape, the `toProductSummary` mapping and the one-query-per-page
+ * `listActiveTiersForProducts` follow-up that puts the multi-buy tier on a card. A caller that
+ * hand-rolled its own `select` would render a product that quietly disagreed with every other grid
+ * in the app — most visibly by losing the "3 for GBP 10" badge, which is exactly what passing
+ * `null` for the tier does.
+ *
+ * ORDER IS THE CALLER'S, NOT THIS FUNCTION'S. Postgres makes no promise about the order of an `IN`
+ * result, and the caller's order here is favourited-newest-first, which this file knows nothing
+ * about. The returned array follows `productIds`, and an id that matches nothing — inactive, or in
+ * a hidden department — is dropped rather than returned as a gap, so a favourited product that has
+ * since been delisted simply stops appearing.
+ *
+ * `take` is deliberately absent: the caller already bounded the set by choosing the ids.
+ */
+export async function listProductsByIds(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  productIds: string[],
+): Promise<ProductSummary[]> {
+  if (productIds.length === 0) return [];
+
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      id: { in: productIds },
+    },
+    select: productSummarySelect,
+  });
+
+  const tiers = await listActiveTiersForProducts(
+    prisma,
+    vendorId,
+    rows.map((r) => r.id),
+  );
+
+  const byId = new Map(rows.map((r) => [r.id, toProductSummary(r, tiers.get(r.id) ?? null)]));
+  return productIds.map((id) => byId.get(id)).filter((p): p is ProductSummary => p !== undefined);
+}
+
+/**
+ * #955 — every active product's slug for this vendor, for `app/sitemap.ts`.
+ *
+ * SLUG ONLY, AND DELIBERATELY NOT `productSummarySelect`. A sitemap needs one string per product
+ * and nothing else: no images, no price, no attribute values, and in particular no
+ * `listActiveTiersForProducts` follow-up query, which every other listing here pays for because it
+ * renders a card. It is also unpaginated, unlike `listProducts`, because a sitemap that stopped at
+ * a page boundary would silently hide the rest of the catalogue — which is the defect `#955` exists
+ * to fix, in a different form.
+ *
+ * No `lastModified` is derived from these rows on purpose: `Product` has `createdAt` and no
+ * `updatedAt`, so there is no truthful last-modified date to publish, and `createdAt` would assert
+ * a false one after any edit. See `app/sitemap.ts`.
+ */
+export async function listActiveProductSlugs(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+): Promise<string[]> {
+  const rows = await prisma.product.findMany({
+    where: { vendorId, isActive: true, category: visibleCategoryWhere },
+    orderBy: { slug: "asc" },
+    select: { slug: true },
+  });
+  return rows.map((row) => row.slug);
+}
+
+/**
+ * #1233 — active products on offer (`originalPrice` not null or `priceTier` not null) in visible
+ * categories, alongside each product's `categoryId` so `/whatsapp-offers` can group them by the
+ * vendor's top-level departments in one query without altering `ProductSummary`'s shape.
+ */
+export async function listOfferProducts(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  take: number,
+): Promise<OfferProductWithCategory[]> {
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      ...buildFilterWhere({ onOffer: true }),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
+    select: {
+      ...productSummarySelect,
+      categoryId: true,
+    },
+  });
+
+  const tiers = await listActiveTiersForProducts(
+    prisma,
+    vendorId,
+    rows.map((r) => r.id),
+  );
+
+  return rows.map((row) => ({
+    product: toProductSummary(row, tiers.get(row.id) ?? null),
+    categoryId: row.categoryId,
+  }));
+}
+
+/**
+ * #496 — takes an array, not a single id, so the storefront category page can
+ * aggregate a department's own products with every one of its subcategories'
+ * products in one query, rather than showing only the 2-3 products a
+ * department happens to hold directly. A single category still passes a
+ * one-element array; a subcategory (which has no children of its own, the
+ * tree being capped at two levels) always calls this with exactly its own id.
+ */
+export async function listProductsByCategory(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  categoryIds: string[],
+  { take, cursor, ...filters }: { take: number; cursor?: string } & ProductFilters,
+): Promise<ProductPage> {
+  return findPage(
+    prisma,
+    vendorId,
+    /*
+     * #568 — the explicit `categoryId` MUST stay after the `buildFilterWhere` spread. Since that
+     * helper can now emit `categoryId` too (ProductFilters.categoryIds), spreading it last would
+     * let a `categoryIds` value in `filters` override the category this page is actually
+     * displaying — i.e. a URL parameter silently replacing the route's own subject. The page's
+     * category always wins; `tests/search-repository.test.ts` pins this order.
+     */
+    {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      ...buildFilterWhere(filters),
+      categoryId: { in: categoryIds },
+    },
+    { take, cursor },
+  );
+}
+
+/** One `product.groupBy` row: the newest product of a category, split by `isFeatured` (#1096). */
+export interface SpotlightGroup {
+  categoryId: string;
+  isFeatured: boolean;
+  createdAt: Date;
+}
+
+/**
+ * #1096 — which `(categoryId, isFeatured, createdAt)` group wins each department.
+ *
+ * Pure, so the ordering rule is provable without a database. `departmentOf` maps every eligible
+ * category id (a department and its active direct children) to its department; a group whose
+ * category is not in the map is ignored. The rule is P8.5b's own — featured beats non-featured,
+ * then the latest `createdAt` — applied per department rather than across the whole store, which
+ * is what stops one busy department starving the rest.
+ */
+export function pickDepartmentSpotlights(
+  groups: readonly SpotlightGroup[],
+  departmentOf: ReadonlyMap<string, string>,
+): Map<string, SpotlightGroup> {
+  const winners = new Map<string, SpotlightGroup>();
+  for (const group of groups) {
+    const department = departmentOf.get(group.categoryId);
+    if (department === undefined) continue;
+    const current = winners.get(department);
+    if (!current || beats(group, current)) winners.set(department, group);
+  }
+  return winners;
+}
+
+function beats(a: SpotlightGroup, b: SpotlightGroup): boolean {
+  if (a.isFeatured !== b.isFeatured) return a.isFeatured;
+  if (a.createdAt.getTime() !== b.createdAt.getTime()) {
+    return a.createdAt.getTime() > b.createdAt.getTime();
+  }
+  // Same flag and instant in two sibling categories: any stable choice will do.
+  return a.categoryId < b.categoryId;
+}
+
+/**
+ * P8.5b (#346), reworked by #1096 — the headline product for each department, where a department
+ * is a top-level category plus its ACTIVE DIRECT children (what `getCategoryBySlug` shows on the
+ * department page itself).
+ *
+ * At most three queries, however many departments: the children, the newest product per
+ * `(categoryId, isFeatured)`, then the winning rows. #346 used one query with a global
+ * `take: departments x 4` window, which let a department with many featured products consume the
+ * whole window and left the others with no spotlight; "one per group" is not expressible in a
+
+ * matching row before de-duplicating in memory.
+ *
+ * Rows sharing the winning triple exactly (a seeded or bulk-imported batch shares one
+ * `createdAt`) all come back from the third query; the lowest `id` wins. The returned map is keyed
+ * by department id; `CategorySpotlight.categoryId` is the product's own category, which may be a
+ * child. A department with no eligible product is absent, and the hero renders that panel without
+ * a price callout rather than inventing one (#239).
+ */
+export async function listCategorySpotlights(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  categoryIds: readonly string[],
+): Promise<Map<string, CategorySpotlight>> {
+  const spotlights = new Map<string, CategorySpotlight>();
+  if (categoryIds.length === 0) return spotlights;
+
+  const children = await prisma.category.findMany({
+    where: { vendorId, isActive: true, parentId: { in: [...categoryIds] } },
+    select: { id: true, parentId: true },
+  });
+  const departmentOf = new Map<string, string>(categoryIds.map((id) => [id, id]));
+  for (const child of children) {
+    if (child.parentId !== null) departmentOf.set(child.id, child.parentId);
+  }
+
+  const groups = await prisma.product.groupBy({
+    by: ["categoryId", "isFeatured"],
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      categoryId: { in: [...departmentOf.keys()] },
+    },
+    _max: { createdAt: true },
+  });
+  const winners = pickDepartmentSpotlights(
+    groups.flatMap((group) =>
+      group._max.createdAt
+        ? [
+            {
+              categoryId: group.categoryId,
+              isFeatured: group.isFeatured,
+              createdAt: group._max.createdAt,
+            },
+          ]
+        : [],
+    ),
+    departmentOf,
+  );
+  if (winners.size === 0) return spotlights;
+
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      OR: [...winners.values()].map(({ categoryId, isFeatured, createdAt }) => ({
+        categoryId,
+        isFeatured,
+        createdAt,
+      })),
+    },
+    orderBy: { id: "asc" },
+    select: {
+      categoryId: true,
+      name: true,
+      slug: true,
+      basePrice: true,
+      originalPrice: true,
+      unitLabel: true,
+    },
+  });
+
+  for (const row of rows) {
+    const department = departmentOf.get(row.categoryId);
+    // First row wins per department — the list is in `id` order, which settles exact ties.
+    if (department !== undefined && !spotlights.has(department)) spotlights.set(department, row);
+  }
+  return spotlights;
+}
+
+export async function listProducts(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  { take, cursor, ...filters }: { take: number; cursor?: string } & ProductFilters,
+): Promise<ProductPage> {
+  return findPage(
+    prisma,
+    vendorId,
+    { vendorId, isActive: true, category: visibleCategoryWhere, ...buildFilterWhere(filters) },
+    { take, cursor },
+  );
+}
+
+/**
+ * How many matching rows search is willing to RANK (#564).
+ *
+ * Exported so tests assert against the constant rather than a literal, and so
+ * `scripts/verify-search-slice.ts` can decide whether a live query is even
+ * capable of exceeding it.
+ *
+ * The cap exists because relevance is computed in JavaScript
+ * (`lib/search-ranking.ts` explains why it cannot be computed in SQL here), and
+ * an uncapped fetch would make the cost of a broad single-word query
+ * proportional to the catalogue. What it costs is stated plainly rather than
+ * hidden: a query matching more than this cannot reach the products beyond it,
+ * WHICH of them are ranked is decided by the fetch's own `createdAt desc,
+ * id desc` order rather than by relevance, and `ProductPage.truncated` tells the
+ * page to say so. Raising it needs an index that can serve ranking, or #286.
+ */
+export const SEARCH_CANDIDATE_LIMIT = 200;
+
+/**
+
+ * id (see `specs/architecture.md`'s scoped exception). Parsed defensively:
+ * anything that is not a non-negative integer is page zero rather than an
+
+ * edited, bookmarked or truncated.
+ */
+function parseSearchOffset(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const parsed = Number(cursor);
+  if (!Number.isInteger(parsed) || parsed < 0) return 0;
+  return parsed;
+}
+
+/**
+ * Combine independent `where` fragments so that NEITHER CAN OVERWRITE THE OTHER (#569).
+ *
+ * The obvious composition — `{ ...a, ...b }` — is safe only while no two fragments share a key.
+ * That held until this slice: `buildFilterWhere`'s offers clause and `buildDirectSearchWhere` both
+ * emit `AND`, and the #565 ladder's `identitySearchPredicate`/`broadSearchPredicate` both emit `OR`,
+ * so spreading silently drops whichever fragment came first. The failure is invisible — both sides
+ * are valid `Prisma.ProductWhereInput`, so lint, typecheck, test and build all stay green while the
+ * shopper receives products that do not match a filter their chips say is applied.
+ *
+ * Wrapping in `AND` composes instead: Prisma intersects the array's entries, so a filter clause and
+ * a search-rung clause coexist however many keys they happen to share. Empty fragments are dropped
+ * so an unfiltered query stays byte-identical to what it was before this slice.
+ */
+function combineWhere(
+  ...parts: (Prisma.ProductWhereInput | undefined)[]
+): Prisma.ProductWhereInput {
+  const present = parts.filter(
+    (part): part is Prisma.ProductWhereInput => part !== undefined && Object.keys(part).length > 0,
+  );
+  if (present.length === 0) return {};
+  if (present.length === 1) return present[0];
+
+  // Nest ONLY when two fragments actually share a key. Wrapping unconditionally would change the
+  // shape of every query in the app — including the ones that never had a collision — and several
+  // tests rightly assert those shapes verbatim. So the common case stays a plain spread, byte-
+  // identical to what it was before this slice, and `AND` appears only where it is load-bearing.
+  const seen = new Set<string>();
+  let collides = false;
+  for (const part of present) {
+    for (const key of Object.keys(part)) {
+      if (seen.has(key)) {
+        collides = true;
+        break;
+      }
+      seen.add(key);
+    }
+    if (collides) break;
+  }
+
+  return collides ? { AND: present } : Object.assign({}, ...present);
+}
+
+/**
+ * One fetch/cap/rank-input-shape, shared by the direct search and every zero-result-ladder rung
+ * (#565) — the query SHAPE (the `predicate` argument) changes per rung, the sentinel/cap machinery
+ * does not. Mirrors exactly what `searchProducts` fetched inline before this slice.
+ */
+async function fetchSearchCandidates(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  filters: ProductFilters,
+  predicate: Prisma.ProductWhereInput,
+): Promise<{ truncated: boolean; candidates: ProductSummary[] }> {
+  const rows = await prisma.product.findMany({
+    // #569 — combineWhere, NOT a spread: the filters and the rung predicate can both carry `AND`
+    // or both carry `OR`, and a spread would silently drop one of them.
+    where: combineWhere(
+      { vendorId, isActive: true, category: visibleCategoryWhere },
+      buildFilterWhere(filters),
+      predicate,
+    ),
+    // A TOTAL order, so which rows land inside the cap is deterministic even
+    // when createdAt ties right at the boundary. Without `id`, two products
+    // sharing a timestamp could swap across the cap between identical requests.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    // The +1 row is a truncation sentinel and nothing else: it is never ranked
+    // and never rendered. See ProductPage.truncated for why the flag is not
+    // simply "the cap was reached".
+    take: SEARCH_CANDIDATE_LIMIT + 1,
+    select: productSummarySelect,
+  });
+
+  const truncated = rows.length > SEARCH_CANDIDATE_LIMIT;
+  const candidates = rows
+    .slice(0, SEARCH_CANDIDATE_LIMIT)
+    .map((row) => toProductSummary(row, null));
+  return { truncated, candidates };
+}
+
+/**
+ * The direct predicate: every term group required, each satisfied by `name` OR `description` for
+ * ANY of that group's variants (#564, extended to groups by #566).
+ *
+ * With no approved synonyms every group holds exactly one variant, so this builds the identical
+ * `AND` of per-term `OR`s that `#564` shipped — which is what makes an empty dictionary a no-op
+ * rather than a behaviour change. `tests/search-repository.test.ts` pins that shape.
+ *
+ * EXPORTED since #568 (and renamed from `directSearchPredicate`, pairing with `buildFilterWhere`)
+ * because `getAvailableFacets` must probe against the SAME predicate the search itself runs.
+ * A facet computed from a second, hand-written copy of this shape drifts the moment either changes,
+ * and the failure is silent: the toggle offered would simply stop corresponding to the result set.
+ */
+export function buildDirectSearchWhere(
+  groups: readonly SearchTermGroup[],
+): Prisma.ProductWhereInput {
+  return {
+    AND: groups.map((group) => ({
+      OR: group.variants.flatMap((variant) => [
+        { name: { contains: variant, mode: "insensitive" as const } },
+        { description: { contains: variant, mode: "insensitive" as const } },
+        filterValueMatch(variant),
+      ]),
+    })),
+  };
+}
+
+/**
+ * #918 — a product whose LIST filter value's option name contains the term: typing "wired" finds
+ * the products whose Connectivity is Wired even when neither name nor description says so. Number
+ * values are not text-searched. The relation is vendor-scoped through the product itself, which
+ * every caller already scopes to one vendor.
+ */
+function filterValueMatch(variant: string): Prisma.ProductWhereInput {
+  return {
+    attributeValues: {
+      some: { option: { name: { contains: variant, mode: "insensitive" as const } } },
+    },
+  };
+}
+
+/**
+ * #918 — did any candidate match THROUGH A FILTER VALUE? Only asked once the name check has already
+ * failed (the `||` in `searchProducts` short-circuits), so a query answered by names costs nothing
+ * extra.
+ *
+ * Without this, `/search?q=wired` on a store whose Wired products never say "wired" in their name
+ * would be treated as a thin result, and `SearchSuggestionsNotice` would call three exactly-Wired
+ * products "loosely related". A filter value is a structured fact the vendor entered, as strong a
+ * signal as a name, so it counts as a direct match; `SearchQueryLog.directNameMatch` inherits that
+ * wider meaning. Ranking (`lib/search-ranking.ts`) is deliberately unchanged.
+ */
+async function hasFilterValueMatch(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  candidates: readonly { id: string }[],
+  groups: readonly SearchTermGroup[],
+): Promise<boolean> {
+  const variants = flattenVariants(groups);
+  if (variants.length === 0) return false;
+  const match = await prisma.productAttributeValue.findFirst({
+    where: {
+      vendorId,
+      productId: { in: candidates.map((candidate) => candidate.id) },
+      OR: variants.map((variant) => ({
+        option: { name: { contains: variant, mode: "insensitive" as const } },
+      })),
+    },
+    select: { id: true },
+  });
+  return match !== null;
+}
+
+/**
+ * Ladder rung "identity" (#565): loosens the direct predicate's `AND` to an `OR`, and narrows the
+ * fields to `name`/category `name` (drops `description` — a term hitting prose is a much weaker
+ * signal once every-term-required has already been given up).
+ */
+function identitySearchPredicate(groups: readonly SearchTermGroup[]): Prisma.ProductWhereInput {
+  return {
+    OR: flattenVariants(groups).flatMap((variant) => [
+      { name: { contains: variant, mode: "insensitive" as const } },
+      { category: { name: { contains: variant, mode: "insensitive" as const } } },
+    ]),
+  };
+}
+
+/**
+ * Ladder rung "broad" (#565): the widest net — `OR` across terms, `name`, `description`, or (#918)
+ * a list-filter value.
+ */
+function broadSearchPredicate(groups: readonly SearchTermGroup[]): Prisma.ProductWhereInput {
+  return {
+    OR: flattenVariants(groups).flatMap((variant) => [
+      { name: { contains: variant, mode: "insensitive" as const } },
+      { description: { contains: variant, mode: "insensitive" as const } },
+      filterValueMatch(variant),
+    ]),
+  };
+}
+
+/**
+ * The vendor's deduplicated product-**name** vocabulary (#565) — `description` is deliberately
+ * excluded, a token from prose being a much weaker signal of what a shopper meant to type. Feeds
+ * the zero-result ladder's typo-correction rung (`lib/search-typo-correction.ts`).
+ *
+ * Takes `prisma` and `vendorId` as explicit parameters and reads no request context (#252).
+ */
+export async function listProductNameTokens(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+): Promise<Set<string>> {
+  const rows = await prisma.product.findMany({
+    where: { vendorId, isActive: true, category: visibleCategoryWhere },
+    select: { name: true },
+  });
+
+  const tokens = new Set<string>();
+  for (const row of rows) {
+    for (const token of parseSearchQuery(row.name)) tokens.add(token);
+  }
+  return tokens;
+}
+
+/**
+ * Storefront search (#564, #565).
+ *
+ * The query is TOKENISED: the predicate is an AND over the parsed terms, each satisfied by a
+ * case-insensitive `contains` on name OR description — every term must be satisfied by something.
+ * Results are RANKED rather than ordered by recency, which is why this doesn't use `findPage`: the
+ * sort key is computed, so keyset pagination on (createdAt, id) cannot express it. It fetches a
+ * bounded candidate set, ranks it purely, slices the requested page, and only THEN looks up tier
+ * pricing — for the rows being rendered, not for all the candidates.
+ *
+ * ZERO-RESULT LADDER (#565): when the direct predicate above finds nothing, up to three further
+ * attempts run in order, stopping at the first that yields a result — typo correction (re-runs the
+ * SAME direct predicate shape with each uncorrectable-as-typed term replaced by its nearest token
+ * in the vendor's own product-name vocabulary), then a loosened identity-field match, then the
+ * broadest name-or-description match. `recovery` on the returned page tells the caller which rung
+ * (if any) supplied the results, or that all three were tried and none did. See `plan.md` in
+ * `specs/2026-09-03-search-zero-result-recovery/` for the full rationale — in particular why a
+ * term already in the vendor's vocabulary is never "corrected" into something else.
+ */
+export async function searchProducts(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  query: string,
+  { take, cursor, ...filters }: { take: number; cursor?: string } & ProductFilters,
+): Promise<ProductPage> {
+  const terms = parseSearchQuery(query);
+  // Guard retained from the original (#211's split): search() means "match this
+  // text", and an empty box is the PAGE's decision to browse instead — see
+  // ProductRepository.list's docstring. Returns before touching the client at
+  // all, which is what `tests/search-repository.test.ts` asserts with spies.
+  //
+  // Since #572 this also covers a query made ENTIRELY of low-information tokens ("e", "-"), which
+  // now parse to nothing. `/search` renders "too short" for that rather than claiming the
+  // catalogue holds no match — and, as before, no query is issued.
+  if (terms.length === 0) {
+    return {
+      items: [],
+      nextCursor: null,
+      truncated: false,
+      directResultCount: 0,
+      recovery: null,
+      directNameMatch: false,
+      suggestions: null,
+    };
+  }
+
+  // #566 — one read, before the search itself, turning the flat term list into groups. An empty
+  // dictionary yields single-variant groups and therefore #564's exact predicate.
+  const aliases = await listApprovedAliasMap(prisma, vendorId);
+  const groups = expandSearchTerms(terms, aliases);
+
+  let { truncated, candidates } = await fetchSearchCandidates(
+    prisma,
+    vendorId,
+    filters,
+    buildDirectSearchWhere(groups),
+  );
+  // Captured BEFORE any ladder rung runs, regardless of what happens next — this is what the
+  // search query log (lib/products-service.ts) reports as the direct search's own outcome.
+  const directResultCount = candidates.length;
+  const directNameMatch =
+    hasNameTierCandidate(candidates, groups) ||
+    (candidates.length > 0 && (await hasFilterValueMatch(prisma, vendorId, candidates, groups)));
+  let rankingGroups = groups;
+  let recovery: SearchRecoveryInfo | null = null;
+  let suggestions: SearchSuggestions | null = null;
+
+  if (candidates.length === 0) {
+    const tokens = await listProductNameTokens(prisma, vendorId);
+    const correction = correctTerms(terms, tokens);
+    // Skip the re-query entirely when nothing was correctable — re-running the identical direct
+    // predicate would just reproduce the zero result already known from above.
+    if (correction.corrected) {
+      const correctedGroups = expandSearchTerms(correction.terms, aliases);
+      const typoResult = await fetchSearchCandidates(
+        prisma,
+        vendorId,
+        filters,
+        buildDirectSearchWhere(correctedGroups),
+      );
+      if (typoResult.candidates.length > 0) {
+        candidates = typoResult.candidates;
+        truncated = typoResult.truncated;
+        rankingGroups = correctedGroups;
+        recovery = { rung: "typo", correctedTerms: correction.terms };
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    const identityResult = await fetchSearchCandidates(
+      prisma,
+      vendorId,
+      filters,
+      identitySearchPredicate(groups),
+    );
+    if (identityResult.candidates.length > 0) {
+      candidates = identityResult.candidates;
+      truncated = identityResult.truncated;
+      recovery = { rung: "identity" };
+    }
+  }
+
+  if (candidates.length === 0) {
+    const broadResult = await fetchSearchCandidates(
+      prisma,
+      vendorId,
+      filters,
+      broadSearchPredicate(groups),
+    );
+    if (broadResult.candidates.length > 0) {
+      candidates = broadResult.candidates;
+      truncated = broadResult.truncated;
+      recovery = { rung: "broad" };
+    }
+  }
+
+  if (candidates.length === 0) {
+    recovery = { rung: "none" };
+  } else if (!directNameMatch && recovery === null) {
+    // THIN RESULT (#580): the direct search found something, but only through description prose.
+    // Nothing is removed or re-queried — the shopper keeps every product they had, and gets ways
+    // out beside them. Guarded on `recovery === null` so a set the ladder already rescued (which
+    // is by definition not a direct result at all) never also renders suggestions.
+    suggestions = await buildThinResultSuggestions(prisma, vendorId, terms, groups);
+  }
+
+  const ranked = rankSearchCandidates(candidates, rankingGroups);
+  const offset = parseSearchOffset(cursor);
+  // An offset at or beyond the ranked count yields an honest empty page rather
+  // than bouncing back to page one, which would loop a shopper who followed a
+  // stale deep link. `truncated` is still the real value — the fetch happened.
+  const page = ranked.slice(offset, offset + take);
+
+  const tiers = await listActiveTiersForProducts(
+    prisma,
+    vendorId,
+    page.map((p) => p.id),
+  );
+
+  const nextOffset = offset + take;
+  return {
+    items: page.map((p) => (tiers.has(p.id) ? { ...p, tier: tiers.get(p.id) ?? null } : p)),
+    nextCursor: nextOffset < ranked.length ? String(nextOffset) : null,
+    truncated,
+    directResultCount,
+    recovery,
+    directNameMatch,
+    suggestions,
+  };
+}
+
+/**
+ * The two ways out offered beside a thin result (#580).
+ *
+ * Runs ONLY on the thin path, so the extra token fetch it needs is not on the hot path of a
+ * search that worked. Returns `null` when neither suggestion is available, so the page renders
+ * nothing rather than an empty notice.
+ */
+async function buildThinResultSuggestions(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  terms: readonly string[],
+  groups: readonly SearchTermGroup[],
+): Promise<SearchSuggestions> {
+  // The canonical rewrite needs no query — the expansion already resolved it.
+  const expanded = groups.some((group) => group.variants.length > 1);
+  const canonicalQuery = expanded
+    ? groups.map((group) => group.variants[group.variants.length - 1]).join(" ")
+    : null;
+
+  const tokens = await listProductNameTokens(prisma, vendorId);
+  const correction = correctTerms([...terms], tokens);
+  const corrected = correction.terms.join(" ");
+  // A "correction" identical to what was typed is not a suggestion.
+  const correctedQuery = correction.corrected && corrected !== terms.join(" ") ? corrected : null;
+
+  // Deliberately returns an object even when BOTH suggestions are null. A thin result with no
+  // approved alias and no in-budget correction is the commonest case before the dictionary is
+  // populated, and it is precisely #580's complaint: the shopper sees one tangential product and
+  // nothing to tell them it is tangential. The notice still renders — saying these are loose
+  // matches, and offering the department links — rather than leaving them to conclude the shop
+  // does not stock what they asked for.
+  return { canonicalQuery, correctedQuery };
+}
+
+export async function getProductBySlug(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  slug: string,
+): Promise<ProductDetail | null> {
+  const product = await prisma.product.findFirst({
+    where: { vendorId, slug, isActive: true, category: visibleCategoryWhere },
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      description: true,
+      basePrice: true,
+      unitLabel: true,
+      netContentAmount: true,
+      netContentUnit: true,
+      origin: true,
+      originalPrice: true,
+      isHalal: true,
+      isFresh: true,
+      isOrganic: true,
+      // #608 — the detail page rendered NO facet at all before this, not even Halal or Fresh.
+      isVegetarian: true,
+      isGlutenFree: true,
+      isHmcCertified: true,
+      // #239 — the reference travels with the claim. Detail page only; see ProductDetail.
+      hmcReference: true,
+      brand: { select: { id: true, name: true, slug: true } },
+      averageRating: true,
+      reviewCount: true,
+      images: { orderBy: { sortOrder: "asc" }, select: productImageSelect },
+      // #1211 — isActive and restriction travel for purchasableQuantity(), not for display.
+      ...ELIGIBILITY_SELECT,
+      inventory: {
+        select: {
+          quantity: true,
+          stockMode: true,
+          lowStockThreshold: true,
+          expectedRestockDate: true,
+        },
+      },
+      // #912 — same query as the rest of the product; ordered below, since Prisma cannot order a
+      // relation list by a field of a further relation.
+      attributeValues: { select: attributeValueDisplaySelect },
+      // #1135 — one source for "takes a note": the same rule the cart and checkout use.
+      ...NOTE_ACCEPTANCE_SELECT,
+    },
+  });
+  if (!product) return null;
+
+  const {
+    inventory,
+    images,
+    attributeValues,
+    allowsCustomNote,
+    category,
+    isActive,
+    restriction,
+    ...rest
+  } = product;
+  const purchasable = purchasableQuantity({ isActive, restriction, inventory });
+  const tiers = await listActiveTiersForProducts(prisma, vendorId, [product.id]);
+  return {
+    ...rest,
+    images,
+    specifications: toSpecifications(attributeValues),
+    // The detail page reads every value; the card subset is the same rows, filtered the way
+    // `productSummarySelect` filters them, so a quick-view card and a grid card agree.
+    cardSpecifications: toSpecifications(
+      attributeValues.filter((value) => value.attribute.showOnCard),
+    ),
+    primaryImage: images.find((i) => i.isPrimary) ?? images[0] ?? null,
+    inStock: purchasable > 0,
+    stockQuantity: purchasable,
+    stockMode: stockModeOf(inventory),
+    lowStockThreshold: inventory?.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD,
+    expectedRestockDay: restockDayFromStored(inventory?.expectedRestockDate),
+    tier: tiers.get(product.id) ?? null,
+    acceptsNote: productAcceptsNote({ allowsCustomNote, category }),
+  };
+}
+
+/**
+ * The result context a facet probe is computed against (#568, widened by #569). Deliberately NOT
+ * `ProductFilters`: EVERY field a facet control can set is excluded by TYPE rather than by a
+ * runtime `delete`, so a caller cannot accidentally pass one in and reintroduce the trap below.
+ *
+ * That exclusion list is now nine fields, not three — the six dietary/speciality booleans plus
+ * `onOffer`, `origin` and `brandId`. Renamed from `SpecialityContext` with the function itself.
+ */
+export interface FacetContext {
+  groups?: readonly SearchTermGroup[];
+  categoryIds?: readonly string[];
+  minPricePence?: number;
+  maxPricePence?: number;
+  inStockOnly?: boolean;
+}
+
+/**
+ * Which facet controls to offer for the CURRENT result context (#568, widened by #569) — a control
+ * that would return nothing is worse than absent, because it reads as "we have no organic stock"
+ * when it really means "not in these results".
+ *
+ * THE TRAP THIS AVOIDS, stated because it is easy to reintroduce: each probe excludes ALL facet
+ * filters, not just its own. Computing a facet against the full current filter state looks
+ * obviously right and is wrong twice over — ticking "Halal" would hide "Organic" the moment no
+ * product is both, and worse, an active facet could hide the very control needed to untick it,
+ * stranding the shopper in a filter they cannot see or remove. Excluding all of them means an
+ * active facet is ALWAYS reported available, because its own filter never enters its own probe.
+ * `FacetContext` enforces that by type; this function never has the fields to leak in the first
+ * place.
+ *
+ * The term predicate comes from `buildDirectSearchWhere` — the same function `searchProducts` runs
+ * — so the facets cannot drift from the result set they describe.
+ *
+ * ONE `Promise.all` (#569, R19). The probe count roughly tripled in this slice, so the cost of
+ * adding a facet must stay one round trip of latency rather than one each.
+ */
+export async function getAvailableFacets(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  context: FacetContext = {},
+): Promise<AvailableFacets> {
+  const { groups, ...filters } = context;
+  const base = combineWhere(
+    { vendorId, isActive: true, category: visibleCategoryWhere },
+    buildFilterWhere(filters),
+    groups && groups.length > 0 ? buildDirectSearchWhere(groups) : undefined,
+  );
+  const flagProbe = (flag: Prisma.ProductWhereInput) =>
+    prisma.product.findFirst({ where: combineWhere(base, flag), select: { id: true } });
+
+  const [
+    halal,
+    fresh,
+    organic,
+    vegetarian,
+    glutenFree,
+    hmcCertified,
+    onOffer,
+    originRows,
+    brandRows,
+    packSizeRows,
+    attributeRows,
+    numberAttributeRows,
+  ] = await Promise.all([
+    flagProbe({ isHalal: true }),
+    flagProbe({ isFresh: true }),
+    flagProbe({ isOrganic: true }),
+    flagProbe({ isVegetarian: true }),
+    flagProbe({ isGlutenFree: true }),
+    flagProbe({ isHmcCertified: true }),
+    flagProbe({ OR: [{ originalPrice: { not: null } }, { priceTier: { isNot: null } }] }),
+    // `distinct` rather than a groupBy: the facet needs the VALUES, not counts, and a count
+    // would be a second promise nobody renders.
+    prisma.product.findMany({
+      where: combineWhere(base, { origin: { not: null } }),
+      select: { origin: true },
+      distinct: ["origin"],
+      orderBy: { origin: "asc" },
+    }),
+    prisma.product.findMany({
+      where: combineWhere(base, { brandId: { not: null } }),
+      select: { brand: { select: { id: true, name: true, slug: true } } },
+      distinct: ["brandId"],
+      orderBy: { brand: { name: "asc" } },
+    }),
+    // #397 — both columns must be non-null: `netContentAmount` and `netContentUnit` are written
+    // together or not at all (see the schema comment), and a row with only one is not a pack size.
+    // `distinct` over the PAIR, for the same reason origin and brand use it rather than groupBy —
+    // the facet needs the values, and a count is a second promise nobody renders. Ordering is done
+    // in TypeScript below, not here: comparing 500g against 1kg is a unit conversion Postgres has
+    // no reason to know about.
+    prisma.product.findMany({
+      where: combineWhere(base, {
+        netContentAmount: { not: null },
+        netContentUnit: { not: null },
+      }),
+      select: { netContentAmount: true, netContentUnit: true },
+      distinct: ["netContentAmount", "netContentUnit"],
+    }),
+    // #912 — every OPTION any in-context product carries, with its attribute, in one query. Like
+    // every probe above it excludes all facet filters (`FacetContext` cannot carry
+    // `attributeOptionIds`), so an applied vendor filter never hides its own control. `distinct`
+    // for the same reason origin uses it: the facet needs values, not counts.
+    //
+    // #918 — `optionId: { not: null }` because a NUMBER value has no option, and `distinct` would
+    // otherwise return one null-option row.
+    prisma.productAttributeValue.findMany({
+      where: { vendorId, optionId: { not: null }, product: base },
+      select: {
+        option: { select: { slug: true, name: true, sortOrder: true } },
+        attribute: { select: facetAttributeSelect },
+      },
+      distinct: ["optionId"],
+    }),
+    // #918 — every NUMBER filter an in-context product carries a number for: one row per filter.
+    prisma.productAttributeValue.findMany({
+      where: { vendorId, numericValue: { not: null }, product: base },
+      select: { attribute: { select: facetAttributeSelect } },
+      distinct: ["attributeId"],
+    }),
+  ]);
+
+  return {
+    halal: halal !== null,
+    fresh: fresh !== null,
+    organic: organic !== null,
+    vegetarian: vegetarian !== null,
+    glutenFree: glutenFree !== null,
+    hmcCertified: hmcCertified !== null,
+    onOffer: onOffer !== null,
+    origins: originRows
+      .map((row) => row.origin)
+      .filter((origin): origin is string => origin !== null),
+    brands: brandRows
+      .map((row) => row.brand)
+      .filter((brand): brand is { id: string; name: string; slug: string } => brand !== null),
+    packSizes: packSizeRows
+      .flatMap((row) =>
+        row.netContentAmount !== null && row.netContentUnit !== null
+          ? [{ amount: row.netContentAmount, unit: row.netContentUnit }]
+          : [],
+      )
+      .sort(comparePackSizes),
+    attributes: groupFacetAttributes(attributeRows, numberAttributeRows),
+  };
+}
+
+type Ordered = { sortOrder: number; name: string };
+const bySortOrderThenName = (a: Ordered, b: Ordered) =>
+  a.sortOrder - b.sortOrder || a.name.localeCompare(b.name);
+
+const facetAttributeSelect = {
+  id: true,
+  slug: true,
+  name: true,
+  sortOrder: true,
+  kind: true,
+  unit: true,
+} as const;
+
+type FacetAttributeRow = Ordered & {
+  id: string;
+  slug: string;
+  kind: "LIST" | "NUMBER";
+  unit: string | null;
+};
+
+/**
+ * #912 — flat (attribute, option) rows into one entry per attribute, each ordered the way the
+ * vendor ordered them at /staff/attributes (`sortOrder`, then name). Ordered here rather than in
+ * SQL because `distinct` over options and an order over their parent attribute do not compose.
+ *
+ * #918 — NUMBER filters join the same list with no options, and the whole list keeps one order, so
+ * a list and a number filter sit where the vendor positioned them relative to each other.
+ */
+function groupFacetAttributes(
+  rows: { option: (Ordered & { slug: string }) | null; attribute: FacetAttributeRow }[],
+  numberRows: { attribute: FacetAttributeRow }[],
+): FacetAttribute[] {
+  const byAttribute = new Map<
+    string,
+    { attribute: FacetAttributeRow; options: (Ordered & { slug: string })[] }
+  >();
+  for (const row of rows) {
+    if (row.option === null) continue;
+    const entry = byAttribute.get(row.attribute.id) ?? { attribute: row.attribute, options: [] };
+    entry.options.push(row.option);
+    byAttribute.set(row.attribute.id, entry);
+  }
+  for (const row of numberRows) {
+    if (row.attribute.kind === "NUMBER" && !byAttribute.has(row.attribute.id)) {
+      byAttribute.set(row.attribute.id, { attribute: row.attribute, options: [] });
+    }
+  }
+  return [...byAttribute.values()]
+    .sort((a, b) => bySortOrderThenName(a.attribute, b.attribute))
+    .map(({ attribute, options }) => ({
+      slug: attribute.slug,
+      name: attribute.name,
+      kind: attribute.kind,
+      unit: attribute.unit,
+      options: options
+        .sort(bySortOrderThenName)
+        .map((option) => ({ slug: option.slug, name: option.name })),
+    }));
+}
+
+/** One autocomplete product suggestion — the smallest shape a suggestion row can render from. */
+export interface ProductSuggestion {
+  id: string;
+  slug: string;
+  name: string;
+  inStock: boolean;
+}
+
+/**
+ * Autocomplete product suggestions (#568). Deliberately NOT `searchProducts`.
+ *
+ * What it does not do is the point. No zero-result ladder, no 200-candidate window, no tier-price
+ * lookup, no `SearchQueryLog` write. That last one is not a performance nicety: this runs once per
+ * keystroke, so logging here would flood the exact table `#566`'s synonym proposals read — a
+ * feature silently corrupting its neighbour's input.
+ *
+ * `name` only, never `description`. A suggestion matching prose reads as a confident wrong answer,
+ * the same ruling that already keeps `matchProductListTerms` name-only — and it matters more here,
+ * because a suggestion is offered before the shopper has committed to anything.
+ *
+ * Ranked by the same `rankSearchCandidates` the results page uses, so what is suggested first is
+ * ordered the way what is found first will be.
+ *
+ * `candidateLimit` is a required parameter rather than a module constant: the bound belongs to the
+ * public endpoint that is exposed to one request per keystroke, so it is declared and owned there
+ * (`app/api/search/suggest/route.ts`) where anyone reading the route can see what it costs.
+ */
+export async function suggestProducts(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  query: string,
+  candidateLimit: number,
+): Promise<ProductSuggestion[]> {
+  const terms = parseSearchQuery(query);
+  // Same guard as searchProducts: no terms means no query is issued at all, which is what keeps
+  // the cheapest abusive request (a single character) from reaching the database.
+  if (terms.length === 0) return [];
+
+  const aliases = await listApprovedAliasMap(prisma, vendorId);
+  const groups = expandSearchTerms(terms, aliases);
+
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      AND: groups.map((group) => ({
+        OR: group.variants.map((variant) => ({
+          name: { contains: variant, mode: "insensitive" as const },
+        })),
+      })),
+    },
+    take: candidateLimit,
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      ...PURCHASABILITY_SELECT,
+    },
+  });
+
+  const candidates = rows.map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    inStock: purchasableQuantity(row) > 0,
+  }));
+  return rankSearchCandidates(candidates, groups);
+}
+
+/**
+ * P2.6 slice 3 (#566) — "Shop your list" reads the SAME approved dictionary the storefront search
+ * does. A synonym that works in one path and not the other is the defect the shared
+ * `expandSearchTerms` exists to design out, so this widens its `OR` with each term's variants.
+ *
+ * `description` stays excluded here, unchanged: P3d's ruling is that a term matching prose produces
+ * a confident-looking wrong match, which is precisely what this path's review step exists to
+ * prevent. Expansion adds APPROVED aliases only, so it widens recall without weakening that.
+ */
+export async function matchProductListTerms(
+  prisma: ReturnType<typeof getPrisma>,
+  vendorId: string,
+  terms: string[],
+): Promise<ListCandidate[]> {
+  if (terms.length === 0) return [];
+
+  const aliases = await listApprovedAliasMap(prisma, vendorId);
+  const variants = flattenVariants(expandSearchTerms(terms, aliases));
+
+  const rows = await prisma.product.findMany({
+    where: {
+      vendorId,
+      isActive: true,
+      category: visibleCategoryWhere,
+      OR: variants.map((variant) => ({
+        name: { contains: variant, mode: "insensitive" as const },
+      })),
+    },
+    take: CANDIDATE_QUERY_LIMIT,
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      basePrice: true,
+      unitLabel: true,
+      ...PURCHASABILITY_SELECT,
+    },
+  });
+
+  return rows.map((row) => ({
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    basePrice: row.basePrice,
+    unitLabel: row.unitLabel,
+    stock: purchasableQuantity(row),
+  }));
+}
+
+/* ------------------------------------------------------------------------- *
+ * Admin catalogue path (P6b1, #159)
+ *
+ * The first WRITES on this repository — everything above is a query. Three
+ * properties hold across all of it:
+ *
+ *  1. `vendorId` is an explicit ARGUMENT, never resolved from a form and never
+ *     read from request context inside these functions. That is what lets a
+ *     plain script exercise them (the `placeOrder(prisma, vendorId, input)`
+ *     shape), and it is why no submitted field can redirect a write at another
+ *     vendor's rows.
+ *  2. No admin read filters `isActive`. The storefront reads above deliberately
+ *     do, which is exactly why they cannot serve this surface: an owner has to
+ *     be able to find and re-activate the product they just switched off.
+ *  3. Errors a human can cause — a duplicate slug, a category that isn't
+ *     theirs — come back as data. Only genuine faults throw.
+ * ------------------------------------------------------------------------- */
+
+/** Same shape lib/repositories/discounts.ts and loyalty.ts use, so a write can run inside a caller's transaction. */
+type Db = ReturnType<typeof getPrisma>;
+type Tx = Parameters<Parameters<Db["$transaction"]>[0]>[0];
+type AnyDb = Db | Tx;
+
+/**
+ * The WebSocket-adapter client, required by every export below that opens an
+ * interactive transaction — `PrismaNeonHttp` cannot execute one at all (#382).
+ *
+ * Structurally identical to `Db` today, so the compiler will not stop you
+ * passing the wrong one; #390 tracks making them nominally distinct. Until then
+ * the parameter NAME (`prismaWs` vs `prisma`) is the signal, and
+ * `tests/repository-transaction-safety.test.ts` is the check.
+ */
+type DbWs = ReturnType<typeof getPrismaWs>;
+
+export interface AdminProductRow {
+  id: string;
+  slug: string;
+  name: string;
+  basePrice: number;
+  isActive: boolean;
+  categoryName: string;
+  quantity: number;
+  imageNeedsReview: boolean;
+  /** #1211 — shown on the list so a reviewer can see why a product is hidden. */
+  restriction: ProductRestriction | null;
+  stockMode: StockMode;
+}
+
+export interface AdminProductPage {
+  items: AdminProductRow[];
+  nextCursor: string | null;
+}
+
+export interface AdminProductDetail {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  categoryId: string;
+  basePrice: number;
+  originalPrice: number | null;
+  unitLabel: string;
+  /** #398 (derivation half) — see components/product/unit-price.ts. Both null or both set. */
+  netContentAmount: number | null;
+  netContentUnit: NetContentUnit | null;
+  origin: string | null;
+  isHalal: boolean;
+  isFresh: boolean;
+  isOrganic: boolean;
+  /** #569 — dietary facets and HMC provenance. */
+  isVegetarian: boolean;
+  isGlutenFree: boolean;
+  isHmcCertified: boolean;
+  hmcReference: string | null;
+  hmcVerifiedAt: Date | null;
+  brandId: string | null;
+  isFeatured: boolean;
+  isActive: boolean;
+  /** #1135 — this product takes a shopper note. */
+  allowsCustomNote: boolean;
+  /** #1211 — the restriction, if any; the form's enable control is decided from it. */
+  restriction: ProductRestriction | null;
+  quantity: number;
+  /** #1211 — UNKNOWN when the product has no Inventory row. */
+  stockMode: StockMode;
+  lowStockThreshold: number;
+  /** #876 — the stored expected restock day (`YYYY-MM-DD`), past or not, for the edit form. */
+  expectedRestockDay: string | null;
+  imageNeedsReview: boolean;
+
+  images: AdminProductImage[];
+  /** P8.5d (#348) — the multi-buy tier, active or not, so the form can re-enable one. */
+  tier: ProductTier | null;
+  /** #912 — attribute id → option id, for each LIST filter this product carries a value for. */
+  attributeValues: Record<string, string>;
+  /** #918 — attribute id → stored number as a string, for each NUMBER filter. */
+  attributeNumbers: Record<string, string>;
+}
+
+/** Everything a product write needs, already validated by lib/catalogue-form.ts. */
+export interface ProductWriteInput {
+  name: string;
+  slug: string;
+  description: string;
+  categoryId: string;
+  basePrice: number;
+  originalPrice: number | null;
+  unitLabel: string;
+  /**
+   * #398 (derivation half) — never accepted as a stored SORT-KEY value from a caller
+   * (`unitPricePencePerBaseUnit` isn't part of this type at all): `createProductForVendor`/
+   * `updateProductForVendor` recompute it themselves from these two fields plus `basePrice`, so it
+   * cannot be supplied stale (R31).
+   */
+  netContentAmount: number | null;
+  netContentUnit: NetContentUnit | null;
+  origin: string | null;
+  /**
+   * #905 — the eight label fields may be `undefined`: `lib/product-label-settings.ts` strips a
+   * label the vendor has switched off, and both writes below pass it to Prisma as-is, so an update
+   * leaves the stored value alone and a create takes the column default. Never coerce with `??`.
+   */
+  isHalal: boolean | undefined;
+  isFresh: boolean | undefined;
+  isOrganic: boolean | undefined;
+  /** #569 — dietary facets, HMC provenance and brand. */
+  isVegetarian: boolean | undefined;
+  isGlutenFree: boolean | undefined;
+  isHmcCertified: boolean | undefined;
+  hmcReference: string | null | undefined;
+  hmcVerifiedAt: Date | null | undefined;
+  brandId: string | null;
+  isFeatured: boolean;
+  isActive: boolean;
+  /** #1135 — this product takes a shopper note. Absent leaves the stored value alone on update. */
+  allowsCustomNote?: boolean;
+  quantity: number;
+  /**
+   * #1211 — required, so a form-driven Inventory write always states its mode and can never fall
+   * through to the column's UNKNOWN default by omission. The form defaults a new product to TRACKED.
+   */
+  stockMode: StockMode;
+  lowStockThreshold: number;
+  /** #876 — a `YYYY-MM-DD` day already validated by the form parser, or null to clear it. */
+  expectedRestockDay: string | null;
+  /** P8.5d (#348) — the multi-buy tier, or null to remove it entirely. */
+  tier: { groupQuantity: number; groupPricePence: number; isActive: boolean } | null;
+  /**
+   * #912 — this product's vendor-filter values, ONLY for the filters the form submitted
+   * (`lib/product-attribute-form.ts`). `optionId: null` clears that filter's value; a filter absent
+   * from this list is left untouched by an update. Ownership is checked here, not by the caller —
+   * see `assertOwnAttributeValues`.
+   */
+  attributeValues: AttributeValueWrite[];
+}
+
+export type CatalogueWriteResult =
+  { ok: true; id: string } | { ok: false; error: string; field?: string };
+
+export interface StaffInventoryRow {
+  id: string;
+  slug: string;
+  name: string;
+  unitLabel: string;
+  basePrice: number;
+  isActive: boolean;
+  categoryName: string;
+  quantity: number;
+  /** #1211 — the +/- control renders only for TRACKED; a restricted row cannot be toggled on. */
+  stockMode: StockMode;
+  restriction: ProductRestriction | null;
+  primaryImage: ProductImageSummary | null;
+}
+
+export interface StaffInventoryPage {
+  items: StaffInventoryRow[];
+  nextCursor: string | null;
+}
+
+export async function listInventoryForStaff(
+  prisma: Db,
+  vendorId: string,
+  { take, cursor, query }: { take: number; cursor?: string; query?: string },
+): Promise<StaffInventoryPage> {
+  const trimmed = query?.trim() ?? "";
+
+  const whereClause: Prisma.ProductWhereInput = { vendorId };
+  if (trimmed) {
+    whereClause.OR = [
+      { name: { contains: trimmed, mode: "insensitive" } },
+      { description: { contains: trimmed, mode: "insensitive" } },
+    ];
+  }
+
+  const rows = await runKeysetPage(keysetCursorArgs(cursor), (pageArgs) =>
+    prisma.product.findMany({
+      where: whereClause,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: take + 1,
+      ...pageArgs,
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        unitLabel: true,
+        basePrice: true,
+        isActive: true,
+        restriction: true,
+        category: { select: { name: true } },
+        inventory: { select: { quantity: true, stockMode: true } },
+        images: { where: { isPrimary: true }, take: 1, select: productImageSelect },
+      },
+    }),
+  );
+
+  const hasMore = rows.length > take;
+  const page = hasMore ? rows.slice(0, take) : rows;
+
+  return {
+    items: page.map((row) => ({
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      unitLabel: row.unitLabel,
+      basePrice: row.basePrice,
+      isActive: row.isActive,
+      categoryName: row.category?.name ?? "Unknown",
+      quantity: row.inventory?.quantity ?? 0,
+      stockMode: stockModeOf(row.inventory),
+      restriction: row.restriction,
+      primaryImage: row.images?.[0] ?? null,
+    })),
+    nextCursor: hasMore ? page[page.length - 1].id : null,
+  };
+}
+
+/** #1211 — the staff list's restriction filter as a `where` fragment (never a top-level OR). */
+function restrictionWhere(
+  restriction: "any" | "none" | ProductRestriction | undefined,
+): Prisma.ProductWhereInput {
+  if (restriction === undefined) return {};
+  if (restriction === "any") return { restriction: { not: null } };
+  if (restriction === "none") return { restriction: null };
+  return { restriction };
+}
+
+/** #1211 — UNKNOWN covers "no Inventory row" too, matching stockModeOf(). */
+function stockModeWhere(stockMode: StockMode | undefined): Prisma.ProductWhereInput {
+  if (stockMode === undefined) return {};
+  if (stockMode === "UNKNOWN") {
+    return { NOT: { inventory: { stockMode: { in: ["TRACKED", "UNTRACKED"] } } } };
+  }
+  return { inventory: { stockMode } };
+}
+
+/** Keyset-paginated on (createdAt, id) like findPage() above — never OFFSET. */
+export async function listProductsForAdmin(
+  prisma: Db,
+  vendorId: string,
+  {
+    take,
+    cursor,
+    search,
+    isActive,
+    categoryIds,
+    restriction,
+    stockMode,
+  }: {
+    take: number;
+    cursor?: string;
+    /** Case-insensitive substring of Product.name. Null/undefined applies no filter (#169). */
+    search?: string | null;
+    /** undefined applies no filter, preserving P6b1's "show everything" default (#169). */
+    isActive?: boolean;
+    /**
+     * Categories to restrict to (#503). undefined applies no filter.
+     *
+     * A LIST rather than a single id because selecting a department means "this
+     * department and its subcategories" — the expansion is decided by
+     * parseStaffProductsQuery against the vendor's real category list, so this
+     * layer stays a plain `in` and needs no hierarchy knowledge of its own.
+     */
+    categoryIds?: readonly string[];
+    /**
+     * #1211 — "any" = restricted at all, "none" = unrestricted, or one class. undefined applies no
+     * filter. Parsed (unknown values dropped) by parseStaffProductsQuery.
+     */
+    restriction?: "any" | "none" | ProductRestriction;
+    /** #1211 — UNKNOWN also matches a product with no Inventory row. */
+    stockMode?: StockMode;
+  },
+): Promise<AdminProductPage> {
+  const rows = await runKeysetPage(keysetCursorArgs(cursor), (pageArgs) =>
+    prisma.product.findMany({
+      where: {
+        vendorId,
+        // Name only, deliberately. The storefront's search() ORs a `contains`
+        // across name AND description, which is right for a shopper hunting a
+        // concept and wrong for an owner who knows what the product is called —
+        // a description match would bury the exact-name hit they came for.
+        ...(search ? { name: { contains: search, mode: "insensitive" as const } } : {}),
+        ...(isActive === undefined ? {} : { isActive }),
+        // An empty array is treated as "no filter", not "match nothing" — the
+        // caller never produces one (see StaffProductsQuery.categoryIds), and a
+        // silently-empty result set is the worse failure of the two.
+        ...(categoryIds && categoryIds.length > 0 ? { categoryId: { in: [...categoryIds] } } : {}),
+        ...restrictionWhere(restriction),
+        ...stockModeWhere(stockMode),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: take + 1,
+      ...pageArgs,
+      select: {
+        id: true,
+        slug: true,
+        name: true,
+        basePrice: true,
+        isActive: true,
+        imageNeedsReview: true,
+        restriction: true,
+        category: { select: { name: true } },
+        inventory: { select: { quantity: true, stockMode: true } },
+      },
+    }),
+  );
+
+  const hasMore = rows.length > take;
+  const page = hasMore ? rows.slice(0, take) : rows;
+
+  return {
+    items: page.map((row) => ({
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      basePrice: row.basePrice,
+      isActive: row.isActive,
+      categoryName: row.category?.name ?? "Unknown",
+      quantity: row.inventory?.quantity ?? 0,
+      imageNeedsReview: row.imageNeedsReview,
+      restriction: row.restriction,
+      stockMode: stockModeOf(row.inventory),
+    })),
+    nextCursor: hasMore ? page[page.length - 1].id : null,
+  };
+}
+
+export async function getProductForAdmin(
+  prisma: Db,
+  vendorId: string,
+  id: string,
+): Promise<AdminProductDetail | null> {
+  // findFirst, not findUnique: `id` alone is unique, but a vendor-less read has
+  // no place in this layer (ADR-004 slice 2).
+  const row = await prisma.product.findFirst({
+    where: { id, vendorId },
+    select: {
+      id: true,
+      slug: true,
+      name: true,
+      description: true,
+      categoryId: true,
+      basePrice: true,
+      originalPrice: true,
+      unitLabel: true,
+      netContentAmount: true,
+      netContentUnit: true,
+      origin: true,
+      isHalal: true,
+      isFresh: true,
+      isOrganic: true,
+      isVegetarian: true,
+      isGlutenFree: true,
+      isHmcCertified: true,
+      hmcReference: true,
+      hmcVerifiedAt: true,
+      brandId: true,
+      isFeatured: true,
+      isActive: true,
+      allowsCustomNote: true,
+      imageNeedsReview: true,
+      restriction: true,
+      inventory: {
+        select: {
+          quantity: true,
+          stockMode: true,
+          lowStockThreshold: true,
+          expectedRestockDate: true,
+        },
+      },
+      images: { orderBy: { sortOrder: "asc" }, select: adminProductImageSelect },
+      attributeValues: { select: { attributeId: true, optionId: true, numericValue: true } },
+    },
+  });
+  if (!row) return null;
+
+  const { inventory, attributeValues, ...product } = row;
+  // Active OR inactive: the form has to be able to re-activate a switched-off
+  // multi-buy without the owner retyping its numbers, so this read is
+  // deliberately not the active-only one the storefront uses.
+  const tier = await getTierForProduct(prisma, vendorId, id);
+  return {
+    ...product,
+    // A product seeded before P6b1 may have no Inventory row at all; the form
+    // shows zeroes and the first save creates it (see updateProductForVendor).
+    quantity: inventory?.quantity ?? 0,
+    stockMode: stockModeOf(inventory),
+    lowStockThreshold: inventory?.lowStockThreshold ?? 3,
+    expectedRestockDay: restockDayFromStored(inventory?.expectedRestockDate),
+    tier,
+    attributeValues: Object.fromEntries(
+      attributeValues.flatMap((value) =>
+        value.optionId === null ? [] : [[value.attributeId, value.optionId]],
+      ),
+    ),
+    // #918 — a string, never a Prisma Decimal (see lib/attribute-number.ts).
+    attributeNumbers: Object.fromEntries(
+      attributeValues.flatMap((value) =>
+        value.numericValue === null ? [] : [[value.attributeId, value.numericValue.toString()]],
+      ),
+    ),
+  };
+}
+
+/** #876 — a form day to its stored instant: that day's UTC midnight (the #811 convention). */
+function toRestockDate(day: string | null): Date | null {
+  return day === null ? null : calendarDayToUtcMidnight(day);
+}
+
+/**
+ * The category is resolved SCOPED TO THE VENDOR, and its absence is the refusal.
+ * `Product.categoryId`'s foreign key carries no vendor, so nothing in the schema
+ * stops a form submitting another vendor's category id — this lookup is the only
+ * thing that does. Same defence P3d used for its untrusted review-form ids.
+ */
+async function assertOwnCategory(
+  db: AnyDb,
+  vendorId: string,
+  categoryId: string,
+): Promise<boolean> {
+  const category = await db.category.findFirst({
+    where: { id: categoryId, vendorId },
+    select: { id: true },
+  });
+  return category !== null;
+}
+
+/**
+ * #912 — every submitted vendor-filter value must name one of THIS vendor's attributes and, when
+ * set, one of THAT attribute's options. The composite foreign keys would reject a mismatched pair
+ * too, but as a 500 from a constraint violation; checking here turns a crafted or stale submission
+ * into a field error, and resolves ownership by vendor, which the option row cannot (it carries no
+ * `vendorId`). One query for the whole submission.
+ *
+ * #918 — and each entry's KIND must match its attribute's. This is the only thing stopping a number
+ * being stored against a list filter (or an option against a number filter): the database CHECK
+ * constrains the row's shape, not which filter it points at.
+ *
+ * Returns the refusal, or `null` when every entry is valid.
+ */
+async function assertOwnAttributeValues(
+  db: AnyDb,
+  vendorId: string,
+  values: readonly AttributeValueWrite[],
+): Promise<Extract<CatalogueWriteResult, { ok: false }> | null> {
+  if (values.length === 0) return null;
+  const attributes = await db.vendorAttribute.findMany({
+    where: { vendorId, id: { in: values.map((value) => value.attributeId) } },
+    select: { id: true, kind: true, options: { select: { id: true } } },
+  });
+  const byId = new Map(
+    attributes.map((attribute) => [
+      attribute.id,
+      { kind: attribute.kind, options: new Set(attribute.options.map((option) => option.id)) },
+    ]),
+  );
+  for (const value of values) {
+    const attribute = byId.get(value.attributeId);
+    const valid =
+      attribute !== undefined &&
+      attribute.kind === value.kind &&
+      (value.kind === "NUMBER" || value.optionId === null || attribute.options.has(value.optionId));
+    if (!valid) {
+      return {
+        ok: false,
+        error: "Choose a value from this store's list.",
+        field:
+          value.kind === "LIST"
+            ? `attribute_${value.attributeId}`
+            : `attributeNumber_${value.attributeId}`,
+      };
+    }
+  }
+  return null;
+}
+
+const WRONG_CATEGORY = {
+  ok: false as const,
+  error: "Choose a category that belongs to this store.",
+  field: "categoryId",
+};
+
+const DUPLICATE_SLUG = {
+  ok: false as const,
+  error: "Another product in this store already uses that web address.",
+  field: "slug",
+};
+
+/**
+ * #398 (derivation half), R31 — the two net-content fields to a `NetContent | null`, so
+ * `deriveUnitPricePenceForSort` (components/product/unit-price.ts) can be called identically
+ * from both the create and update paths below.
+ */
+function toNetContent(
+  input: Pick<ProductWriteInput, "netContentAmount" | "netContentUnit">,
+): NetContent | null {
+  return input.netContentAmount !== null && input.netContentUnit !== null
+    ? { amount: input.netContentAmount, unit: input.netContentUnit }
+    : null;
+}
+
+export async function createProductForVendor(
+  prisma: Db,
+  vendorId: string,
+  input: ProductWriteInput,
+): Promise<CatalogueWriteResult> {
+  try {
+    if (!(await assertOwnCategory(prisma, vendorId, input.categoryId))) return WRONG_CATEGORY;
+    const badAttribute = await assertOwnAttributeValues(prisma, vendorId, input.attributeValues);
+    if (badAttribute) return badAttribute;
+
+    // #398 (derivation half), R31 — computed HERE, from this write's own basePrice and net
+    // content, never accepted from the caller (ProductWriteInput has no such field), so it can
+    // never be supplied stale.
+    const unitPricePencePerBaseUnit = deriveUnitPricePenceForSort(
+      input.basePrice,
+      toNetContent(input),
+    );
+
+    // The Inventory row is a NESTED create, so it commits in the same implicit
+    // transaction as the Product. Two sequential calls could leave a product
+    // with no stock row — which every reader then papers over with `?? 0`,
+    // making "out of stock" and "never given stock" indistinguishable.
+    const created = await prisma.product.create({
+      data: {
+        vendorId,
+        name: input.name,
+        slug: input.slug,
+        description: input.description,
+        categoryId: input.categoryId,
+        basePrice: input.basePrice,
+        originalPrice: input.originalPrice,
+        unitLabel: input.unitLabel,
+        netContentAmount: input.netContentAmount,
+        netContentUnit: input.netContentUnit,
+        unitPricePencePerBaseUnit,
+        origin: input.origin,
+        isVegetarian: input.isVegetarian,
+        isGlutenFree: input.isGlutenFree,
+        isHmcCertified: input.isHmcCertified,
+        hmcReference: input.hmcReference,
+        hmcVerifiedAt: input.hmcVerifiedAt,
+        brandId: input.brandId,
+        isHalal: input.isHalal,
+        isFresh: input.isFresh,
+        isOrganic: input.isOrganic,
+        isFeatured: input.isFeatured,
+        isActive: input.isActive,
+        allowsCustomNote: input.allowsCustomNote,
+        inventory: {
+          create: {
+            vendorId,
+            quantity: input.quantity,
+            // #1211 — stated, never left to the column's UNKNOWN default.
+            stockMode: input.stockMode,
+            lowStockThreshold: input.lowStockThreshold,
+            expectedRestockDate: toRestockDate(input.expectedRestockDay),
+          },
+        },
+        // Nested for the same reason Inventory is: one implicit transaction, so
+        // a product can never exist with a half-written multi-buy beside it.
+        ...(input.tier
+          ? {
+              priceTier: {
+                create: {
+                  vendorId,
+                  groupQuantity: input.tier.groupQuantity,
+                  groupPricePence: input.tier.groupPricePence,
+                  isActive: input.tier.isActive,
+                },
+              },
+            }
+          : {}),
+        // #912 — nested too, so a product never exists with half its filter values written. A
+        // `null` ("Not set") has nothing to create on a new product. This nesting is exactly why the
+        // create must reach Prisma through `getPrismaWs()` (lib/products-service.ts): a nested
+        // create is several inserts in an implicit transaction.
+        attributeValues: {
+          create: input.attributeValues.flatMap(
+            (value): Prisma.ProductAttributeValueUncheckedCreateWithoutProductInput[] => {
+              if (value.kind === "LIST") {
+                return value.optionId === null
+                  ? []
+                  : [{ vendorId, attributeId: value.attributeId, optionId: value.optionId }];
+              }
+              // #918 — a number value, same nested create.
+              return value.numericValue === null
+                ? []
+                : [{ vendorId, attributeId: value.attributeId, numericValue: value.numericValue }];
+            },
+          ),
+        },
+      },
+      select: { id: true },
+    });
+    return { ok: true, id: created.id };
+  } catch (error) {
+    if (isUniqueViolation(error)) return DUPLICATE_SLUG;
+    throw error;
+  }
+}
+
+export async function updateProductForVendor(
+  prismaWs: DbWs,
+  vendorId: string,
+  id: string,
+  input: ProductWriteInput,
+): Promise<CatalogueWriteResult> {
+  try {
+    return await prismaWs.$transaction(async (tx) => {
+      const existing = await tx.product.findFirst({
+        where: { id, vendorId },
+        select: { id: true, restriction: true },
+      });
+      // Another vendor's product is indistinguishable from one that never existed.
+      if (!existing) return { ok: false as const, error: "That product no longer exists." };
+      // #1211 (R19) — the repository refuses this for EVERY caller, whatever their role. Clearing a
+      // restriction is a separate, audited path (lib/repositories/product-restrictions.ts).
+      if (existing.restriction !== null && input.isActive) {
+        return { ok: false as const, error: restrictedEnableError(existing.restriction) };
+      }
+
+      if (!(await assertOwnCategory(tx, vendorId, input.categoryId))) return WRONG_CATEGORY;
+      const badAttribute = await assertOwnAttributeValues(tx, vendorId, input.attributeValues);
+      if (badAttribute) return badAttribute;
+
+      // #398 (derivation half), R31 — same computation as createProductForVendor, from this
+      // write's own basePrice and net content, never from a caller-supplied value.
+      const unitPricePencePerBaseUnit = deriveUnitPricePenceForSort(
+        input.basePrice,
+        toNetContent(input),
+      );
+
+      await tx.product.update({
+        where: { id, vendorId },
+        data: {
+          name: input.name,
+          slug: input.slug,
+          description: input.description,
+          categoryId: input.categoryId,
+          basePrice: input.basePrice,
+          originalPrice: input.originalPrice,
+          unitLabel: input.unitLabel,
+          netContentAmount: input.netContentAmount,
+          netContentUnit: input.netContentUnit,
+          unitPricePencePerBaseUnit,
+          origin: input.origin,
+          isVegetarian: input.isVegetarian,
+          isGlutenFree: input.isGlutenFree,
+          isHmcCertified: input.isHmcCertified,
+          hmcReference: input.hmcReference,
+          hmcVerifiedAt: input.hmcVerifiedAt,
+          brandId: input.brandId,
+          isHalal: input.isHalal,
+          isFresh: input.isFresh,
+          isOrganic: input.isOrganic,
+          isFeatured: input.isFeatured,
+          isActive: input.isActive,
+          allowsCustomNote: input.allowsCustomNote,
+        },
+      });
+
+      // upsert, not update: a product created before this slice may have no
+      // Inventory row, and the owner's first save is where it should appear
+      // rather than failing on a missing record.
+      await tx.inventory.upsert({
+        where: { productId: id, vendorId },
+        create: {
+          vendorId,
+          productId: id,
+          quantity: input.quantity,
+          stockMode: input.stockMode,
+          lowStockThreshold: input.lowStockThreshold,
+          expectedRestockDate: toRestockDate(input.expectedRestockDay),
+        },
+        update: {
+          quantity: input.quantity,
+          stockMode: input.stockMode,
+          lowStockThreshold: input.lowStockThreshold,
+          expectedRestockDate: toRestockDate(input.expectedRestockDay),
+        },
+      });
+
+      // P8.5d (#348). Clearing both multi-buy fields DELETES the row rather than
+      // deactivating it: "no multi-buy" and "a multi-buy that is switched off"
+      // are different intents, and the form offers both (the active checkbox is
+      // how you keep the numbers for next season). Inside this transaction, so
+      // a product and its tier commit or roll back together.
+      if (input.tier) {
+        await upsertProductTier(tx, vendorId, id, input.tier);
+      } else {
+        await deleteProductTier(tx, vendorId, id);
+      }
+
+      // #912 — only the filters the form submitted. A set value is upserted on the
+      // (product, attribute) unique; "Not set" deletes that one row; an attribute absent from
+      // `attributeValues` is not touched at all. Inside the transaction, so the product and its
+      // filter values commit or roll back together.
+      //
+      // #918 — a NUMBER entry writes `numericValue` and nulls `optionId` (and a LIST entry the
+      // reverse), so the row always satisfies ProductAttributeValue_one_value_check.
+      for (const value of input.attributeValues) {
+        const cleared =
+          value.kind === "LIST" ? value.optionId === null : value.numericValue === null;
+        if (cleared) {
+          await tx.productAttributeValue.deleteMany({
+            where: { productId: id, attributeId: value.attributeId, vendorId },
+          });
+          continue;
+        }
+        const data =
+          value.kind === "LIST"
+            ? { optionId: value.optionId, numericValue: null }
+            : { optionId: null, numericValue: value.numericValue };
+        await tx.productAttributeValue.upsert({
+          where: { productId_attributeId: { productId: id, attributeId: value.attributeId } },
+          create: { vendorId, productId: id, attributeId: value.attributeId, ...data },
+          update: data,
+        });
+      }
+
+      return { ok: true as const, id };
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) return DUPLICATE_SLUG;
+    throw error;
+  }
+}
+
+/**
+ * Point a product's PRIMARY image at a newly uploaded key (P6b2, #167).
+ *
+ * Repoint, never replace: the existing primary row is updated in place so its id
+ * survives, and a product that has never had an image gets exactly one row. The
+ * superseded object stays in storage — immutable keys are the whole reason no
+ * CDN purge is needed, and cleaning them up is #174.
+ *
+ * Non-primary rows are left alone rather than cleared. None exist today (the
+ * seed writes one image per product), but multi-image management is #173 and
+ * this must not quietly destroy its data when it arrives.
+ *
+ * `alt` falls back to the product's own name, which is why the name is selected
+ * here: ProductImage.alt is non-null, and an empty alt on a storefront image is
+ * an accessibility defect rather than a tidy default.
+ */
+export async function setPrimaryProductImage(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+): Promise<CatalogueWriteResult> {
+  return await prismaWs.$transaction(async (tx) => {
+    // Vendor-scoped: another vendor's product is indistinguishable from one that
+    // never existed, exactly as updateProductForVendor treats it.
+    const product = await tx.product.findFirst({
+      where: { id: productId, vendorId },
+      select: { id: true, name: true },
+    });
+    if (!product) return { ok: false as const, error: "That product no longer exists." };
+
+    const altText = alt.trim() === "" ? product.name : alt.trim();
+    const existing = await tx.productImage.findFirst({
+      where: { productId, isPrimary: true },
+      select: { id: true },
+    });
+
+    // #900 — a staff upload, on both branches: replacing the primary's bytes replaces what the
+    // row depicts, so its old provenance (e.g. AI_GENERATED) must not survive the swap.
+    if (existing) {
+      await tx.productImage.update({
+        where: { id: existing.id },
+        data: { storageKey, alt: altText, source: "STAFF_UPLOAD" },
+      });
+    } else {
+      await tx.productImage.create({
+        data: {
+          productId,
+          storageKey,
+          alt: altText,
+          isPrimary: true,
+          sortOrder: 0,
+          source: "STAFF_UPLOAD",
+        },
+      });
+    }
+
+    return { ok: true as const, id: productId };
+  });
+}
+
+/**
+ * Add a NON-primary image (#211) — the gap #173 named: nothing before this
+ * ever created a second ProductImage row. `isPrimary: true` only when the
+ * product currently has zero images, so a product's first image is primary
+ * however it arrived (this action or the original upload-as-primary flow).
+ */
+export async function addProductImage(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+): Promise<CatalogueWriteResult> {
+  return await prismaWs.$transaction(async (tx) => {
+    const product = await tx.product.findFirst({
+      where: { id: productId, vendorId },
+      select: { id: true, name: true },
+    });
+    if (!product) return { ok: false as const, error: "That product no longer exists." };
+
+    const existing = await tx.productImage.findMany({
+      where: { productId },
+      select: { sortOrder: true },
+      orderBy: { sortOrder: "desc" },
+      take: 1,
+    });
+    const nextSortOrder = existing.length === 0 ? 0 : existing[0].sortOrder + 1;
+    const altText = alt.trim() === "" ? product.name : alt.trim();
+
+    await tx.productImage.create({
+      data: {
+        productId,
+        storageKey,
+        alt: altText,
+        isPrimary: existing.length === 0,
+        sortOrder: nextSortOrder,
+        source: "STAFF_UPLOAD", // #900
+      },
+    });
+
+    return { ok: true as const, id: productId };
+  });
+}
+
+/**
+ * Promote an existing image to primary (#211) — unlike setPrimaryProductImage,
+ * this never touches storageKey; it only moves which row `isPrimary` sits on.
+ */
+export async function promoteProductImage(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  imageId: string,
+): Promise<CatalogueWriteResult> {
+  return await prismaWs.$transaction(async (tx) => {
+    const product = await tx.product.findFirst({ where: { id: productId, vendorId } });
+    if (!product) return { ok: false as const, error: "That product no longer exists." };
+
+    const target = await tx.productImage.findFirst({
+      where: { id: imageId, productId },
+      select: { id: true, isPrimary: true },
+    });
+    if (!target) return { ok: false as const, error: "That image no longer exists." };
+    if (target.isPrimary) return { ok: true as const, id: productId };
+
+    await tx.productImage.updateMany({
+      where: { productId, isPrimary: true },
+      data: { isPrimary: false },
+    });
+    await tx.productImage.update({ where: { id: target.id }, data: { isPrimary: true } });
+
+    return { ok: true as const, id: productId };
+  });
+}
+
+/** What removeProductImage deleted, so the caller (Service layer) can remove it from storage too. */
+export type RemoveImageResult = { ok: true; storageKey: string } | { ok: false; error: string };
+
+/**
+ * Delete a ProductImage row (#211). Deliberately does NOT touch storage —
+ * Presentation -> Service -> Repository -> Prisma (specs/architecture.md):
+ * the repository layer is DB-only, same as setPrimaryProductImage never
+ * called headObject itself. The Service layer (features/admin/product-image.ts)
+ * calls StorageService.deleteObject with the storageKey this returns.
+ *
+ * If the removed row was primary and others remain, the row with the lowest
+ * remaining sortOrder is promoted in the same transaction — a product with
+ * any images always has exactly one primary.
+ */
+export async function removeProductImage(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  imageId: string,
+): Promise<RemoveImageResult> {
+  return await prismaWs.$transaction(async (tx) => {
+    const product = await tx.product.findFirst({ where: { id: productId, vendorId } });
+    if (!product) return { ok: false as const, error: "That product no longer exists." };
+
+    const target = await tx.productImage.findFirst({
+      where: { id: imageId, productId },
+      select: { id: true, storageKey: true, isPrimary: true },
+    });
+    if (!target) return { ok: false as const, error: "That image no longer exists." };
+
+    await tx.productImage.delete({ where: { id: target.id } });
+
+    if (target.isPrimary) {
+      const next = await tx.productImage.findFirst({
+        where: { productId },
+        orderBy: { sortOrder: "asc" },
+        select: { id: true },
+      });
+      if (next) {
+        await tx.productImage.update({ where: { id: next.id }, data: { isPrimary: true } });
+      }
+    }
+
+    return { ok: true as const, storageKey: target.storageKey };
+  });
+}
+
+/**
+ * Rewrite sortOrder to match a given order (#211). Refuses (no writes) unless
+ * `orderedImageIds` is EXACTLY the product's current image id set — a partial
+ * or stale list would otherwise silently reorder a subset and leave the rest
+ * inconsistent.
+ */
+export async function reorderProductImages(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  orderedImageIds: string[],
+): Promise<CatalogueWriteResult> {
+  return await prismaWs.$transaction(async (tx) => {
+    const product = await tx.product.findFirst({ where: { id: productId, vendorId } });
+    if (!product) return { ok: false as const, error: "That product no longer exists." };
+
+    const current = await tx.productImage.findMany({
+      where: { productId },
+      select: { id: true },
+    });
+    const currentIds = new Set(current.map((row) => row.id));
+    const requestedIds = new Set(orderedImageIds);
+    const sameSet =
+      currentIds.size === requestedIds.size && [...currentIds].every((id) => requestedIds.has(id));
+    if (!sameSet) {
+      return { ok: false as const, error: "That image list doesn't match this product anymore." };
+    }
+
+    await Promise.all(
+      orderedImageIds.map((id, index) =>
+        tx.productImage.update({ where: { id }, data: { sortOrder: index } }),
+      ),
+    );
+
+    return { ok: true as const, id: productId };
+  });
+}
+
+/**
+ * Fast-path for shop-floor staff to increment/decrement stock and toggle availability
+ * without needing the full product edit payload (P6, #168).
+ */
+export async function quickUpdateInventory(
+  prismaWs: DbWs,
+  vendorId: string,
+  productId: string,
+  data: { quantity?: number; isActive?: boolean },
+): Promise<CatalogueWriteResult> {
+  try {
+    return await prismaWs.$transaction(async (tx) => {
+      const existing = await tx.product.findFirst({
+        where: { id: productId, vendorId },
+        select: {
+          id: true,
+          restriction: true,
+          inventory: { select: { quantity: true, lowStockThreshold: true } },
+        },
+      });
+      if (!existing) return { ok: false as const, error: "That product no longer exists." };
+      // #1211 (R19) — refused for every caller; nothing is written, quantity included.
+      if (existing.restriction !== null && data.isActive === true) {
+        return { ok: false as const, error: restrictedEnableError(existing.restriction) };
+      }
+
+      if (data.isActive !== undefined) {
+        await tx.product.update({
+          where: { id: productId },
+          data: { isActive: data.isActive },
+        });
+      }
+
+      if (data.quantity !== undefined) {
+        await tx.inventory.upsert({
+          where: { productId, vendorId },
+          create: {
+            vendorId,
+            productId,
+            quantity: data.quantity,
+            // #1211 — staff typing a count is tracking; never the column's UNKNOWN default.
+            stockMode: "TRACKED",
+            lowStockThreshold: 3,
+          },
+          update: { quantity: data.quantity },
+        });
+      }
+
+      return { ok: true as const, id: productId };
+    });
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * Attach a pipeline-generated image and make it the one the storefront shows
+ * (#502).
+ *
+ * `isPrimary: true`, NOT false. Every storefront read selects
+ * `images: { where: { isPrimary: true }, take: 1 }` (see `findPage` above), so
+ * the previous `isPrimary: false` meant a generated image uploaded, cost an AI
+ * call, and then never appeared on a single card — invisible, because the job
+ * that produced it could never match a product in the first place (see
+ * `getProductsWithoutImages`).
+ *
+ * The placeholder rows this replaces are DELETED rather than demoted. They are
+ * shared objects — every product in a subcategory points at the same
+ * `products/gen-{categorySlug}/main.svg` — so keeping one around as a secondary
+ * gallery image would put an identical "No image" tile in the gallery of every
+ * product that has ever been backfilled. Only placeholders are removed; a real
+ * image a vendor uploaded is demoted to non-primary and kept.
+ */
+export async function saveGeneratedProductImage(
+  prisma: Db,
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+  needsReview: boolean,
+  // #900 — REQUIRED so the compiler finds every caller: provenance is recorded, never defaulted.
+  source: ProductImageSource,
+): Promise<void> {
+  const existing = await prisma.productImage.findMany({
+    where: { productId },
+    select: { id: true, storageKey: true, isPrimary: true },
+  });
+
+  await prisma.productImage.create({
+    data: {
+      productId,
+      storageKey,
+      alt,
+      isPrimary: true,
+      source,
+    },
+  });
+
+  for (const image of existing) {
+    if (isPlaceholderImageKey(image.storageKey)) {
+      await prisma.productImage.delete({ where: { id: image.id } });
+    } else if (image.isPrimary) {
+      // A real image the vendor uploaded keeps its place in the gallery, but
+      // only one row may claim primary. Singular `update`, not `updateMany` —
+      // #382: the HTTP adapter cannot run the transaction the query compiler
+      // wraps `updateMany` in.
+      await prisma.productImage.update({
+        where: { id: image.id },
+        data: { isPrimary: false },
+      });
+    }
+  }
+
+  // #523 — an image landed, so any historic failures are no longer relevant.
+  // Reset unconditionally rather than only when the counter is non-zero: if this
+  // product later loses its image it should be retried from scratch, not
+  // excluded by attempts that predate an image it once had. Merged into the
+  // `needsReview` update when both apply, so this stays one write either way.
+  await prisma.product.update({
+    where: { id: productId, vendorId },
+    data: { imageAttemptFailures: 0, ...(needsReview ? { imageNeedsReview: true } : {}) },
+  });
+}
+
+/**
+ * Products the "Auto-fill Missing Images" job should act on (#502).
+ *
+ * This asked for `images: { none: {} }` — products with NO image row — and so
+ * matched NOTHING, ever: both seed paths give every product a placeholder row,
+ * measured at 0 for both vendors on the dev branch while thousands of cards
+ * rendered a grey "No image" box. The real condition is "has no image a
+ * customer would call an image", which covers a product with no rows at all AND
+ * a product still carrying only a seeded placeholder.
+ *
+ * Expressed as one query rather than an over-fetch-and-filter: Prisma's `every`
+ * on a relation is true for a product with no images at all, so a single
+ * `every: { storageKey: { endsWith: ... } }` covers both halves, and `take`
+ * still means the database returns exactly what the caller will act on. The
+ * suffix comes from `lib/product-image.ts`, the same constant
+ * `isPlaceholderImageKey` reads, so the SQL filter and the pure predicate
+ * cannot drift apart.
+ */
+/**
+ * Record one failed image-pipeline attempt for a product (#523).
+
+ * query compiler wraps `updateMany` in a transaction the HTTP adapter cannot
+ * execute, and this is called from the admin route, which runs on `getPrisma()`.
+ *
+ * Scoped by `vendorId` in the `where` so a caller cannot increment a counter on
+ * another tenant's product by passing an id it happened to learn.
+ *
+ * Failures are counted, never reset here; `saveGeneratedProductImage` clears the
+ * counter when an image finally lands, so a product that later loses its image
+ * is retried rather than being excluded forever by a historic failure.
+ */
+export async function recordImageAttemptFailure(
+  prisma: Db,
+  vendorId: string,
+  productId: string,
+): Promise<void> {
+  await prisma.product.update({
+    where: { id: productId, vendorId },
+    data: { imageAttemptFailures: { increment: 1 } },
+  });
+}
+
+/**
+ * How many products are excluded from automatic filling because they have
+ * exhausted their attempts (#523).
+ *
+ * Exists so a run can SAY it is skipping them. A give-up rule that silently
+ * shrinks the work list is the same class of problem it was built to fix: the
+ * job would report "nothing to do" while products sat permanently unfilled and
+ * nothing pointed at them.
+ */
+export async function countProductsWithExhaustedImageAttempts(
+  prisma: Db,
+  vendorId: string,
+): Promise<number> {
+  return await prisma.product.count({
+    where: {
+      vendorId,
+      images: { every: { storageKey: { endsWith: PLACEHOLDER_IMAGE_SUFFIX } } },
+      imageAttemptFailures: { gte: MAX_IMAGE_ATTEMPT_FAILURES },
+    },
+  });
+}
+
+export async function getProductsWithoutImages(prisma: Db, vendorId: string, limit: number) {
+  return await prisma.product.findMany({
+    where: {
+      vendorId,
+      images: { every: { storageKey: { endsWith: PLACEHOLDER_IMAGE_SUFFIX } } },
+      // #523 — exclude products the pipeline has already failed on
+      // MAX_IMAGE_ATTEMPT_FAILURES times. This selection is newest-first and
+      // BOUNDED, so a product that can never succeed would otherwise be
+      // re-selected on every scheduled run, consume a slot, fail, and leave the
+      // fillable backlog behind it untouched while the job reported success.
+      imageAttemptFailures: { lt: MAX_IMAGE_ATTEMPT_FAILURES },
+    },
+    // Newest first, so a bounded batch is deterministic rather than whatever
+    // order the planner happens to return. Two things follow from that, both
+    // wanted: `scripts/verify-repository-injection.ts` can assert on rows it
+    // just created, and a vendor's real catalogue — which is newer than the
+    // seeded demo set — is filled before the 2,000 generated products.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: limit,
+    select: { id: true, name: true },
+  });
+}
+
+export async function approveProductImageRow(
+  prisma: Db,
+  vendorId: string,
+  productId: string,
+): Promise<CatalogueWriteResult> {
+  const existing = await prisma.product.findFirst({
+    where: { id: productId, vendorId },
+    select: { id: true },
+  });
+  if (!existing) return { ok: false as const, error: "That product no longer exists." };
+
+  await prisma.product.update({
+    where: { id: productId },
+    data: { imageNeedsReview: false },
+  });
+
+  return { ok: true as const, id: productId };
+}
+
+/**
+ * #900 (R8) — staff vouch for an image as a real photo of this product's pack, or withdraw that.
+ *
+ * Moves ONLY between UNKNOWN and STAFF_CONFIRMED_PHOTO (`nextConfirmedPhotoSource`). Any other
+ * and an Open Food Facts match may be another product, so neither can be vouched for.
+ *
+ * A plain read-then-write, deliberately not compare-and-set: two staff toggling the same image at
+ * once is harmless (the last click wins, and the control shows the result), whereas catching a
+ * not-found code on a conditional update would need both adapters' codes verified live
+
+ */
+export async function toggleProductImageConfirmedPhoto(
+  prisma: Db,
+  vendorId: string,
+  productId: string,
+  imageId: string,
+): Promise<{ ok: true; source: ProductImageSource } | { ok: false; error: string }> {
+  const image = await prisma.productImage.findFirst({
+    where: { id: imageId, productId, product: { vendorId } },
+    select: { id: true, source: true },
+  });
+  if (!image) return { ok: false, error: "That image no longer exists." };
+
+  const next = nextConfirmedPhotoSource(image.source);
+  if (next === null) {
+    return {
+      ok: false,
+      error: "Only an image of unknown source can be confirmed as a real photo of this product.",
+    };
+  }
+
+  await prisma.productImage.update({ where: { id: image.id }, data: { source: next } });
+  return { ok: true, source: next };
+}

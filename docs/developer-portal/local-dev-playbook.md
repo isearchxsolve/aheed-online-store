@@ -1,0 +1,989 @@
+---
+id: local-dev-playbook
+title: "Local Development Playbook — Windows shell, and proving things live without a browser"
+audience: [dev]
+type: runbook
+status: approved
+version: "1.38.0"
+updated: 2026-10-31
+visibility: internal
+summary: How to work on this repo on Windows and prove a change works live — shell/encoding traps, process cleanup, vitest forks-pool, KMS coverage vs gitignore, TZ overrides, curl-driven server actions, grep-vs-HTML pitfalls, vendor hosts, and what a session can and cannot drive when proving a payment path.
+tags: [local-dev, windows, validation, playbook]
+---
+
+# Local Development Playbook
+
+Two situations bring a reader here: **"I am running something on this machine"** and **"I need to
+prove this works without a browser."** Runtime failures that survive a green build belong in
+`runtime-pitfalls.md`; per-layer authoring rules belong in `app-conventions.md`.
+
+Every entry below was paid for once. `CLAUDE.md` carries the one-line imperative; this file carries
+the evidence and the recipe.
+
+## Windows shell and file encoding
+
+- **Never rewrite a repo file through `Get-Content` / `Set-Content` on Windows PowerShell 5.1.**
+  `Get-Content -Raw` reads with the system ANSI codepage unless `-Encoding utf8` is passed, so every
+  non-ASCII character in a UTF-8 file (this repo's docs are full of em-dashes and arrows) is decoded
+  as mojibake and then written back **double-encoded** — `—` becomes `â€”` throughout. It also
+  rewrites line endings, so a two-line version bump lands as a 147-line diff. Hit in P6b2 bumping
+  front-matter on `architecture.md`, `tech-stack.md` and ADR-003; caught only because the diff
+  size was implausible, and fixed by `git checkout --` on all three and redoing the edits with the
+  Edit tool. **Use the Edit/Write tools for file content; keep PowerShell for git, npm and gh.**
+- **Check `git diff --numstat` after any scripted file rewrite.** A line count far larger than the
+  edit is the cheapest possible signal that an encoding or line-ending rewrite happened.
+- **A `curl` read of a deployed `/api/health` intermittently fails on this machine, and the failure
+  impersonates an outage.** Windows `curl` uses schannel, which sometimes aborts a TLS
+  renegotiation: the call exits **35** (`curl: (35)`) or returns an **empty body** with no error at
+  all. Measured 2026-10-05 against `srimart.nocaped.com/api/health` — the same request under `-v`
+  logged `schannel: renegotiating SSL/TLS connection` and then `HTTP/1.1 200 OK`, and a plain retry
+  returned the full healthy body (`commit 6dca917`, `db.ok: true`). **Never report a vendor or
+  environment down on a single empty body or exit 35.** Retry two or three times, or read the
+  verbose output, before concluding anything; prefer a short retry loop when a `/validate` or
+  `/ship` row depends on the answer. The trap is worst at Ship, where a post-deploy health read is
+  the evidence that a promotion worked, and a false negative invites a rollback nobody needs.
+- **`format:check` failing on dozens of untouched files was the `core.autocrlf` artifact — FIXED in
+  PR #328 (`.gitattributes`, #327), so it is no longer the expected explanation.** `eol=lf` now pins
+  the working tree, which is what makes local Prettier agree with CI; `git add --renormalize .`
+  produces zero changes and `prettier --check .` passes across the repo. **If `format:check` fails
+  on files you did not touch today, treat it as real drift and read the diff** rather than reaching
+  for the old ritual. Should a line-ending question genuinely resurface, the way to settle it is
+  still to write a file's committed blob (`git show HEAD:<file>`) out with LF endings and run
+  `prettier --config .prettierrc.json --check` on it — **in a directory prettier can resolve the
+  config from, or passing `--config` explicitly**, since checking a copy in a temp directory
+  silently falls back to prettier's *defaults* and reports failures that mean nothing. CI on Linux
+  remains the authority.
+- **Anchor patterns when grepping an env file.** `DATABASE_URL` ends in `BASE_URL`, so a filter for
+  `BASE_URL` prints the Neon connection string, password included (#175). Prefer `^SEED_` over
+  `SEED_`, and prefer printing keys over lines.
+- `gh` args containing double quotes break native argument parsing in PS 5.1 (`accepts 1 arg(s),
+  received 8`). Write the body to a file and use `--body-file`.
+- **In Git Bash specifically (not PowerShell), a `gh` string argument that starts with `/` gets
+  silently rewritten to a Windows path before `gh` ever sees it** — MSYS's automatic POSIX-path
+  conversion fires on any argument that merely looks path-shaped, with no way to tell from the
+  argument alone that it was meant as literal text. Hit live in P2.6 slice 6's `/document`
+  (2026-09-05): `gh issue create --title "/staff/search-synonyms is unlinked from the staff hub…"`
+  (filed as `#602`) shipped with a title of `C:/Program Files/Git/staff/search-synonyms is
+  unlinked…` — silently wrong, no error, and easy to miss since only the leading segment changes.
+  Prefix the command with `MSYS_NO_PATHCONV=1` (as already used elsewhere in this repo's own
+  scripts) to suppress the conversion, and always read back a filed issue/PR's title after creating
+  it from Git Bash if it starts with `/`. Fixed after the fact via `gh issue edit`, same env-var
+  prefix.
+- **`gh issue create --body-file <path>` can mojibake-corrupt non-ASCII characters even from a
+  verified-UTF-8 source file, while `gh pr create --body-file` with the identical sourcing method
+  (a Bash heredoc) does not.** Confirmed in `#981`/`#982`'s `/document` (2026-10-07): a file with
+  `file`-confirmed UTF-8 bytes (em-dashes correctly `E2 80 94`) read back from the created issue
+  with every em-dash double-encoded (`â€”`), the same byte-swap pattern as the PowerShell
+  `Get-Content`/`Set-Content` trap above — but the PR opened moments earlier from the same shell,
+  same env, same heredoc pattern, read back clean. `gh issue edit --body-file` with the identical
+  content fixed it on retry (so it is not fully deterministic — don't assume one clean run proves
+  the next is safe). **Read back a filed issue's body (`gh issue view <N> --json body`) whenever it
+  contains non-ASCII punctuation, and prefer plain ASCII (`-`, `x`) over em-dashes/multiplication
+  signs in issue bodies created this way** until the cause is understood.
+- **`npx tsx -e "<multi-line script>"` fails silently on this Windows setup the moment the script
+  imports an installed package (e.g. `@prisma/client`) — no stdout, no stderr, exit 0, even with an
+  explicit `.catch()`/`.finally()` around every promise.** It isn't a working-directory problem
+  (the shell's cwd is already the repo, so `node_modules` resolves fine) — a script that does
+  nothing but `console.log('hello')` via `-e` works, but the same process with a real `import`
+  produces no output at all, indistinguishable from success without independently confirming the
+  side effect happened. Hit in the dev-environment slice's `/validate` (R10's live isolation
+  check, inserting a marker `HealthCheck` row into a Neon branch) — three silent `-e` attempts
+  before switching to a real `.ts` file. **Write the script to a file inside the repo (so module
+  resolution and `tsx`'s own error reporting both work) and run `npx tsx path/to/script.ts`
+  instead of `-e`** for anything beyond a trivial one-liner; delete the scratch file afterward.
+- **Stopping `npm run preview` does not stop `npm run preview`.** The task-runner kill only ends the
+  top-level `npm` process; `opennextjs-cloudflare preview` chains into `wrangler dev`, which spawns
+  its own `wrangler.js` and `workerd.exe` children that survive the parent's termination on Windows.
+  The next `npm run preview` then fails the build with `EBUSY: resource busy or locked, rmdir
+  '.open-next\assets'` — the orphaned `workerd.exe` still has the directory open. Killing just
+  `workerd.exe` is not enough either; the whole chain (`npm run-cli.js run preview` →
+  `opennextjs-cloudflare … preview` → `npm … exec wrangler dev` → `wrangler.js dev` →
+  `wrangler-dist\cli.js dev` → `workerd.exe` ×2) must go. Find it with
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='workerd.exe'" | Select
+  ProcessId,CommandLine` (match on the repo path and `wrangler dev` in the command line, not just
+  the image name — other unrelated `node.exe`/`workerd.exe` processes are common) and
+  `taskkill /F /PID <every id>` before retrying the build.
+- **Never pipe a live-writing script's output through `head` (or anything else that closes the pipe
+  early).** The reader closing the pipe sends the writer SIGPIPE, which can kill the process **before
+  its own cleanup section runs** — indistinguishable from the command completing normally except for
+  a shorter-than-expected output. Hit at `/validate` for #411/#412 (2026-08-27):
+  `npx tsx scripts/verify-repository-injection.ts | head -30` — a script that creates real rows and
+  deletes them itself at the end — got cut off mid-run and left one `__verify-`-prefixed product, two
+  images and one category behind in the dev database, found only by a follow-up query and cleaned up
+  by hand before the real (untruncated) run could be trusted. **Redirect to a file and `Read` it, or
+  let it print in full** — never truncate a script's stdout with a command that can close the pipe
+  before the writer's own exit path runs.
+- **Never run `npx vitest run` concurrently with another heavy build on this machine — vitest
+  reports `exit 0` while whole test files silently never execute.** Under load its forks pool fails
+  to start workers (`Error: [vitest-pool]: Failed to start forks worker for test files ...` /
+  `[vitest-pool-runner]: Timeout waiting for worker to respond`), and those files are counted as
+  **unhandled errors, not failures** — so the process still exits 0 and a casual reading of the
+  summary looks like a pass. Hit 2026-09-02 during `#539`'s Build: the suite was launched alongside
+  `next build --webpack` for `kms/site-internal` and reported every file it ran as passing, with a
+  non-zero `Errors` line, exit 0. Run alone seconds later, the same tree ran **ten more files and
+  ninety more tests** that had never executed at all.
+  **How to detect it without a recorded baseline.** This file used to carry the suite's expected
+  file and test totals so a reader could spot a shortfall. That number went stale roughly twenty
+  times, and each time the staleness silently disabled the very detection it existed to provide —
+  a validator trusting a stale total reads a genuine ten-file shortfall as roughly right. It was
+  removed deliberately (`#584`); **do not reintroduce a hardcoded total here or anywhere else.**
+  The trap is detectable without one, because it is a property of a *pair* of runs rather than of
+  an absolute number:
+  1. **Compare two runs of the same tree.** Run the suite, note the `Test Files` and `Tests`
+     counts, then run it again with nothing else running. If the second run reports **more** files
+     or more tests than the first, the first run hit the trap. The tree did not change; only the
+     load did.
+  2. **Read the `Errors` line, not just the exit code.** Any non-zero `Errors` count accompanied by
+     `Failed to start forks worker` or `Timeout waiting for worker to respond` is this trap
+     regardless of what the pass counts say.
+  3. **Check for orphaned processes before re-running**
+     (`Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='workerd.exe'"`). An empty
+     result means simply re-running is the right move.
+  **Two refinements from hitting it again during `#491`'s Build:** it fired immediately after a
+  heavy `kms/site-internal` build even with the suite run **alone**, so "concurrently" understates
+  it — a build that has just *finished* is enough; and that run exited **1**, not the `exit 0`
+  described above, so a non-zero exit carrying `Failed to start forks worker` is this trap rather
+  than a real failure. This is distinct from **`#538`**, which is a genuine 5000ms timeout on
+  `tests/repository-transaction-safety.test.ts` under full-suite load (green in about 2s in
+  isolation) and reports as a real *failure*; that test parses every file in `lib/repositories/`,
+  so expect it to keep creeping as that directory grows. CI's Linux runners are the authority for
+  both.
+  **`#538` is one instance of a class (`#1037`).** At PR #1036's `/validate` (2026-10-10), four
+  default-worker full runs on one tree each timed out a *different* set of whole-tree scan tests
+  (`motion-reduce-coverage`, `product-grid-usage`, `repository-purity`, `token-alpha-purity`,
+  `products-service`), every one under a second alone; `npx vitest run --maxWorkers=6` passed every
+  file with no `Errors` line. A timeout that **moves between runs** is load. A timeout that hits
+  the **same test every run** is worth a look at its cost, but cutting the cost may not be enough:
+  that slice's new scan still timed out after a pre-filter left it parsing nothing, and it took the
+  `#938` test-local `30_000` to hold. Record a `--maxWorkers` run in validation as a caveat, never
+  as a plain pass.
+  **A full DATABASE is indistinguishable from broken code in a test summary.** Three live-DB test
+  files once failed for an afternoon with `could not extend file because project size limit
+  (512 MB) has been exceeded` — nothing to do with their own subject matter — because an oversized
+  reference-data import had filled the dev Neon project. If a live-DB test fails with a message
+  that has no relationship to what it tests, check `pg_database_size(current_database())` against
+  the project ceiling before debugging the test.
+  **Three test files are guarded with `it.skipIf(!process.env.DATABASE_URL)`** and report as
+  **skipped**, not run, in CI — so CI's own summary legitimately runs fewer tests than a local run
+  with a real `DATABASE_URL`. That is expected, not a shortfall.
+
+## jsdom does not implement `<dialog>.showModal()` (#1087)
+
+Rendering a component that calls `dialogRef.current?.showModal()` in a jsdom test throws
+`TypeError: dialogRef.current?.showModal is not a function`. Measured on **jsdom 29.1.1**
+(2026-10-14, `#1087`'s `LocationControl` test) — this is not a regression to wait out, and an
+earlier guess that jsdom 29 supported it was wrong and had to be corrected in that slice's
+`validation.md`.
+
+Stub both methods on the prototype in a `beforeAll`, tracking the `open` attribute, which is what
+the `.open` getter reads:
+
+```ts
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute("open");
+  };
+});
+```
+
+A `<dialog>`'s children are in the DOM whether or not it is open, so a no-op stub is enough to
+assert anything rendered inside it. Do not reach for `fireEvent` workarounds or skip the test.
+
+## An invalid KMS `summary` is dropped from the index rather than failing the build (#1087)
+
+`npm run kms:build-index` **succeeds** when a document's front-matter is invalid. It simply omits
+that document, so the only visible symptom is the artifact count in its own output falling by one
+(observed 231 → 230). `ARTIFACT_INDEX.md` then silently lacks an entry, and CI fails later at a
+check that does not name the cause.
+
+`npm run kms:validate` is what names the file and the rule. Run it after **any** front-matter edit,
+not just after adding a document.
+
+The limit that actually bites is `summary`: **at most 300 characters**, and it is easy to exceed by
+appending one clause to an existing summary when adding a section. It bit twice in one slice
+(`#1087`): once on `docs/business-analysis/user-testing-feedback-2026-10-13.md` and once on
+`docs/developer-portal/app-conventions.md`.
+
+## `kms:coverage counts gitignored files`, so it can fail locally and pass in CI (#1045)
+
+`npm run kms:coverage` walks the **filesystem**, not git. A markdown file that is gitignored still
+counts against the ratchet, so the check can fail on a dev machine for a file CI will never see —
+`actions/checkout` does not materialise ignored files.
+
+Observed 2026-10-16 while specifying `#1045`: a local scratch note at `misc/issue-club-a.md`
+(`/misc/` is ignored at `.gitignore:62`) produced
+
+```
+kms:coverage — 16 uncovered file(s) across 9 director(ies)
+  ✘ misc: baseline 0, measured 1 (increased)
+```
+
+**Do not follow the failure's own advice here.** It suggests `npm run kms:coverage -- --update`,
+which would commit a baseline describing one machine's scratch directory; CI, which cannot see that
+file, would then report a *decrease* and fail the other way.
+
+Check whether the named path is tracked before acting:
+
+```bash
+git ls-files misc/issue-club-a.md   # prints nothing  -> ignored, not your problem
+git check-ignore -v <path>          # names the .gitignore rule
+```
+
+A complaint about a **tracked** file is real: add front-matter, or re-baseline deliberately.
+
+Related, and often confused with it: **`npm run kms:check-generated` compares against
+`git show HEAD:<path>`**, not the working tree — its own docstring explains why. So between
+`kms:build-index` and the commit it *always* reports the two generated artefacts as stale. That is
+the instruction to commit, not a drift to investigate; it goes green on the next commit.
+
+## A spec file quoting old copy with a literal `{word}` breaks the `kms/site-internal` MDX build
+
+Measured 2026-10-16 at `#1045`/`#1043`'s `/validate` pass, from a fresh context. KMS assembles
+`specs/**/plan.md` (and any other tracked markdown) into this site's MDX pages, and MDX compiles an
+unescaped `{...}` in prose as a JSX expression, not literal text — so quoting a sentence like
+`"Points expire {N} months after you earn them."` outside a backtick span throws
+`ReferenceError: N is not defined` at prerender, failing `next build` in `kms/site-internal`.
+**Neither `npm run kms:validate` nor `npm run kms:check-generated` catches this — neither renders
+MDX** — and `gates` never builds the docs site at all, so this reaches `main` silently unless
+someone runs the real build. **Wrap any quoted sentence containing `{...}` in a backtick code
+span** (`` `"...{N}..."` ``), matching how `requirements.md`'s own literal strings are already
+written. Run `npm run kms:assemble:internal && cd kms/site-internal && npx next build` after
+editing any `specs/*/plan.md` that quotes old or wrong copy verbatim — the failure only shows up at
+that build, not at `kms:validate`/`kms:check-generated`, and not in the normal app build either.
+
+## A `TZ` override is silently ignored on Windows when the value contains a slash
+
+Measured 2026-09-19 (`#363`/`#811`). **On this project's Windows dev machine, `TZ=Europe/Berlin cmd`
+does not set `process.env.TZ` at all** — the variable arrives `undefined` and the process runs in
+the system zone, so a command written to prove timezone-independence proves nothing and reports a
+confident pass.
+
+```
+TZ=UTC              node -e "..."   ->  env=UTC          resolved=UTC                  # works
+TZ=Pacific/Auckland node -e "..."   ->  env=undefined    resolved=Europe/London        # IGNORED
+TZ=PST8PDT          node -e "..."   ->  env=PST8PDT      resolved=America/Los_Angeles  # works
+TZ=EST5EDT          node -e "..."   ->  env=EST5EDT      resolved=America/New_York     # works
+```
+
+`env TZ=… cmd` and a preceding `export TZ=…` behave the same way — it is the slash, not the syntax.
+
+- **Use slash-free values locally**: `UTC`, `PST8PDT`, `EST5EDT`. They propagate and do change the
+  zone, including what `Intl` resolves.
+- **Any IANA name works on the Linux CI runner**, so a CI-only two-zone run is sound. The trap is
+  local only.
+- **Assert the override took effect rather than trusting it.** Compare the UTC **offset**
+  (`-new Date().getTimezoneOffset()`), not the zone name: `TZ=PST8PDT` legitimately resolves as
+  `America/Los_Angeles`, so a name comparison reports a change that did happen as if it had not.
+  `specs/2026-09-19-p363-vendor-timezone/verify-vendor-timezone.ts` prints an `AMBIENT ZONE` line
+  doing exactly this.
+
+This matters beyond time zones: it is the same class as the vitest forks-pool trap above — a
+command that cannot fail is worse than no command, because it is recorded as evidence.
+
+## A browser-side timezone bug needs no DevTools override on a UK dev machine, March–October
+
+Used at `#363`/`#811`'s `/ship` (2026-09-19) to reproduce and disprove the live BST slot-picker
+defect in a real Chrome tab, no CDP `Emulation.setTimezoneOverride`/Sensors panel required.
+
+`Intl.DateTimeFormat().resolvedOptions().timeZone` and `-new Date().getTimezoneOffset()` reflect the
+**OS's** timezone, and this repo's Windows dev machine's OS zone is `Europe/London`. From late March
+to late October that is **British Summer Time, UTC+1** — the exact non-UTC offset a client-side
+timezone defect needs to reproduce against a UTC Worker. No override, no `TZ` env var (that only
+reaches Node's own process, not Chrome), no DevTools Sensors panel: just open the page in the normal
+browser and read a submitted value.
+
+Confirmed the discriminator directly rather than by eyeballing a slot list: against **currently-
+deployed (pre-fix) staging**, selecting today's date and reading
+`document.querySelector('input[name="fulfilmentDate"]').value` returned
+`"2026-09-18T23:00:00.000Z"` — the browser's local midnight serialised as an instant, one day behind
+what was clicked. The identical action against the fixed branch (`npm run preview`, then staging
+again post-merge) returned the bare day `"2026-09-19"`. A `javascript_tool`/console read of the
+hidden field's `value` is enough; no network capture needed, since (as built) date selection here is
+client state, not a per-date server round trip.
+
+**This stops working outside BST** (late October–late March, when the dev machine's own zone is
+GMT/UTC+0 and no longer discriminates) — fall back to a real DevTools Sensors timezone override, or
+to the server-side two-`TZ`-run technique above, at that time of year.
+
+## Live-testing staff panel server actions without a browser
+
+- **A plain progressive-enhancement server-action form (`<form action={someServerAction}>`, no
+  client component) can be submitted with `curl`, with no browser and no JS runtime at all** —
+  that is the entire point of building it that way. The rendered HTML carries the target as a
+  hidden field named `$ACTION_ID_<hash>` (empty value) inside a `multipart/form-data` form whose
+  own `action` attribute is empty (posts to the current page URL). Fetch the page once, grep for
+  `\$ACTION_ID_[a-f0-9]*` paired with the row's other hidden fields (e.g. `refusalId`), then
+  `curl -X POST <page-url> -H "Cookie: <session>" -H "Origin: <same-origin>" -F '$ACTION_ID_<hash>=' -F 'refusalId=<id>'`
+  reproduces exactly what a no-JS browser submit would send. Used this way to drive
+  `/staff/payments`'s reconcile/recover actions end-to-end against a real dev database and a real
+  Stripe test-mode session for `#454`'s `/validate` and `/ship`, with no Chrome extension
+  available for part of that session.
+- **A `useActionState`-bound form (still a real `<form action={...}>`, but wrapped in a client
+  component so a field error can render from the action's return value) is ALSO curl-drivable, but
+  carries a different hidden-field shape than the plain progressive-enhancement pattern above —
+  grepping for `\$ACTION_ID_` on one finds nothing.** Instead of a single `$ACTION_ID_<hash>` field,
+  React renders `$ACTION_REF_<N>` (empty value), `$ACTION_<N>:0` (JSON `{"id":"<action-hash>",
+  "bound":"$@1"}`), `$ACTION_<N>:1` (JSON-encoded previous state, e.g.
+  `[{"error":null,"field":null,"notice":null}]`), and `$ACTION_KEY` (a per-row nonce that changes
+  every render, so it must be re-read from a fresh page fetch before each submission, not reused
+  across requests). Confirmed live in P2.6 slice 3 (#566) driving `/staff/search-synonyms`'s
+  add/edit/remove/approve/reject forms end-to-end with no Chrome extension available — same
+  `curl -F` approach as the plain-form case, just with these four fields instead of one, plus the
+  named fields the action actually reads (e.g. `alias`, `canonical`, `intent`).
+- **A `useActionState`-bound action's curl fields can be reused against a page that never renders
+  that form, to prove the guard refuses a caller the UI never shows the control to.** Next dispatches
+  by the action's build-time id hash (the same `{"id":"<hash>",...}` value in every render of that
+  action, regardless of which page renders it), not by whether the current page's HTML happens to
+  contain a matching `$ACTION_REF_<N>` field — so the four fields captured from one signed-in
+  session's render of a form can be POSTed as-is against a *different* signed-in session where that
+  component never appears at all. Confirmed live at `#927`'s `/validate` (2026-09-28): `/staff/net-
+  content`'s `suggestNetContent` action (ADMIN-only) is bound to a form the page conditionally omits
+  for a STAFF viewer, so a STAFF session's fetch of that page carries no `$ACTION_REF_*`/`$ACTION_KEY`
+  fields for it at all — captured the four fields from an earlier ADMIN-signed-in render instead
+  (same action id, same static `$ACTION_KEY`, since neither is session-scoped) and POSTed them
+  against the STAFF-signed-in cookie jar; the server-side `requireVendorRole("ADMIN")` guard still
+  fired correctly (403 refusal text, zero rows written), proving the guard rather than assuming it
+  from the missing button alone. Useful specifically for proving a role guard on an action whose own
+  form the UI hides from the very role being tested — the alternative (a browser, manually editing
+  the DOM to inject the form) is strictly more work for the same proof.
+- **A `useActionState` result can come back correctly WITHOUT ever appearing as literal text in the
+  curl response — check the flight payload, not just the rendered HTML, before calling a row
+  failed.** Confirmed at `#116`'s `/validate` (2026-09-19) on `/shop-your-list`'s two stacked
+  `useActionState` forms (match, then save): the **match** action's new state (`lines`) fed a large
+  subtree (the whole review list) and rendered as literal `<li>`/`<select>` HTML in the same
+  response — a plain `grep` against it worked exactly like the plain-form case above. The **save**
+  action's new state (`{"outcome":"capped"}`) fed one small conditional `<p>` in the same client
+  component, and did NOT appear anywhere in the rendered HTML — only inside a
+  `self.__next_f.push([2,[{"outcome":"capped"}, ...]])` script tag, React's client-side "form
+  replay" payload for a no-JS submission, which a curl-only client never executes. The action DID
+  run correctly (confirmed independently: no 21st row written, `outcome` correctly `"capped"` in
+  that payload) — the visible sentence just needs a JS-executing client to materialise. **Parse the
+  `self.__next_f.push(...)` JSON for the action's own state field when a `useActionState` result's
+  visible text comes up empty**, rather than concluding the UI failed to render it.
+- **A plain-quote regex against a fetched RSC page (`grep -oE '"name":"([^"]+)"'` or the JS
+  equivalent) silently matches nothing, even when the data is right there** — the page's flight
+  payload is JSON serialised *inside* a JS string literal, so every quote is backslash-escaped
+  (`\"name\":\"...\"`, two characters, not one) in the raw response body. Hit at `#877`'s `/validate`
+  (2026-09-24), narrowing a category page to `?packSize=1-KILOGRAM` with no Chrome extension
+  available: a `/"name":"([^"]+)"/g` regex against the saved HTML returned zero matches on a page
+  that visibly (per a plain `curl | grep` text search moments earlier) held real product names,
+  reading as "the filter returned nothing" rather than "the regex is checking for the wrong bytes."
+  Confirmed by locating the same product by a plain substring search first (which matches, because
+  it looks for exact bytes) and only then reading the surrounding backslash-escaped context.
+  **Match the literal escaped marker (`\\"name\\":\\"` in a JS string, i.e. `\"name\":\"` as actual
+  file bytes) instead of a bare-quote regex** when parsing a saved RSC response for structured
+  field values.
+- **A server action a client component calls directly (`await someAction(arg1, arg2)`, e.g.
+  `addToCart`) rather than binding to a `<form action={...}>` is ALSO curl-drivable, but as a
+  wholly different wire protocol — neither `$ACTION_ID_<hash>` nor the `useActionState` four-field
+  shape appears anywhere in the HTML, because there is no form for React to render one into.** Next
+  ships these as a POST to the current page URL carrying a `Next-Action: <action-id>` header (the
+  action's id — the same stable build-time hash `.next/server/server-reference-manifest.json` maps
+  to a `filename`/`exportedName`, per the existing entry below) with a plain-text body that is a
+  JSON **array** of the call's positional arguments, in order — `["<productId>", 1]` for
+  `addToCart(productId, delta)`. No cookie-derived nonce, no per-render key: `curl -b <cookies>
+  -X POST <page-url> -H "Next-Action: <id>" -H "Content-Type: text/plain;charset=UTF-8" --data-raw
+  '["<arg1>", <arg2>]'` reproduces the call exactly, and the response is the page's normal RSC
+  payload (parse it for the effect, e.g. re-fetch the affected page rather than trying to read a
+  return value out of the stream). Used this way in `#612`'s `/validate` to add a real product to a
+  guest cart (`features/cart/add-to-cart.ts`'s `addToCart`) with no browser and no client JS, so
+  `features/checkout/place-order.ts`'s delivery-postcode refusal (R24) could be driven end-to-end
+  against a real cart rather than stopping at the cheaper storefront-header signal (R23).
+- **A direct server-action call whose sole argument is a `FormData` object — as opposed to
+  primitive args (the `addToCart` case above) or a plain `<form action={fn}>` — is NOT
+  reproducible with either curl technique above, at least not without reverse-engineering React's
+  FormData-specific flight encoding.** Hit at `#613`'s `/validate` (2026-09-24) trying to drive the
+  header's postcode control: `components/layout/LocationControl.tsx` and
+  `components/checkout/CheckoutForm.tsx`'s "forget postcode" button both call
+  `setDeliveryPostcode(formData)` from inside a client `action={(formData) => { startTransition(...)
+  }}` closure — not a server-reference `<form action={setDeliveryPostcode}>`, so it never renders
+  the `$ACTION_REF_<hash>` progressive-enhancement fields, and not a call with primitive
+  arguments, so the plain `Next-Action` + JSON-array body used for `addToCart` doesn't apply
+  either. Sending the action id via `Next-Action` with a `multipart/form-data` body containing the
+  raw field(s) (`-F 'postcode=MK17 8NL'`, no wrapping) returns an opaque `500` with only a
+  numeric `digest`, no message. **Use a connected browser extension for this class of control** —
+  a plain `useActionState`-bound `<form>` elsewhere on the same page (e.g. the checkout form
+  itself) stays fully curl-drivable and was used instead to prove the CHECKOUT-source half of the
+  same feature; only the HEADER-source half needed a browser and fell back to unit-test-only proof
+  that session.
+- **A presigned-URL `PUT` with a binary body fails silently on this Windows curl build — no
+  server response at all, just `exit 43` ("A libcurl function was given a bad argument") and
+  `%{http_code}` printing `000`.** Hit at `#900`'s `/validate` (2026-09-26) uploading a real photo
+  through `requestImageUpload`'s presigned R2 URL: `curl -X PUT -H "Content-Type: image/webp"
+  --data-binary @photo.webp "<presigned-url>"` connects (TLS handshake succeeds, visible with
+  `-v`), then fails with no server response. **Not a signature or app-side problem** — a small Node
+  script
+  (`fetch(url, { method: "PUT", headers: {...}, body: readFileSync(path) })`) against the exact
+  same URL and bytes succeeded immediately (`200`). Prefer a Node `fetch()` one-liner over `curl
+  -T`/`--data-binary` for any presigned-upload proof on this platform; curl's `-F` multipart
+  technique used elsewhere in this section (server actions, not raw storage PUTs) is unaffected.
+- **The same silent failure (`exit 43`/`000`, TLS handshake completes then the connection closes
+  with no request sent) also hits plain `curl` `GET`/`POST` against a real HTTPS host** — not just
+  presigned `PUT`s, and not just `npm run preview`'s local `:8787`. Hit at `#905`'s `/document`
+  (2026-09-26) against `srimart-staging.nocaped.com` (Cloudflare-fronted): both a JSON `POST` to
+  `/api/auth/sign-in/email` and a plain `GET` of a signed-in page failed this way, while an
+  identical Node `fetch()` (with the session cookie in a `Cookie` header for the `GET`) succeeded
+  every time. `curl`'s own `-v` output shows a normal-looking handshake — this is not a proxy,
+  DNS or credential problem, and adding `-v` before assuming one is diagnostic time wasted.
+  **Default to a Node `fetch()` script for any request against a real (non-`:8787`) host on this
+  platform**, not just uploads; fall back to curl only for the local preview server, where it
+  still works.
+- **The reverse holds against `npm run preview`: Node's `fetch()` cannot target a vendor there.**
+  Every local vendor shares `127.0.0.1:8787` and is told apart only by the `Host` header, and
+  Node's `fetch` (undici) does not send a caller-supplied `Host` — it is dropped without an error. So
+  `fetch("http://127.0.0.1:8787/api/auth/sign-in/email", { headers: { host: "localhost:8787" } })`
+  never reaches the intended vendor, and a sign-in that works in the browser fails with no useful
+  message. Hit at `#1015`'s Build (2026-10-11): every Node sign-in failed while
+  `curl -H "Host: localhost:8787" … http://127.0.0.1:8787/api/auth/sign-in/email` returned 200 for
+  the same account. **Locally, use `curl -H "Host: <vendor-host>"` with a cookie jar** (the
+  pattern in the section above); keep Node `fetch` for real hosts.
+- **A `tsx` script placed outside the repo (e.g. this session's scratchpad directory on a
+  different drive) cannot resolve `node_modules` — `Cannot find module '@prisma/client'` even
+  though it's installed.** Node's `require`/import resolution walks up from the *script's own*
+  directory, not the current working directory, so a script that never lives under
+  `E:\GitRepositories\aheed-online-store` never reaches its `node_modules`. Copy the script into a
+  throwaway directory inside the repo first (e.g. `.scratch/`, not committed — `git status`
+  after, and `rm -rf` it when done) before running `npx tsx` on it; the scratchpad is fine for
+  everything that isn't itself a Node module resolution root.
+- **`npm run preview`'s `next build` step type-checks every `.ts` file its tsconfig includes —
+  which, by default, means the repo root — so a type error in a scratch validation script placed
+  at the repo root (rather than under `lib/`, `app/`, etc.) fails the WHOLE build**, not just that
+  script. `npx tsx path/to/scratch.ts` alone won't catch this, because `tsx` only type-checks (or
+  rather doesn't type-check at all, by default) the file it runs — the failure only surfaces on
+  the next `next build`/`npm run preview`, wasting a full OpenNext build cycle. Run `npx tsc
+  --noEmit` once after writing a repo-root scratch script and before relying on it inside a
+  preview cycle.
+- **Better Auth's session validation is bound to the Host/Origin a request declares, not just to
+  a valid session cookie** — replaying a genuine session cookie (captured signing in at
+  `127.0.0.1:8787`) against the same server with a spoofed `Host: srimart.localhost:8787` header
+  (to simulate reaching a second local vendor domain without a second real hostname) is correctly
+  rejected with `401`/`Invalid origin`, not silently accepted. This is Better Auth's own
+  cross-origin protection firing, not a bug in this app's vendor-scoping. **Signing in fresh under
+  the spoofed host doesn't work either** — Better Auth's `trustedOrigins` only lists this
+  project's real dev/staging/production hosts, so a made-up local alias is rejected outright with
+  `Invalid origin` at sign-in. Cross-tenant **write** scoping can still be proven without ever
+  switching hosts: submit the action against a row belonging to a *different* vendor while signed
+  in and already on your own vendor's host — the scoping lives in the query's `where` clause, not
+  in which host served the page, so this exercises the exact same guard a real cross-tenant attack
+  would hit. Cross-tenant **read/list** scoping (a page never showing another vendor's rows) is
+  provable the same way, from one side only: confirm your own vendor's list excludes a row you
+  know belongs to someone else, rather than trying to view the other vendor's own list.
+  **The same limit stops a `validation.md` row from signing in as a second vendor's admin
+  locally** (`#960`–`#962` assumed it and had to substitute). Prove the render side by setting that
+  vendor's row in the dev database, and the write side by submitting the same action as the vendor
+  you *can* sign in as. Report the second vendor's own-UI save as unverified rather than counting
+  it. Reset the dev row to its default first: the previous run's value is still there.
+- **Signing in locally on `srimart.localhost:8787` does work, but only with the right protocol
+  header — the bullet above is about a made-up alias, not this seeded host.** Hit at `#1101`'s
+  `/validate` (2026-10-15): `curl -H "Host: srimart.localhost:8787" -H "Origin: http://srimart.localhost:8787"`
+  against `127.0.0.1:8787/api/auth/sign-in/email` returned `403 INVALID_ORIGIN` until the request
+  also carried `-H "x-forwarded-proto: http"`. `resolveAuthOrigin` infers `https` for any
+  non-loopback host without it, so the trusted origin never matched the `http` one sent. With the
+  header the sign-in returns 200 and a `better-auth.session_token` in `Set-Cookie`; send that value
+  back as `-H "Cookie: ..."` plus the same `x-forwarded-proto: http` on every page request. Two
+  more traps in the same drive: the Better Auth rate limiter answers `429` after a few attempts
+  (about 30 seconds clears it, so a retry loop with a `sleep 30` beats trying origin variants), and
+  Git Bash rewrites a bare `"/"` argument into `C:/Program Files/Git/` unless
+  `MSYS_NO_PATHCONV=1` is set (`MSYS_NO_POSIX_PATHCONV=1`, written here until `#1135`, did not stop
+  the rewrite of a `/staff/...` argument passed to `python`; `MSYS_NO_PATHCONV=1` did).
+  This relaxes the "cannot sign in as a second vendor locally" limit in the bullet above for the
+  seeded SriMart host; it was measured here for a customer account only. At `#1135`'s Validate
+  (2026-10-19) `demo-admin` (then a platform admin; since `#1319` use `demo-platform-admin`) signed in the same way and read SriMart's
+  `/staff/ai-usage`. `demo-srimart-admin` answered 401: its dev password is not
+  `DEMO_ACCOUNT_PASSWORD`, so a SriMart **store-admin** sign-in is still unproven on dev.
+- **A server action that a client component calls from JavaScript (no `<form>`) is still drivable
+  with curl. Take its id from the build, not from the page.** After `npm run preview`'s build,
+  `.next/server/server-reference-manifest.json` maps every action id to its `exportedName` and
+  `filename`. POST to any page with `-H "Next-Action: <id>"`,
+  `-H "Content-Type: text/plain;charset=UTF-8"`, the vendor's `Host`, a matching `Origin` and the
+  session cookie. The body is the JSON array of arguments, for example
+  `["<productId>",1,"note text"]`. The `1:` line of the `text/x-component` response is the
+  action's return value. Measured at `#1135`'s Validate (2026-10-19) for `addToCart` and
+  `setCartItemNote`. The id changes on every build, so re-read the manifest after each one.
+- **Replaying a staff form by scraping its fields must carry `<textarea>` contents and every
+  `<select>`'s selected option, or the save silently blanks them.** The edit actions persist every
+  submitted field, so an omitted `description` is written as empty. Hit at `#1135`'s Validate
+  (2026-10-19): a helper that read only `<input>` tags blanked a dev product's description on a
+  one-checkbox change. It was restored through the same form. Diff the form's fields before and
+  after any scripted save. To untick a checkbox, omit its field; that is what a browser does.
+  A button with its own `formAction` (a second submit, such as Clear) submits that button's
+  `$ACTION_REF_<n>` and `$ACTION_<n>:*` fields **instead of** the form's own action fields.
+- **`/staff/orders` hides `PENDING_PAYMENT` orders by default**, because it is an action queue. An
+  order placed locally with Stripe test mode stops at that status unless the hosted page is paid,
+  so add `?status=PENDING_PAYMENT&q=<order number>` to see its row. Cancel it afterwards at
+  `/checkout/<orderNumber>/cancel`, which also restores its lines to the basket.
+- **A one-flag dev data change for a live check is safer as a throwaway Prisma script than as a
+  staff-form replay** (the replay trap above). Hit at `#1161`/`#1162`/`#1119`'s Validate
+  (2026-10-19), ticking `Category.allowsCustomNote` for one check. Four things the script needed:
+  - an `.mts` extension, because `tsx` compiles a `.ts` file under `scripts/` as CommonJS, which
+    rejects top-level `await`;
+  - `new PrismaClient({ adapter: new PrismaNeon({ connectionString }) })`, because
+    `engineType = "client"` refuses to start without a driver adapter (P2038);
+  - a guard that prints the host and exits unless it is dev (`ep-dry-morning-zab7dx08`), with the
+    command run as `env -u DIRECT_URL -u DATABASE_URL npx tsx ...` (CLAUDE.md, Config);
+  - a `restore` mode that writes the recorded original value back. Delete the script afterwards.
+
+  Pick the category from the storefront's own `/categories` links, not from the database. A
+  category can exist with active products and still 404 at `/categories/<slug>`, so the first
+  database pick (`african-caribbean`) was unusable.
+- **`scripts/verify-mobile-layout.ts` proves duplicate-id defects with no extra code.** Each printed
+  object's `formInputs` lists every non-hidden form input's `id` and `name`, so
+  `--add-first --then /cart --open-cart` shows `/cart` and the opened basket drawer together. The
+  `--path` page's first card must have an Add button, and the floating cart button is clicked at
+  phone width, so use `--widths 390`. React 19.2's `useId()` renders as `_S_<n>_` in these ids.
+- **Stopping preview with `Get-Process node | Stop-Process` also kills every other Node process**,
+  including MCP servers such as graft. Their tools then disconnect for the rest of the session.
+  Narrow the stop to the preview's process tree if other Node tools are in use. This PowerShell
+  stops only preview and leaves MCP servers running (used at `#1169`'s Validate):
+  `Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'workerd.exe' -or ($_.Name -eq 'node.exe' -and $_.CommandLine -match 'wrangler|opennext') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`.
+- **A control that reads the URL on the client cannot be checked from server HTML.** The header's
+  department select reads `useSearchParams` under `Suspense`, so preview's HTML always shows the
+  fallback ("All") and carries a second, streamed copy of the select (four `Search department`
+  selects per `/search` page). Read the live value after hydration instead. At `#1169`'s Validate
+  this was a short Node script: start headless Chrome with `--remote-debugging-port`, open the URL
+  through `/json/new`, and `Runtime.evaluate` `select.value` after `readyState` is `complete` plus
+  a pause. It uses Node 22's built-in `WebSocket` and no dependency, like
+  `scripts/verify-mobile-layout.ts`.
+- **A `grep` pattern written against a literal string (e.g. a doc title containing `&`) can silently
+  false-negative against a page's real, rendered HTML, because HTML-escapes it as `&amp;` — and a
+  `validation.md` row's own example command is not exempt from this.** Hit at `#633`'s `/validate`
+  (2026-09-06): the spec's own suggested check, `grep -c 'Platform & Technical Admin Guide'
+  runbook-admin.html` / `runbook-platform.html`, was meant to print `0` then a non-zero count,
+  proving the platform-admin guide is withheld from a vendor admin and shown to a platform admin.
+  Run literally, it printed `0` for **both** files — not because the feature was broken, but because
+  Next's rendered output always carries `Platform &amp; Technical Admin Guide`, so the unescaped
+  pattern never matches the positive case either. Confirmed the feature actually worked by re-running
+  with the escaped string; the code was correct, the validation doc's example command was not.
+  **Before treating a grep-against-live-HTML row as failed (or as passed) on the strength of a
+  zero/non-zero count, check whether the literal string being matched contains `&`, `<`, `>`, `"`, or
+  `'`** — any of which a browser or React's server renderer will escape — and grep for the escaped
+  form instead of assuming the spec's literal example command is already correct.
+- **The same failure shape recurs without any HTML escaping involved — a `grep` command in
+  `validation.md` can false-positive on its own explanatory prose or its own file-inclusion flags,
+  not just on rendered output.** Hit twice in the same slice's `/validate` (accessibility
+  remediation, 2026-09-07, `#649`/`#650`). First: a row asserting `lib/form-classes.ts` carries no
+  `"use server"` **directive** used `grep -c "use server" lib/form-classes.ts`, expecting `0` — it
+  returned `1`, because the file's own doc comment *explains* it is not a `"use server"` file, and
+  that sentence contains the phrase being searched for. Second: a row asserting zero
+  `focus:outline-none` occurrences added `--include=*.ts` (needed to reach `lib/form-classes.ts`,
+  which isn't `.tsx`) and collaterally re-included `app/(admin)/staff/runbook/docs.ts` — the
+  generated KMS bundle the same file's own "Before you start" section had already said to exclude,
+  which legitimately quotes this very spec's prose discussing the phrase. Neither was a real
+  violation; both were confirmed by hand (`grep -n '^"use server"'` for the first; adding
+  `| grep -v "runbook/docs.ts"` for the second) and the `validation.md` rows corrected at
+  `/document` rather than left to mislead the next reader. **A grep-based validation row proves
+  what it claims only when the pattern can't also match a comment, docstring, or generated bundle
+  explaining or quoting the very thing being searched for** — anchor to a directive's actual
+  position (`^"use server"`, not a bare substring) or explicitly exclude the generated artefact,
+  the same way the `&`-escaping case above requires checking the pattern before trusting the count.
+- **A whole-page grep for an attribute that has a legitimate reason to appear MORE THAN ONCE on the
+  same page proves nothing about the one occurrence a requirement actually cares about.** Hit at
+  the storefront-browse-discovery-completion `/validate` (2026-09-09, `#694`): a requirement that
+  `CollectionNav` render with no `aria-current="page"` inside it specified its check as
+  `grep -c 'aria-current="page"' cat.html` printing `0` — but a real category page also renders
+  `DepartmentScroller` and `SubcategoryLinks`, both of which correctly carry `aria-current="page"`
+  on the active department/subcategory tab, for reasons that have nothing to do with
+  `CollectionNav`. The literal command would never print `0` on any category page, regardless of
+  whether `CollectionNav` itself was built correctly. The underlying requirement was genuinely met
+  — confirmed by narrowing the check to the specific element (`grep -oE '<nav aria-label="Collections".{0,1500}'`
+  and inspecting that no `aria-current` appears inside it) — so this was a spec-wording defect, not
+  a code defect: the check counted the whole page when the requirement was about one landmark
+  inside it. **The same rule as the two entries above, one level up**: a grep-based validation row
+  proves what it claims only when the pattern (or, here, the *scope* being searched) can't also
+  match something unrelated that has its own legitimate reason to look identical — scope the search
+  to the specific element a requirement is actually about, not the whole rendered page, whenever
+  more than one thing on that page could plausibly carry the same attribute.
+- **`grep -o` against a raw HTML response silently skips a match whose attribute value contains a
+  literal embedded newline, with no error and no indication anything was skipped** — grep is
+  line-based, so a pattern that needs a closing `"` on the same line it started matching never
+  completes when that `"` is on the next line, and moves on rather than failing. Hit at `#729`'s
+  `/validate` (2026-09-26) reading `/shop-your-list`'s textarea `placeholder`, which is deliberately
+  multi-line (one example product per line, joined with `\n`): `curl ... \| grep -o
+  'placeholder="[^"]*"'` returned real matches — just the page's *other*, single-line placeholders
+  (the postcode field, the header search box) — with the multi-line one silently absent, reading as
+  "the feature renders the wrong placeholder" rather than "grep never saw this one." Confirmed by
+  saving the response to a file and reading the `id="list"` textarea's `placeholder` attribute
+  directly instead of piping through `grep -o`. **Before trusting a `grep -o` row's result count
+  against live HTML, check whether the attribute being matched can legitimately contain a newline**
+  (a multi-line placeholder, a textarea's rendered content, anything built by joining lines with
+  `\n`) — if so, save the response and read the attribute directly rather than grep it.
+- **A literal `grep` for a sentence built from static text plus an interpolated value finds nothing
+  on a correctly-rendered page, because React's server renderer inserts an `<!-- -->` comment
+  between adjacent text and expression children to keep them separate for hydration.** Hit at
+  `#928`'s `/validate` (2026-09-28): `/staff/net-content` renders `from the {row.evidenceSourceText}:`
+  in JSX, and a plain `grep -o "from the description"` against the live HTML returned zero matches
+  even though the row was correct — the actual bytes are `from the <!-- -->description<!-- -->: `.
+  Confirmed by grepping the wider context (`grep -o '.\{60\}from the.\{80\}'`) and seeing the comment
+  markers, then re-running with `from the <!-- -->description` instead. **Before treating a grep
+  match count of zero as a failure against a page whose text mixes static JSX strings with `{...}`
+  expressions, widen the grep to show 60–80 characters of context first** — a `<!-- -->` between two
+  words that read as one sentence in the browser is the tell, not a sign the feature is broken.
+- **`curl -b jar.txt -c jar.txt` combined with a custom `-H "Host: ..."` header can silently fail
+  to persist a `Secure`-flagged `Set-Cookie` for a multi-label local hostname, while the same
+  pattern works fine for a single-label one — with no error, just an empty jar file.** Hit at
+  `#748`'s `/validate` (2026-09-14), testing both seeded local vendor hosts under `npm run
+  preview`: `curl -c jar.txt -H "Host: localhost:8787" http://127.0.0.1:8787/...` correctly wrote
+  the returned `aheed_cart` cookie into the jar (domain `localhost`, `Secure` flag preserved), but
+  the identical pattern against `-H "Host: srimart.localhost:8787"` produced a jar containing only the
+  file header comments — no cookie line at all — even though the response's `Set-Cookie` header was
+  present and well-formed. Every subsequent request replaying that empty jar got a **fresh**
+  guest-cart id each time (the server correctly treats "no cookie" as "no identity" and mints a new
+  one), which reads as "the cart never persists" rather than "curl never saved the cookie." The
+  fix is to skip the jar entirely for a multi-label local host: extract the value straight out of
+  the `Set-Cookie` response header (`grep -i "^set-cookie: <name>" | sed -E 's/^[Ss]et-[Cc]ookie:
+  ([^;]+);.*/\1/'`) and pass it back explicitly on every later request as `-H "Cookie: <name>=<value>;
+  ..."`, rather than relying on `-b`/`-c` at all. This matters specifically for this repo's own
+  documented two-vendor testing pattern (`validation.md`'s "Two vendors matter here" rule) — Aheed's
+  local host is single-label (`localhost:8787`) and works fine with a jar; SriMart's
+  (`srimart.localhost:8787`) does not, so a validator who only smoke-tested the jar approach against
+  Aheed would trust it for both.
+- **A SriMart `Host:` header missing its `:8787` port resolves to no vendor at all under `npm run
+  preview`, and the request does NOT fail loudly — it silently falls through to Aheed's copy.**
+  Hit at `#729`'s `/validate` (2026-09-26): `curl -H "Host: srimart.localhost" ...` (no port)
+  rendered `<title>Sign in — Aheed Food Centre</title>` on every page, including pages this slice
+  never touched (`/search`), which first read as a real cross-tenant regression rather than a bad
+  header. `lib/tenant.ts`'s exact `VendorDomain` lookup strips the port from the raw `Host` header
+  before its first query — right for a real deployment, where `staging.aheedfoodcentre.nocaped.com`
+  never carries one — then, only if that port-stripped lookup misses, falls back to a **second**
+  query against the **raw, unstripped** header (`#514`, added because the local preview server sees
+  `srimart.localhost:8787` as its literal `Host`). The seeded local row is `srimart.localhost:8787`
+  (confirmed via a direct `VendorDomain` query against `.env`'s `DIRECT_URL`), so a bare
+  `srimart.localhost` header matches neither query, and `getCurrentVendorIdOrNull` falls through to
+  its last resort — "no host match, exactly one active vendor" — which finds **more** than one
+  active vendor (real ones plus leftover `concurrency-test-*`/`express-test-*` rows from other
+  suites) and returns `null`, at which point every `?? "Aheed Food Centre"` fallback fires. **Always
+  include the port for SriMart's local host** (`srimart.localhost:8787`), matching the seeded row —
+  Aheed's `localhost:8787` already does this for the unrelated reason above, so only SriMart's
+  header was ever missing it in this doc's own examples.
+- **Replaying an existing record's edit form by hand must name every checked box explicitly, not
+  just the field(s) the row under test cares about — an absent field is indistinguishable from an
+  unchecked one.** Hit at `#876`'s `/validate` (2026-09-23), driving `/staff/products/<id>`'s
+  `useActionState` update form for R16's live cycle: the hand-built submission set `quantity` and
+  `expectedRestockDay` (the two fields R16 was actually proving) but omitted `isActive`, which the
+  real form always sends as `"on"` when its checkbox is checked. `checkbox()` in
+  `lib/catalogue-form.ts` treats an absent field as unchecked by construction (the same rule R6/R8
+  document for the feature itself) — the product silently went inactive. Not a code defect; the fix
+  was re-submitting with every field the real form renders checked, not only the ones under test.
+  Confirm this by diffing the edit page's actual `defaultChecked`/`defaultValue` set against the
+  hand-built field list before trusting a live edit's result, the same discipline the `$ACTION_KEY`
+  four-field recipe above already requires for the action metadata.
+- **A department/category page's real product count can be far larger than what a validator expects
+  to page through by eye, entirely from prior scale-testing seed data — not a defect in whatever
+  slice is being validated.** Hit at `#876`'s `/validate` (2026-09-23): `/categories/snacks` legitimately
+  holds 224 active products, almost all `gen-*`-slugged rows from the catalogue-depth-and-scale seed
+  (`#489`), so a real seeded product (`date-bites`) never appeared on page 1 and a plain
+  `curl`/`grep` of the category page found nothing — reading as a broken facade rather than
+  ordinary pagination. Confirmed the true product count with a direct DB query before concluding
+  anything was wrong, then narrowed the live page itself with the product's own price
+  (`?minPrice=X&maxPrice=X`, a filter the category route already supports) to isolate it in one
+  request rather than paging through cursors by hand. Worth checking a department's real row count
+  before trusting a "product not found on this page" result as a code defect, on any dev checkout
+  that has run the scale-testing seed.
+- **Submitting a non-ASCII character (e.g. `£`) as a `curl -F` field value from this Windows Git Bash
+  session can silently corrupt it to the UTF-8 replacement character on write, even though the same
+  shell's `echo`/locale report correct UTF-8 handling.** Hit live at `#917`/`#918`'s `/validate`
+  (2026-09-27): a product's `unitLabel` (`£4.49 / 2L`) round-tripped through a `curl -F` product-save
+  submission came back as `efbfbd...` (U+FFFD) instead of `c2a3...` (£'s real UTF-8 bytes) — reading
+  correctly-typed £ signs on the way in and on the way out of `console.log`, because the replacement
+  character *displays* as something easy to misread as fine. Only caught by comparing
+  `Buffer.from(value, "utf8").toString("hex")` against the expected bytes. Root cause not isolated
+  (curl's own multipart encoding on this platform, or how the harness passes the command through, is
+  the suspect); the practical fix was restoring the value with a direct write rather than chasing the
+  cause. **Prefer a Node `fetch()`/`FormData` script over `curl -F` for any field that carries a
+  non-ASCII character** — it did not reproduce the corruption for the same field on the same host.
+  When `curl -F` must be used with such a field, verify the stored value's byte hex afterward rather
+  than trusting a rendered read-back.
+
+## Proving a payment path live: what an assistant session can and cannot drive
+
+Paid at `#945`'s `/validate` (2026-09-29/30), which ran the payment sweep's live rows against the
+dev Neon branch in Stripe test mode. Most of it is drivable; four things are not, or bite.
+
+- **Two Stripe surfaces are out of an assistant session's reach, so those steps are a human's.** The
+  Chrome extension has no permission on `checkout.stripe.com`, so paying a test session (card
+  `4242 4242 4242 4242`) cannot be done by it; and `curl` to `api.stripe.com` from the Bash sandbox
+  returns `http=000`, so expiring a session (`POST /v1/checkout/sessions/<id>/expire`) cannot either.
+  Hand the user a `! curl ... -u "$(grep -h '^STRIPE_SECRET_KEY' .dev.vars | ...):"` one-liner that
+  reads the key inside the shell, and **make them paste the output**: twice a "done" arrived with the
+  session still `open`, which the sweep's own `provider-state` log line (`status=open
+  paymentStatus=unpaid`) is what exposed. The Worker itself reaches Stripe fine, so the job route
+  works. Read the session's real state from that log line, never from the user's report.
+- **A full `npx vitest run` writes fixture orders into whatever database `.env` points at**
+  (`tests/express-sla.test.ts` and its siblings skip only when `DATABASE_URL` is unset; tracked as
+  `#797`). Each run leaves old `PENDING_PAYMENT` orders, so the **first job-route invocation after a
+  test run sweeps all of them** (50 per run) and any per-invocation count you expected ("`deferred`
+  is 1") is wrong. Invoke repeatedly until `scanned` is 0 **before** the targeted rows, and read
+  per-order rows rather than the summary. A slice's own orders become candidates 30 minutes after
+  creation, so to keep one from being swept early, move its `createdAt` forward and restore it after.
+- **Browser-driven checkout under `npm run preview` is fragile, in specific ways.** The category and
+  checkout pages hydrate for tens of seconds. A tab the extension opened does not paint, so **does
+  not hydrate, until a screenshot renders it**: a click before that silently does nothing (the cart
+  label stays "empty"), which reads as a selector problem and is not one. Two heavy tabs at once
+  freeze the renderer (`Page.captureScreenshot timed out`). Place-order takes about ten seconds, so
+  wait twenty before deciding it failed, and check the database for a new order rather than
+  clicking again. The checkout form remembers its last values, so typing **appends**; select the
+  field's text first. After paying, the redirect back to the local site can show
+  `ERR_CONNECTION_CLOSED` while the payment is recorded correctly at Stripe.
+- **The local log store keeps each message as a JSON array, and `console.log` is level `info`.** A
+  prefix-anchored `like 'payment-reconciliation%'` matches nothing; use `like '%payment-reconciliation
+  event=%'`. `console.error` lines are level `error`, which is what a "no error lines" row filters on.
+- **A replayed webhook does not need the `stripe` CLI.** `scripts/sign-stripe-event.ts` signs a chosen
+  `checkout.session.completed` with the local webhook secret and posts it to the real route, through
+  the real adapter and Postgres. It is not Stripe's own `events resend`, so record it as a deviation
+  when a validation row names the CLI.
+
+## Measuring the storefront at real phone widths (#960, #961, #962)
+
+Desktop Chrome, including a Claude in Chrome session, cannot be resized below 501px. A same-origin
+`<iframe>` of a set width does not work either, because `next.config.mjs` sends `X-Frame-Options`
+and `frame-ancestors 'none'`. Do not weaken those headers to measure.
+
+**What works:** `npx tsx scripts/verify-mobile-layout.ts --base <url> --path <path> --widths 360,390,768`.
+It drives the locally installed Chrome headless over the DevTools protocol, with
+`Emulation.setDeviceMetricsOverride` and `mobile: true`. It needs no dependency, because Node 22
+has a built-in `WebSocket`. It works against `npm run preview` (`http://localhost:8787` and
+`http://srimart.localhost:8787`) and against a deployed host.
+
+- It **prints measurements only**: header height after scrolling, the banner's position, grid
+  columns, and the first card's and the header's control sizes. The pass/fail thresholds live in
+  the slice's `requirements.md`.
+- `--add-first` adds the first card's product once, to measure the in-cart stepper. Each run uses
+  a fresh browser profile, so the cart starts empty.
+
+Traps found while building it (2026-10-02):
+
+- **In Git Bash, write `--path` without the leading slash** (`categories/fruit-veg`). MSYS
+  rewrites a bare `/categories/x` argument into `C:/Program Files/Git/categories/x`. That produced
+  a DNS failure that first looked like a page with every value `null`. The script now refuses a
+  drive-letter path with exit 2 and treats Chrome's error page as a failed load (exit 1).
+  PowerShell is unaffected.
+- **`srimart.localhost` resolves inside Chrome, not necessarily for `curl` or Node on Windows.**
+  For a non-browser request to SriMart, use `127.0.0.1:8787` with `Host: srimart.localhost:8787`
+  (the port is required; see the SriMart host-header notes above).
+- **Node on Windows cannot resolve `srimart.localhost`; `curl.exe` can (`#1226`, 2026-10-23).** Node's
+  `getaddrinfo` fails with `ENOTFOUND srimart.localhost`, so `scripts/verify-icon-markup.ts` (or any Node
+  script) pointed at `http://srimart.localhost:8787` fails while the same URL works in Chrome and with
+  `curl.exe`. There are two remedies. Add `127.0.0.1 srimart.localhost` to
+  `C:\Windows\System32\drivers\etc\hosts` (needs an administrator shell), or leave the machine alone
+  and preload a one-file shim through `NODE_OPTIONS` (the request keeps `Host: srimart.localhost:PORT`,
+  which the vendor lookup needs):
+
+  ```js
+  // dns-preload.cjs, kept outside the repo
+  const dns = require("node:dns");
+  const lookup = dns.lookup;
+  dns.lookup = function (hostname, options, callback) {
+    const host = typeof hostname === "string" && hostname.endsWith(".localhost") ? "127.0.0.1" : hostname;
+    return lookup.call(this, host, options, callback);
+  };
+  ```
+
+  Then `NODE_OPTIONS="--require /path/to/dns-preload.cjs" npx tsx scripts/...` (Git Bash). The shim was
+  exercised against a local server through both `fetch` and `http.get`; the Windows failure itself was
+  reported by the `#1226` run and has not been reproduced on another machine.
+- **An orphaned headless Chrome can stall a concurrent `next build` at "Collecting build traces"
+  indefinitely.** Stopping a background shell does not kill its `tsx` and `chrome.exe`
+  grandchildren. A stuck run left Chrome alive, and `npm run preview`'s build sat on that line for
+  over ten minutes, then finished seconds after the processes were killed:
+
+  ```powershell
+  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'verify-mobile-layout' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  ```
+
+  The script now has a 30s timeout on every DevTools call and an overall watchdog, so it should
+  not hang again. Check for orphans anyway before blaming a slow build. Separately, a clean
+  `npm run build` on this machine spends several minutes on that same line even with nothing
+  orphaned. "Slow" is not "stuck" until something is holding the files.
+
+Added for `#956`/`#967` (2026-10-03), found while proving them live:
+
+- **`wrangler dev` under `npm run preview` can die with an empty `[ERROR]` and no stack**
+  (`castErrorCause` in the wrangler log), three times in one session, minutes after start and not
+  tied to any one request. It left `:8787` held by an orphaned `workerd`, so the next start silently
+  took `:8788`, and Better Auth only trusts `:8787`. Kill every `node` whose command line matches
+  `wrangler|opennextjs` plus `workerd`, confirm nothing listens on 8787, then restart with
+  `npx opennextjs-cloudflare preview` (the build output is already there; no rebuild).
+- **Drive a drawer, card or checkout from page JavaScript, not by coordinates.** A tab the extension
+  opened does not paint until a screenshot renders it (and screenshots can time out at 30s), but
+  `javascript_exec` runs fine. Sign in with `fetch('/api/auth/sign-in/email')` (Better Auth accepts it
+  on `localhost:8787`), click buttons by `aria-label`, and read `[data-cart-feedback]` in a polling
+  loop, because it empties after 4 seconds. Fill React inputs with the native value setter and an
+  `input` event, not `.value =`. The tool blocks output that looks like a cookie or query string.
+- **Checkout's minimum-order check runs on the pre-discount subtotal**, so proving a small code needs
+  a cart above the store minimum (£15.00 for Aheed) and a chosen slot. A cart below it refuses to
+  submit, which reads as a broken form.
+- **Signing in with a guest cart sends `/checkout` to `/cart` with a merge prompt** when the account
+  already has a saved cart. Choose "Keep my saved cart" before reading the checkout.
+- **A scratch script for the dev database belongs outside the repo** (the scratchpad), importing
+  `@neondatabase/serverless` by `file:///` URL and refusing to run unless `DIRECT_URL` contains the
+  dev project's host. Set stock or deactivate test codes there, then restore.
+
+Added for `#958`/`#959` (2026-10-03):
+
+- **`--then <path>` measures a page that needs a cart.** With `--add-first`, every width is
+  measured at `<path>` once the item is in the cart. This is how to reach `/checkout`, which
+  redirects an empty cart to `/cart`. Each object also lists `formInputs` (every visible input's
+  `autocomplete`) and, on checkout, a `checkout` block.
+- **Check `viewportWidth` first. If it is wider than the width you asked for, every other number
+  describes a zoomed-out page.** With `mobile: true`, Chrome widens the layout viewport to fit
+  overflowing content, as a phone does. The first `/checkout` run reported `viewportWidth` 961 at
+  390 on both vendors. Its positions and visibility looked plausible, and that was wrong. The cause
+  was a CSS grid track (`1fr`, or the implicit `auto` column) that cannot shrink below its
+  content's min-content width, widened by `SlotPicker`'s ~900px day strip. Use
+  `minmax(0,1fr)` / `grid-cols-1` for any grid column that holds a horizontally scrolling strip.
+  To find the culprit, list elements inside the page whose own box is wider than the viewport but
+  whose children are not.
+
+Added for `#964` (2026-10-04):
+
+- **`tapTargets` measures every tappable element in a `data-tap-surface` area**, grouped by that
+  value. `--open-location` opens the displayed `LocationControl` dialog first. `firstCardTop` gives
+  the first product card's document position, which shows what taller controls cost in grid height.
+  Take a baseline with the hooks in place **before** changing any class, because old code has
+  nothing to group by.
+- **Never write a requirement as `documentScrollWidth === viewportWidth` alone.** It is the
+  `viewportWidth` trap above, frozen into a spec. An overflowing page widens the emulated layout
+  viewport, so both read 366 at a requested 360 and the check passes. Compare both with the width
+  you asked for. In `#964`, 44px scroller arrows at `translate-x-1/2` overhung 22px against a 16px
+  gutter and widened every category page by 6px.
+- **Before each run of a long batch, check the server is up** (`curl -s -m 20 http://localhost:8787/api/health`).
+  When `wrangler dev` dies mid-batch, every later run fails on a Chrome error page and leaves an empty
+  output file, which is easy to mistake for a page with nothing on it.
+- **The homepage is `--path /`, and only with `MSYS_NO_PATHCONV=1`.** The script refuses an empty
+  `--path`, and Git Bash rewrites a bare `/` into a Windows path. Every other path goes without a
+  leading slash. `/` renders no `HorizontalScroller` at all: the product and bundle rows that use
+  it are on `/categories`, which is where `#979` measured them.
+- **A run can exit 0 with a line for a page that never rendered** (`#979`). When `wrangler dev`
+  dies *during* a run rather than before it, the script can still print a JSON line, with
+  `headerBottomAtTop: null` and empty `tapTargets`. That reads as "nothing on the page", not as an
+  error. Check every line for `headerBottomAtTop` before trusting a run, and rerun after a restart.
+  The `--block-urls` runs crashed `wrangler dev` most often (`Network connection lost`).
+- **The dev bucket genuinely lacks some objects.** Aheed's dev `logo.png` and several product
+  `.webp` keys return 404 from `images.dev.aheedfoodcentre.nocaped.com` (2026-10-04). So an
+  unblocked run on dev already reports broken images, and since `#655` the logo shows as its
+  fallback box. Compare image checks against a baseline, never against zero. Check an object with
+  PowerShell `Invoke-WebRequest` (TLS 1.2): Git Bash `curl` gets a TLS reset from these hosts.
+- **A closed `<details>` lays out its content** (`content-visibility: hidden`), so its controls
+  have real boxes. The script's `displayed` uses `checkVisibility()` since `#979`. Any new check
+  of "is this visible" needs the same.
+- **A requirement that names an element must use the name the script reports.** `name` is the
+  `aria-label` first, then the text, then the `name` attribute. `#964`'s R9 asked for an entry named
+  `postcode`, which no entry could carry, because the input's label is "Delivery postcode".
+  Check a requirement's names against one real run's output at Spec time.
+- **Matching a run to its baseline by `surface` and `name` must match displayed entries only**
+  (`#979`'s R12). `ProductFilterForm` is mounted twice, in the phone panel and the `md`+ sidebar,
+  with identical names. At 1024 and above the panel's copy is hidden, so a first-match lookup hits
+  the baseline's `0x0` entry and reports every sidebar control as changed. Validate's first pass
+  reported 8 false failures this way; none was real. Filter both sides on `displayed: true`.
+
+Added for `#981`/`#982` (2026-10-07):
+
+- **`--sign-in` combined with `--open-quick-view` can silently measure the signed-out branch, and
+  nothing in the output says so.** `QuickViewDrawer.tsx`'s review form depends on a client-side
+  `fetch('/api/products/quick-view?…')`, not an SSR read, and that fetch's session lookup can take
+  longer than the script's fixed 1s post-click sleep — this machine's `wrangler dev` reconnects to
+  Neon with a fresh Prisma client every request (`CLAUDE.md`, Database) and intermittently drops
+  the connection outright (the `Network connection lost` crash above). When the fetch is still
+  in flight past that 1s, `currentUser` defaults to `null` and the signed-out "Log in" link renders
+  instead — the run still exits 0 with plausible-looking geometry (`44×44`, correct
+  `documentScrollWidth`). Reproduced directly: the identical command against the same running
+  server passed cleanly several times and silently measured the wrong branch other times, including
+  on the *first* width of a multi-width run right after a confirmed-successful sign-in. The
+  product page's review form (SSR-gated via `session?.user` in the page render itself, not a client
+  fetch) never showed this. Tracked as `#1010`, not fixed here. Until it is, cross-check a
+  `quick-view-body` result that shows only the "Log in" link against a direct `curl` sign-in +
+  fetch to the same endpoint before concluding the signed-in branch is what you measured, and
+  prefer re-running over trusting a single pass for this one surface.
+- **A local wrangler-preview crash (`Network connection lost`, documented above for `#956`/`#967`)
+  can happen mid-session after dozens of successful requests, not just "soon after start."** Hit
+  twice in one `/validate` run, each after the server had already served many requests
+  successfully. Restarting (kill `node`/`workerd`, confirm nothing listens on 8787, `npm run
+  preview` again) resolved it both times; there is no known way to prevent it, only to detect it
+  (`curl -m 20 http://localhost:8787/api/health` before trusting a batch) and restart.
+
+## Driving a SECOND vendor locally, and two sign-in failures that are not what they say (#1180)
+
+Vendor selection is by hostname (`lib/tenant.ts`), so `http://127.0.0.1:8787` only ever reaches the
+fallback vendor — Aheed. Two things follow for any check that must cover both vendors, which
+`specs/design-system.md` requires for layout work.
+
+**Reach the second vendor with `--map-host`, not a `Host` header.**
+`npx tsx scripts/verify-mobile-layout.ts --base http://srimart-staging.nocaped.com:8787 --map-host 127.0.0.1`
+passes Chrome's own `--host-resolver-rules`, so the real `Host` is sent. **A `Host` header injected
+through CDP `Network.setExtraHTTPHeaders` is ignored by Chrome** — the server goes on resolving the
+wrong vendor while every measurement still looks plausible, which is a false pass, not an error.
+`curl -H "Host: …"` does work, so it is fine for reading rendered HTML; it just cannot measure
+layout.
+
+**A 403 on sign-in is an origin problem, not a credential one.** Better Auth derives its origin from
+the forwarded proto, so over plain local `http` it computes an `https://` origin and refuses. Add
+`--header x-forwarded-proto:http` (the same trap `#1177` hit from the other direction). A **401**
+after that really is the credential — most often the account simply is not in the dev database;
+`npx tsx scripts/demo-accounts.ts add` seeds the roster, `demo-srimart-admin@merqify.com` included
+(since `#1356` the roster is `@merqify.com`; `add` renames a legacy `@example.com` account in place).
+
+**But a 401 with the account present means you are using the wrong password file (`#1187`).** `.env`
+and `.dev.vars` hold **different** `DEMO_ACCOUNT_PASSWORD` values, and `.dev.vars` is the one in
+force under `npm run preview` (per-key precedence, Cloudflare request context first). `.env`'s value
+returns a clean 401 that is indistinguishable from a broken auth path. Take it from `.dev.vars`:
+
+```bash
+PW=$(grep -h '^DEMO_ACCOUNT_PASSWORD=' .dev.vars | head -1 | sed 's/^DEMO_ACCOUNT_PASSWORD=//' | tr -d '"')
+```
+
+**And `add` never resets an existing account's password.** It calls `signUp` only when the user is
+absent; for one that already exists it updates role, `emailVerified` and name and nothing else. The
+`[reconciled]` it prints therefore tells you the roster is correct and tells you **nothing** about
+which password is stored — re-running it cannot fix a password mismatch. **Do not "remove and re-add"
+to reset one account:** `remove` is a `deleteMany` over the whole five-account roster and cascades, so on
+dev it also deletes `demo-customer`'s orders, lists and favourites, which the account pages render.
+Reset the one `Account` row's `password` instead (a singular `account.update` by id, hashing with
+`better-auth/crypto`'s `hashPassword`, then `verifyPassword` to confirm), after checking the database host
+is the dev one. That is how it was repaired at `#1226`; the tool fix is `#1230`. **This has now happened
+three times** (staging at `#912`, dev at `#1013`, dev at `#1226`): after any change to
+`DEMO_ACCOUNT_PASSWORD`, set `.dev.vars` and `.env` to the same value and confirm each account with a live
+sign-in. **Seen at `#1226` (2026-10-23):** `demo-srimart-admin@example.com`
+returned 401 because its dev-database hash dated from 2026-08-17, before `DEMO_ACCOUNT_PASSWORD` took its
+current value, and a re-run of `scripts/demo-accounts.ts add` on 2026-10-21 left it untouched (`add` never resets an
+existing password). A validation that needs that sign-in
+reports the rows UNVERIFIED and does not write to the database; the owner repairs the account.
+
+**A 429 is very often NOT rate limiting.** `authOnRequest` in `lib/auth.ts` refuses a sensitive auth
+path with **429** when the vendor cannot be resolved at all — the fail-closed path from `#469`. So
+pointing `--base` at a hostname no `VendorDomain` row matches (an invented `aheed-local`, say)
+produces an endless, convincing "Too Many Requests" that no amount of waiting clears. Check the
+host resolves to a vendor **before** concluding you are throttled. The real limit, when it is the
+real limit, is 5 attempts per 60 s per vendor+IP (`lib/repositories/auth-rate-limit.ts`) — and a
+loop of `curl` probes exhausts it, so leave a minute before the measurement that matters.
+
+## Browser uploads and CDN images cannot be proven under `npm run preview` (#1069)
+
+Two environment gaps make a "real" image upload impossible from `localhost`, and neither is a code
+defect:
+
+- **The dev bucket (`aheed-images-dev`) has no CORS rule for `http://localhost:8787` or
+  `http://srimart.localhost:8787`.** A presigned `PUT` from the page fails its preflight with a 403
+  and the uploader shows "Failed to fetch". The staging and production buckets do allow `PUT` from
+  their own origins (checked with an `OPTIONS` preflight against the bucket endpoint).
+- **The dev CDN rejects a `localhost` referer** (hotlink protection), so `<img>` elements pointing at
+  `CDN_BASE_URL` fail and render their fallback. `curl` from Git Bash could not reach the CDN at all
+  in the #1069 session; PowerShell's `Invoke-WebRequest` could.
+
+What still works, and is enough for most upload rows:
+
+- Stub `window.fetch` in the page so the `PUT`s are captured instead of sent, then decode the
+  captured blobs with `createImageBitmap` to check dimensions, type and pixels. The attach step then
+  reports an incomplete upload, which is harmless: nothing is written.
+- Seed objects with `getStorage().putObject` from a `tsx` script and set the key with a read-write
+  script, **including the exact stored suffix**. A key missing `/512.png` is rejected as malformed
+  and every icon silently disappears (this cost a rebuild in #1069).
+- Measure fallback box sizes with `scripts/verify-mobile-layout.ts`; its `brand.file` and
+  `brand.requested` fields stay empty when the CDN images do not load.
+
+`scripts/lib/env-file.ts`'s `parseEnvFile` takes a **path**, not file contents. Passing contents makes
+it try to read the contents as a path, and the resulting error dumped the whole `.dev.vars` into the
+output. Pass `".dev.vars"`.

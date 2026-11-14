@@ -1,0 +1,513 @@
+import { describe, expect, it } from "vitest";
+import {
+  CATEGORY_FIELDS,
+  PRODUCT_FIELDS,
+  readForm,
+  parseCategoryForm,
+  parseProductForm,
+  slugify,
+  toCategoryOptionGroups,
+  type ParseResult,
+  type RawForm,
+} from "@/lib/catalogue-form";
+
+/**
+ * P6b1 (#159) — the catalogue admin's field rules, unit-tested with no database.
+ *
+ * These are the rules that decide what a submitted form MEANS before any row is
+ * written. Two of them are worth protecting specifically: a slug must never
+ * reach the database in a shape the module wouldn't have generated itself
+ * (otherwise `@@unique([vendorId, slug])` starts colliding on invisible
+ * whitespace), and a "was" price must be strictly above the price it advertises
+ * a saving against — a badge promising £0.00 off is worse than no badge.
+ */
+
+const SLUG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** A complete, valid product form — each test overrides only the field it is about. */
+function productForm(overrides: RawForm = {}): RawForm {
+  return {
+    name: "Basmati Rice",
+    slug: "basmati-rice",
+    description: "Long grain.",
+    categoryId: "cat-1",
+    basePrice: "2.40",
+    unitLabel: "£2.40 / kg",
+    quantity: "10",
+    stockMode: "TRACKED",
+    lowStockThreshold: "3",
+    isActive: "on",
+    ...overrides,
+  };
+}
+
+function categoryForm(overrides: RawForm = {}): RawForm {
+  return {
+    name: "Rice & Grains",
+    slug: "rice-grains",
+    sortOrder: "0",
+    isActive: "on",
+    ...overrides,
+  };
+}
+
+/** Asserts a rejection and returns the field name, so tests read as one line. */
+function rejectedField<T>(result: ParseResult<T>): string {
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("expected a rejection");
+  expect(result.error.message.length).toBeGreaterThan(0);
+  return result.error.field;
+}
+
+function accepted<T>(result: ParseResult<T>): T {
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(`expected acceptance, got: ${result.error.message}`);
+  return result.value;
+}
+
+describe("slugify", () => {
+  it("lowercases and hyphenates a normal product name", () => {
+    expect(slugify("Basmati Rice 5kg")).toBe("basmati-rice-5kg");
+  });
+
+  it("collapses runs of punctuation and whitespace into single hyphens", () => {
+    const slug = slugify("  Ghee  &  Oil  ");
+    expect(slug).toBe("ghee-oil");
+    expect(slug).toMatch(SLUG_PATTERN);
+  });
+
+  it("folds diacritics to their base letter rather than dropping them", () => {
+    // Without the NFKD + combining-mark strip this is "cr-me-fra-che".
+    expect(slugify("Crème Fraîche")).toBe("creme-fraiche");
+  });
+
+  it("returns empty string when there is nothing alphanumeric to use", () => {
+    expect(slugify("!!!")).toBe("");
+    expect(slugify("   ")).toBe("");
+  });
+
+  it("never emits leading, trailing or doubled hyphens", () => {
+    for (const input of ["--Rice--", "a  b", "!Rice!", "Rice -- Grains"]) {
+      expect(slugify(input)).toMatch(SLUG_PATTERN);
+    }
+  });
+});
+
+describe("parseProductForm — slug derivation (R3)", () => {
+  it("derives the slug from the name when the slug field is blank", () => {
+    const value = accepted(parseProductForm(productForm({ slug: "" })));
+    expect(value.slug).toBe("basmati-rice");
+  });
+
+  it("normalises a typed slug through the same rules", () => {
+    const value = accepted(parseProductForm(productForm({ slug: "  Validation SPICE R3 " })));
+    expect(value.slug).toBe("validation-spice-r3");
+  });
+
+  it("rejects when neither the name nor the slug yields anything usable", () => {
+    // The name is non-empty (so it passes the name check) but has no alphanumerics.
+    expect(rejectedField(parseProductForm(productForm({ name: "!!!", slug: "" })))).toBe("slug");
+  });
+});
+
+describe("parseProductForm — field rules (R5)", () => {
+  it("rejects an empty name", () => {
+    expect(rejectedField(parseProductForm(productForm({ name: "   " })))).toBe("name");
+  });
+
+  it("rejects an empty unit label", () => {
+    expect(rejectedField(parseProductForm(productForm({ unitLabel: "" })))).toBe("unitLabel");
+  });
+
+  it("rejects an empty category", () => {
+    expect(rejectedField(parseProductForm(productForm({ categoryId: "" })))).toBe("categoryId");
+  });
+
+  it("rejects an absent or negative price", () => {
+    expect(rejectedField(parseProductForm(productForm({ basePrice: "" })))).toBe("basePrice");
+    expect(rejectedField(parseProductForm(productForm({ basePrice: "-1" })))).toBe("basePrice");
+    expect(rejectedField(parseProductForm(productForm({ basePrice: "abc" })))).toBe("basePrice");
+  });
+
+  it("rejects a negative or fractional stock quantity", () => {
+    expect(rejectedField(parseProductForm(productForm({ quantity: "-1" })))).toBe("quantity");
+    expect(rejectedField(parseProductForm(productForm({ quantity: "1.5" })))).toBe("quantity");
+    expect(rejectedField(parseProductForm(productForm({ quantity: "" })))).toBe("quantity");
+  });
+
+  it("#1211 (R15a) — accepts each stock mode and refuses a missing or unknown one", () => {
+    for (const stockMode of ["TRACKED", "UNTRACKED", "UNKNOWN"]) {
+      const parsed = parseProductForm(productForm({ stockMode, quantity: "4" }));
+      expect(parsed.ok && parsed.value.stockMode).toBe(stockMode);
+      // A mode change never alters the count the form submitted.
+      expect(parsed.ok && parsed.value.quantity).toBe(4);
+    }
+    expect(rejectedField(parseProductForm(productForm({ stockMode: "FOO" })))).toBe("stockMode");
+    expect(rejectedField(parseProductForm(productForm({ stockMode: "tracked" })))).toBe(
+      "stockMode",
+    );
+    expect(rejectedField(parseProductForm(productForm({ stockMode: "" })))).toBe("stockMode");
+  });
+
+  it("rejects a negative low-stock threshold", () => {
+    expect(rejectedField(parseProductForm(productForm({ lowStockThreshold: "-1" })))).toBe(
+      "lowStockThreshold",
+    );
+  });
+
+  it("returns errors as data rather than throwing", () => {
+    expect(() => parseProductForm(productForm({ name: "" }))).not.toThrow();
+  });
+
+  // #876 (R7) — the expected restock day is optional, a real calendar day, and kept as a label.
+  it("maps a blank expected restock date to null", () => {
+    const parsed = parseProductForm(productForm({ expectedRestockDay: "" }));
+    expect(parsed.ok && parsed.value.expectedRestockDay).toBeNull();
+    const absent = parseProductForm(productForm());
+    expect(absent.ok && absent.value.expectedRestockDay).toBeNull();
+  });
+
+  it("keeps a valid expected restock date as its YYYY-MM-DD label", () => {
+    const parsed = parseProductForm(productForm({ expectedRestockDay: "2026-10-01" }));
+    expect(parsed.ok && parsed.value.expectedRestockDay).toBe("2026-10-01");
+  });
+
+  it("rejects an impossible or non-date expected restock date on its own field", () => {
+    expect(rejectedField(parseProductForm(productForm({ expectedRestockDay: "2026-02-31" })))).toBe(
+      "expectedRestockDay",
+    );
+    expect(rejectedField(parseProductForm(productForm({ expectedRestockDay: "tomorrow" })))).toBe(
+      "expectedRestockDay",
+    );
+  });
+
+  it("parses pounds into integer pence", () => {
+    const value = accepted(parseProductForm(productForm({ basePrice: "2.40" })));
+    expect(value.basePrice).toBe(240);
+  });
+
+  it("accepts a zero price without treating it as absent", () => {
+    expect(accepted(parseProductForm(productForm({ basePrice: "0" }))).basePrice).toBe(0);
+  });
+});
+
+describe("parseProductForm — was-price (R6)", () => {
+  it("accepts a was-price strictly above the price", () => {
+    const value = accepted(
+      parseProductForm(productForm({ basePrice: "2.40", originalPrice: "3.00" })),
+    );
+    expect(value.originalPrice).toBe(300);
+  });
+
+  it("rejects a was-price equal to the price", () => {
+    expect(
+      rejectedField(parseProductForm(productForm({ basePrice: "2.40", originalPrice: "2.40" }))),
+    ).toBe("originalPrice");
+  });
+
+  it("rejects a was-price below the price", () => {
+    expect(
+      rejectedField(parseProductForm(productForm({ basePrice: "2.40", originalPrice: "1.00" }))),
+    ).toBe("originalPrice");
+  });
+
+  it("treats a blank was-price as null, not zero", () => {
+    expect(accepted(parseProductForm(productForm({ originalPrice: "" }))).originalPrice).toBeNull();
+    expect(accepted(parseProductForm(productForm())).originalPrice).toBeNull();
+  });
+});
+
+describe("parseProductForm — multi-buy tier (P8.5d, #348)", () => {
+  // productForm()'s basePrice is 2.40, so 2 singly = 480p and 3 singly = 720p.
+
+  it("is null when both tier fields are blank", () => {
+    expect(accepted(parseProductForm(productForm())).tier).toBeNull();
+    expect(
+      accepted(parseProductForm(productForm({ tierGroupQuantity: "", tierGroupPrice: "" }))).tier,
+    ).toBeNull();
+  });
+
+  it("parses a complete tier into whole pence", () => {
+    const value = accepted(
+      parseProductForm(
+        productForm({ tierGroupQuantity: "3", tierGroupPrice: "6.00", tierIsActive: "on" }),
+      ),
+    );
+    expect(value.tier).toEqual({ groupQuantity: 3, groupPricePence: 600, isActive: true });
+  });
+
+  it("keeps an inactive tier's numbers rather than discarding them", () => {
+    // Unticking "running" must not be the same as clearing the offer — the
+    // numbers survive so a seasonal multi-buy can be switched back on.
+    const value = accepted(
+      parseProductForm(productForm({ tierGroupQuantity: "3", tierGroupPrice: "6.00" })),
+    );
+    expect(value.tier).toEqual({ groupQuantity: 3, groupPricePence: 600, isActive: false });
+  });
+
+  it("refuses a half-typed tier, naming the empty field", () => {
+    expect(rejectedField(parseProductForm(productForm({ tierGroupQuantity: "3" })))).toBe(
+      "tierGroupPrice",
+    );
+    expect(rejectedField(parseProductForm(productForm({ tierGroupPrice: "6.00" })))).toBe(
+      "tierGroupQuantity",
+    );
+  });
+
+  it("refuses a group of fewer than two", () => {
+    // A "group" of 1 is a markdown, which is what originalPrice is for.
+    expect(
+      rejectedField(
+        parseProductForm(productForm({ tierGroupQuantity: "1", tierGroupPrice: "2.00" })),
+      ),
+    ).toBe("tierGroupQuantity");
+  });
+
+  it("refuses a non-numeric or fractional quantity", () => {
+    expect(
+      rejectedField(
+        parseProductForm(productForm({ tierGroupQuantity: "two", tierGroupPrice: "6.00" })),
+      ),
+    ).toBe("tierGroupQuantity");
+    expect(
+      rejectedField(
+        parseProductForm(productForm({ tierGroupQuantity: "2.5", tierGroupPrice: "6.00" })),
+      ),
+    ).toBe("tierGroupQuantity");
+  });
+
+  it("refuses a price that does not beat buying that many singly", () => {
+    // 3 x 2.40 = 7.20. Anything at or above that saves nothing.
+    expect(
+      rejectedField(
+        parseProductForm(productForm({ tierGroupQuantity: "3", tierGroupPrice: "7.20" })),
+      ),
+    ).toBe("tierGroupPrice");
+    expect(
+      rejectedField(
+        parseProductForm(productForm({ tierGroupQuantity: "3", tierGroupPrice: "8.00" })),
+      ),
+    ).toBe("tierGroupPrice");
+  });
+
+  it("accepts a price one penny under the singly total", () => {
+    const value = accepted(
+      parseProductForm(productForm({ tierGroupQuantity: "3", tierGroupPrice: "7.19" })),
+    );
+    expect(value.tier?.groupPricePence).toBe(719);
+  });
+});
+
+describe("parseProductForm — checkboxes and optional text", () => {
+  it("reads an absent checkbox as false and a present one as true", () => {
+    const off = accepted(parseProductForm(productForm()));
+    expect(off.isHalal).toBe(false);
+    expect(off.isActive).toBe(true);
+
+    const on = accepted(parseProductForm(productForm({ isHalal: "on", isOrganic: "on" })));
+    expect(on.isHalal).toBe(true);
+    expect(on.isOrganic).toBe(true);
+    expect(on.isFresh).toBe(false);
+  });
+
+  it("treats a blank origin as null but a blank description as an empty string", () => {
+    // `description` is non-null in the schema; `origin` is nullable.
+    const value = accepted(parseProductForm(productForm({ origin: "", description: "" })));
+    expect(value.origin).toBeNull();
+    expect(value.description).toBe("");
+  });
+});
+
+describe("parseCategoryForm", () => {
+  it("derives and normalises the slug exactly as the product form does", () => {
+    expect(accepted(parseCategoryForm(categoryForm({ slug: "" }))).slug).toBe("rice-grains");
+    expect(accepted(parseCategoryForm(categoryForm({ slug: " Rice & GRAINS " }))).slug).toBe(
+      "rice-grains",
+    );
+  });
+
+  it("rejects an empty name", () => {
+    expect(rejectedField(parseCategoryForm(categoryForm({ name: "" })))).toBe("name");
+  });
+
+  it("rejects a non-integer or negative sort order", () => {
+    expect(rejectedField(parseCategoryForm(categoryForm({ sortOrder: "1.5" })))).toBe("sortOrder");
+    expect(rejectedField(parseCategoryForm(categoryForm({ sortOrder: "-1" })))).toBe("sortOrder");
+  });
+
+  it("treats a blank parent as top-level", () => {
+    expect(accepted(parseCategoryForm(categoryForm({ parentId: "" }))).parentId).toBeNull();
+    expect(accepted(parseCategoryForm(categoryForm())).parentId).toBeNull();
+  });
+
+  it("passes a supplied parent through untouched — whether it is top-level is a DB question", () => {
+    expect(accepted(parseCategoryForm(categoryForm({ parentId: "cat-9" }))).parentId).toBe("cat-9");
+  });
+});
+
+/**
+ * P2.6 slice 6 (#569), R34/R35 — HMC certification never travels without its provenance.
+ *
+ * HMC is a named third-party certifying body, and #239 was a real incident where this codebase
+ * asserted "100% Certified HMC Halal" for a vendor with no basis for it. A bare tickable boolean
+ * would re-create that exposure one product at a time, so the parser makes the flag and its
+ * evidence a single unit: ticked requires both fields, unticked nulls both.
+ */
+describe("parseProductForm — HMC certification (R34, R35)", () => {
+  it("rejects a ticked flag with no certificate reference (R34)", () => {
+    const field = rejectedField(
+      parseProductForm(
+        productForm({ isHmcCertified: "on", hmcReference: "", hmcVerifiedAt: "2026-07-14" }),
+      ),
+    );
+    expect(field).toBe("hmcReference");
+  });
+
+  it("rejects a ticked flag with no verified date (R34)", () => {
+    const field = rejectedField(
+      parseProductForm(
+        productForm({ isHmcCertified: "on", hmcReference: "HMC/2026/1", hmcVerifiedAt: "" }),
+      ),
+    );
+    expect(field).toBe("hmcVerifiedAt");
+  });
+
+  it("rejects an unparseable verified date (R34)", () => {
+    const field = rejectedField(
+      parseProductForm(
+        productForm({
+          isHmcCertified: "on",
+          hmcReference: "HMC/2026/1",
+          hmcVerifiedAt: "nonsense",
+        }),
+      ),
+    );
+    expect(field).toBe("hmcVerifiedAt");
+  });
+
+  it("accepts a ticked flag carrying both fields, reading the date as UTC midnight (R34)", () => {
+    const value = accepted(
+      parseProductForm(
+        productForm({
+          isHmcCertified: "on",
+          hmcReference: "HMC/2026/1",
+          hmcVerifiedAt: "2026-07-14",
+        }),
+      ),
+    );
+
+    expect(value.isHmcCertified).toBe(true);
+    expect(value.hmcReference).toBe("HMC/2026/1");
+    // A date-only input has no timezone ambiguity — unlike datetime-local, which is why
+    // lib/local-datetime.ts exists. Asserted as an exact instant so a future switch to a
+    // wall-clock-parsing input cannot pass silently.
+    expect(value.hmcVerifiedAt?.toISOString()).toBe("2026-07-14T00:00:00.000Z");
+  });
+
+  it("nulls both provenance fields when the flag is unticked, whatever was typed (R35)", () => {
+    const value = accepted(
+      parseProductForm(productForm({ hmcReference: "HMC/2026/1", hmcVerifiedAt: "2026-07-14" })),
+    );
+
+    expect(value.isHmcCertified).toBe(false);
+    // Stale evidence left behind by an untick would read to a later reader as still-current.
+    expect(value.hmcReference).toBeNull();
+    expect(value.hmcVerifiedAt).toBeNull();
+  });
+
+  it("carries the dietary flags and brand through (R28 support)", () => {
+    const value = accepted(
+      parseProductForm(productForm({ isVegetarian: "on", isGlutenFree: "on", brandId: "brand-1" })),
+    );
+
+    expect(value.isVegetarian).toBe(true);
+    expect(value.isGlutenFree).toBe(true);
+    expect(value.brandId).toBe("brand-1");
+    // "No brand" is the empty option, and must reach the repository as null rather than "".
+    expect(accepted(parseProductForm(productForm({ brandId: "" }))).brandId).toBeNull();
+  });
+});
+
+/**
+ * #681 — `toCategoryOptionGroups` shipped in #630 and drove the `/staff/products` category filter
+ * for three phases with NO test of any kind. This slice makes it drive the storefront's category
+ * control too, so its rules are pinned here before a second caller depends on them.
+ *
+ * The generic case matters as much as the grouping: the storefront needs each option's `slug` for
+ * the select value, and a signature fixed to `CategoryOption` would erase it on the way through.
+ */
+describe("toCategoryOptionGroups (#630, generic since #681)", () => {
+  // Generic over `extra` so the spread's fields survive into the inferred type — without this the
+  // slug case below compiles to `{ id; name; parentId; isActive }` and `group.parent.slug` is a
+  // type error, which is the whole property that case exists to prove.
+  const cat = <E extends Record<string, unknown>>(
+    id: string,
+    parentId: string | null,
+    extra: E = {} as E,
+  ) => ({
+    id,
+    name: id.toUpperCase(),
+    parentId,
+    isActive: true,
+    ...extra,
+  });
+
+  it("returns departments in input order, each followed by its own children", () => {
+    const groups = toCategoryOptionGroups([
+      cat("produce", null),
+      cat("fruit", "produce"),
+      cat("veg", "produce"),
+      cat("bakery", null),
+      cat("bread", "bakery"),
+    ]);
+
+    expect(groups.map((g) => g.parent.id)).toEqual(["produce", "bakery"]);
+    expect(groups[0].children.map((c) => c.id)).toEqual(["fruit", "veg"]);
+    expect(groups[1].children.map((c) => c.id)).toEqual(["bread"]);
+  });
+
+  it("promotes an orphan child to its own group rather than dropping it", () => {
+    // Its parent is absent from the list — an inactive department filtered out upstream, say.
+    // An unselectable category is worse than an oddly-placed one, so it must still appear.
+    const groups = toCategoryOptionGroups([cat("produce", null), cat("stray", "missing-parent")]);
+
+    expect(groups.map((g) => g.parent.id)).toEqual(["produce", "stray"]);
+    expect(groups[1].children).toEqual([]);
+  });
+
+  it("preserves extra fields on the element type, so a caller can read slug off a group", () => {
+    const groups = toCategoryOptionGroups([
+      cat("produce", null, { slug: "produce-slug" }),
+      cat("fruit", "produce", { slug: "fruit-slug" }),
+    ]);
+
+    // Type-level: these compile only because the function is generic over its element.
+    expect(groups[0].parent.slug).toBe("produce-slug");
+    expect(groups[0].children[0].slug).toBe("fruit-slug");
+  });
+
+  it("returns an empty array for an empty list, so a caller can render no control at all", () => {
+    expect(toCategoryOptionGroups([])).toEqual([]);
+  });
+});
+
+describe("allowsCustomNote checkbox (#1135, R20)", () => {
+  it("parses a ticked box as true and an absent one as false, on both forms", () => {
+    expect(
+      accepted(parseCategoryForm(categoryForm({ allowsCustomNote: "on" }))).allowsCustomNote,
+    ).toBe(true);
+    expect(accepted(parseCategoryForm(categoryForm())).allowsCustomNote).toBe(false);
+    expect(
+      accepted(parseProductForm(productForm({ allowsCustomNote: "on" }))).allowsCustomNote,
+    ).toBe(true);
+    expect(accepted(parseProductForm(productForm())).allowsCustomNote).toBe(false);
+  });
+
+  it("reads the field out of FormData on both forms", () => {
+    expect(CATEGORY_FIELDS).toContain("allowsCustomNote");
+    expect(PRODUCT_FIELDS).toContain("allowsCustomNote");
+    const form = new FormData();
+    form.set("allowsCustomNote", "on");
+    expect(readForm(form, CATEGORY_FIELDS).allowsCustomNote).toBe("on");
+  });
+});

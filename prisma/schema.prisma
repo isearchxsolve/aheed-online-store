@@ -1,0 +1,2306 @@
+// Walking-skeleton schema: ONE model, just enough to prove the end-to-end DB path.
+// Real relational model (Users, Products, Orders, …) arrives in P1+ per specs/architecture.md.
+
+generator client {
+  provider   = "prisma-client-js"
+  // Prisma 6+: driver adapters are GA (no preview flag needed).
+  // Prisma 5:  previewFeatures = ["driverAdapters"]
+  // engineType = "client" (WASM query compiler, imported directly rather than
+  // discovered via fs) is required on Cloudflare Workers — the default
+  // "library" engine calls fs.readdir at runtime to locate its native engine
+  // binary, which workerd's nodejs_compat polyfill doesn't implement.
+  engineType = "client"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled (runtime)
+  directUrl = env("DIRECT_URL") // direct (migrations)
+}
+
+model HealthCheck {
+  id        String   @id @default(uuid())
+  label     String   @default("ok")
+  checkedAt DateTime @default(now())
+
+  @@index([checkedAt])
+}
+
+// Better Auth's standard relational schema (ADR-002) — model/field names match its own
+// conventions so the Prisma adapter needs no custom mapping config. `role` is our own
+// RBAC addition (Customer/Staff/Admin, mission.md); Better Auth passes unknown-to-it
+// fields through untouched. No @default(uuid()) on these ids — Better Auth's adapter
+// generates and supplies them itself on create.
+// Platform-level role (ADR-004 slice 3a). Platform ADMIN is the operator and transcends
+// all vendors; most users are CUSTOMER. Per-vendor staff/admin is VendorMembership, not this.
+enum Role {
+  CUSTOMER
+  STAFF
+  ADMIN
+}
+
+// Per-vendor role (ADR-004 slice 3a). A VendorMembership grants staff/admin at ONE vendor;
+// there is no CUSTOMER here (a membership IS a staff/admin grant).
+enum VendorRole {
+  STAFF
+  ADMIN
+}
+
+model User {
+  id                  String                       @id
+  name                String
+  email               String                       @unique
+  emailVerified       Boolean                      @default(false)
+  image               String?
+  role                Role                         @default(CUSTOMER)
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
+  sessions            Session[]
+  accounts            Account[]
+  reviews             Review[]
+  memberships         VendorMembership[]
+  carts               Cart[]
+  addresses           Address[]
+  orders              Order[]
+  statusChanges       OrderStatusEvent[]           @relation("OrderStatusEventActor")
+  loyaltyAccounts     LoyaltyAccount[]
+  loyaltyEntries      LoyaltyLedgerEntry[]
+  marketingConsents   MarketingConsentEvent[]
+  discountUses        DiscountRedemption[]
+  /// #987 — the referral codes this user owns, at most one per vendor.
+  referralCodes       DiscountCode[]               @relation("ReferralCodeOwner")
+  roleChangesTargeted VendorRoleAuditLog[]         @relation("TargetUser")
+  roleChangesActedOn  VendorRoleAuditLog[]         @relation("ActorUser")
+  restrictionChanges  ProductRestrictionAuditLog[]
+  customerAddresses   CustomerAddress[]
+  shoppingLists       ShoppingList[]
+  feedback            CustomerFeedback[]
+  feedbackModerated   CustomerFeedback[]           @relation("FeedbackModerator")
+  netContentReviews   NetContentSuggestion[]       @relation("NetContentReviewer")
+  favourites          Favourite[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime? @default(now())
+  updatedAt  DateTime? @updatedAt
+
+  @@index([identifier])
+}
+
+// ADR-004 slice 1 — multi-tenancy (specs/2026-08-08-multitenancy-slice1-vendor-schema/).
+// Vendor is the tenancy root; every domain row carries a required vendorId. Read-side
+// vendorId filtering is enforced centrally in slice 2 (lib/repositories/*). All existing
+// data is backfilled to a single "Aheed Food Centre" vendor.
+enum VendorStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model Vendor {
+  id                        String                       @id @default(uuid())
+  slug                      String                       @unique
+  name                      String
+  status                    VendorStatus                 @default(ACTIVE)
+  customDomain              String?                      @unique // used in slice 3 (host→tenant resolution)
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
+  branding                  VendorBranding?
+  config                    VendorConfig?
+  location                  VendorLocation?
+  deliveryAreas             VendorDeliveryArea[]
+  deliveryRefusalCounts     DeliveryRefusalCount[]
+  fulfilmentSlots           VendorFulfilmentSlot[]
+  categories                Category[]
+  products                  Product[]
+  inventory                 Inventory[]
+  reviews                   Review[]
+  memberships               VendorMembership[]
+  domains                   VendorDomain[]
+  carts                     Cart[]
+  cartItems                 CartItem[]
+  addresses                 Address[]
+  orders                    Order[]
+  orderItems                OrderItem[]
+  payments                  Payment[]
+  orderEvents               OrderStatusEvent[]
+  loyaltyTiers              VendorLoyaltyTier[]
+  loyaltyAccounts           LoyaltyAccount[]
+  loyaltyEntries            LoyaltyLedgerEntry[]
+  marketingConsents         MarketingConsentEvent[]
+  discountCodes             DiscountCode[]
+  discountUses              DiscountRedemption[]
+  roleAuditLogs             VendorRoleAuditLog[]
+  restrictionAuditLogs      ProductRestrictionAuditLog[]
+  lookupAttempts            OrderLookupAttempt[]
+  codeAttempts              DiscountCodeAttempt[]
+  campaigns                 DepartmentCampaign[]
+  bundles                   Bundle[]
+  priceTiers                ProductPriceTier[]
+  authenticationAttempts    AuthenticationAttempt[]
+  bindingRefusals           PaymentBindingRefusal[]
+  paymentReconciliations    PaymentReconciliation[]
+  searchQueryLogs           SearchQueryLog[]
+  assistantConversations    AssistantConversation[]
+  searchSynonyms            SearchSynonym[]
+  netContentSuggestions     NetContentSuggestion[]
+  listNormalisationAttempts ListNormalisationAttempt[]
+  brands                    Brand[]
+  attributes                VendorAttribute[]
+  vendorThemes              VendorTheme[]
+  vendorExpressSchedules    VendorExpressSchedule[]
+  customerAddresses         CustomerAddress[]
+  shoppingLists             ShoppingList[]
+  favourites                Favourite[]
+  customerFeedback          CustomerFeedback[]
+  feedbackAttempts          CustomerFeedbackAttempt[]
+  reviewLinks               VendorReviewLink[]
+  faqs                      VendorFaq[]
+  aiUsageEvents             AiUsageEvent[]
+  weeklyHours               VendorWeeklyHours[]
+  hoursOverrides            VendorHoursOverride[]
+  paymentBadges             VendorPaymentBadge[]
+  categoryAssets            CategoryAsset[]
+}
+
+// P2.6 slice 6 (#569) — a product's brand, as a model rather than a denormalised
+// `Product.brand` string.
+//
+// TWO REASONS IT IS A MODEL. #394's mega-menu wants brand thumbnails, which needs an
+// `imageKey` and a stable id that a free-text column cannot carry; and free text drifts
+// into near-duplicate spellings ("Shan", "shan ", "SHAN") the moment two staff members
+// type it, which would fork the very facet this exists to provide.
+//
+// Vendor-scoped like every other catalogue model here. `Product.brandId` is NULLABLE by
+// design: roughly 2,000 products already exist and this slice deliberately ships no
+// backfill (see the slice's plan.md), so a brand is something a product may have, never
+// something it must.
+model Brand {
+  id       String  @id @default(uuid())
+  vendorId String
+  vendor   Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name     String
+  slug     String
+  /// A RELATIVE storage key (e.g. `brands/{brandId}/{uuid}.webp`), never a URL — the
+  /// same rule as ProductImage.storageKey and DepartmentCampaign.imageKey. Nothing
+  /// renders it yet; it exists so #394 has somewhere to put a thumbnail. This slice
+  /// adds no upload pipeline, only the ability to set the key.
+  imageKey String?
+
+  products Product[]
+
+  @@unique([vendorId, slug])
+  @@index([vendorId, name])
+}
+
+// #912 — VENDOR-DEFINED product filters ("Colour: Black", "Connectivity: Wireless").
+//
+// These deliberately COEXIST with Product's six label booleans (isHalal … isHmcCertified) rather
+// than replacing them. The booleans are platform-defined yes/no facets, switchable per vendor
+// (#905), and stay columns for #569's reason: a boolean needs no join and indexes simply. These
+// three models serve what the booleans cannot — a value-holding filter a vendor invents itself,
+// without a migration. See specs/architecture.md ("Vendor-defined filters sit beside the label
+// booleans") before merging the two.
+//
+// Integrity is in the DATABASE, not only in code: the composite foreign keys below make "this
+// option belongs to this attribute" and "this attribute belongs to this vendor" facts no write can
+// violate — the technique Product.category already uses with [categoryId, vendorId].
+//
+// Slugs are IMMUTABLE after creation: they are what a shopper's URL carries
+// (`attr_<attributeSlug>=<optionSlug>`), so a rename changes the name only and shared links survive.
+//
+// #918 — a filter is a LIST (pick from its options) or a NUMBER (a decimal per product, with an
+// optional unit such as "W"). The kind is set at creation and never changes: a list filter's values
+// have no meaningful number mapping. `showOnCard` also puts the filter's value on product cards.
+enum AttributeKind {
+  LIST
+  NUMBER
+}
+
+model VendorAttribute {
+  id         String        @id @default(uuid())
+  vendorId   String
+  vendor     Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name       String
+  slug       String
+  sortOrder  Int           @default(0)
+  createdAt  DateTime      @default(now())
+  kind       AttributeKind @default(LIST)
+  /// Shown after a NUMBER filter's value ("65 W"). Always null for a LIST filter.
+  unit       String?
+  showOnCard Boolean       @default(false)
+
+  options       VendorAttributeOption[]
+  productValues ProductAttributeValue[]
+
+  @@unique([vendorId, slug])
+  // The target of ProductAttributeValue's composite foreign key.
+  @@unique([id, vendorId])
+}
+
+model VendorAttributeOption {
+  id          String          @id @default(uuid())
+  attributeId String
+  attribute   VendorAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String
+  sortOrder   Int             @default(0)
+
+  productValues ProductAttributeValue[]
+
+  @@unique([attributeId, slug])
+  // The target of ProductAttributeValue's composite foreign key.
+  @@unique([id, attributeId])
+}
+
+// One product's value for one vendor filter. At most one per product per attribute, which the unique
+// below enforces. Deleting an attribute or an option removes these rows by cascade; it never touches
+// the Product itself.
+//
+// #918 — a row holds EITHER `optionId` (a LIST filter) OR `numericValue` (a NUMBER filter), never
+// both and never neither. The migration adds a CHECK for that ("ProductAttributeValue_one_value_check")
+// because Prisma cannot declare one. With `optionId` null, the composite option foreign key is not
+// checked (Postgres MATCH SIMPLE), which is the intended behaviour for a number. Which kind a value
+// may take is checked against its filter in lib/repositories/products.ts. `numericValue` is a
+// measurement, not money, so Decimal rather than integer pence.
+model ProductAttributeValue {
+  id           String                 @id @default(uuid())
+  vendorId     String
+  productId    String
+  product      Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributeId  String
+  attribute    VendorAttribute        @relation(fields: [attributeId, vendorId], references: [id, vendorId], onDelete: Cascade)
+  optionId     String?
+  option       VendorAttributeOption? @relation(fields: [optionId, attributeId], references: [id, attributeId], onDelete: Cascade)
+  numericValue Decimal?               @db.Decimal(10, 2)
+
+  @@unique([productId, attributeId])
+  // The storefront filter predicate: `attributeValues: { some: { optionId } }`, vendor-scoped.
+  @@index([vendorId, optionId, productId])
+  // #918 — the range predicate: `attributeValues: { some: { attributeId, numericValue: { gte, lte } } }`.
+  @@index([vendorId, attributeId, numericValue])
+}
+
+// Host→tenant resolution (ADR-004 slice 3b). One row per hostname a vendor answers on
+// (exact match); staging and prod are separate DBs, so each holds its own env's hosts.
+// Supersedes the unused Vendor.customDomain (kept for now; dropped in a later cleanup).
+model VendorDomain {
+  id          String   @id @default(uuid())
+  vendorId    String
+  vendor      Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  host        String   @unique // exact request host, e.g. "srimart.nocaped.com"
+  isCanonical Boolean  @default(true) // the vendor's primary host (for links / future redirects)
+  createdAt   DateTime @default(now())
+
+  @@index([vendorId])
+}
+
+// Per-vendor staff/admin grant (ADR-004 slice 3a). Identity stays global (User); this
+// scopes authorization to a single vendor. One row per (user, vendor).
+model VendorMembership {
+  id        String     @id @default(uuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vendorId  String
+  vendor    Vendor     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  role      VendorRole
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@unique([userId, vendorId])
+  @@index([vendorId])
+}
+
+// #75 — a platform-level palette catalogue a vendor may apply to their VendorBranding
+// (see VendorBranding.themeId below).
+//
+// DELIBERATELY NOT VENDOR-SCOPED: no vendorId column, no Vendor relation. This is a
+// stated exception to ADR-004 decision 2's row-level tenancy
+// (specs/decisions/ADR-004-multi-tenancy.md carries the dated implementation note), not
+// an oversight — a theme is curated for reuse ACROSS vendors and holds no tenant data,
+// so there is nothing here for a tenant boundary to protect. Selecting a theme COPIES
+// its eight values onto the vendor's own VendorBranding row (features/admin/storefront.ts's
+// applyStorefrontTheme, via lib/repositories/vendor.ts's applyThemeToVendor);
+// lib/vendor-theme.ts's brandStyle() keeps reading only VendorBranding's own columns and
+// performs no join to Theme, so themeId records provenance, not authority — a vendor may
+// edit any colour afterwards and diverge from the theme freely.
+model Theme {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  // Same eight brand primitives as VendorBranding below, explicit String columns
+  // (never Json — CLAUDE.md's schema rules) so a theme is exactly as typed as the
+  // row it gets copied onto.
+  brandGreenDark  String
+  brandGreen      String
+  brandOrange     String
+  brandRed        String
+  brandCream      String
+  brandGreenTint  String
+  brandOrangeTint String
+  brandRedTint    String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  vendorBrandings VendorBranding[]
+}
+
+model VendorFulfilmentSlot {
+  id        String           @id @default(uuid())
+  vendorId  String
+  vendor    Vendor           @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  method    FulfilmentMethod
+  dayOfWeek Int
+  startTime String
+  endTime   String
+  capacity  Int
+
+  orders Order[]
+
+  @@index([vendorId, method, dayOfWeek])
+}
+
+// #714 Fix — Vendor-scoped saved themes. Mirrors Theme's brand primitives but scoped to a single tenant.
+model VendorTheme {
+  id              String   @id @default(uuid())
+  vendorId        String
+  vendor          Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name            String
+  brandGreenDark  String
+  brandGreen      String
+  brandOrange     String
+  brandRed        String
+  brandCream      String
+  brandGreenTint  String
+  brandOrangeTint String
+  brandRedTint    String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([vendorId, name])
+  @@index([vendorId])
+}
+
+// Satellite config/branding tables ship EMPTY in slice 1 — their values (and the code that
+// reads them) arrive in slice 4. Explicit columns only, never a Json column (CLAUDE.md).
+model VendorBranding {
+  id              String   @id @default(uuid())
+  vendorId        String   @unique
+  vendor          Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name            String
+  tagline         String?
+  logoStorageKey  String? // RELATIVE key only (ADR-003) — never a URL
+  // #1069 — the vendor's square MARK: the RELATIVE key of its 512px PNG,
+  // `vendors/{vendorId}/mark-{uuid}/512.png`. Its four siblings (32/180/192.png, og.png) sit in the
+  // same folder under fixed names and are derived by lib/vendor-mark.ts's markFileKeys(), so this
+  // one column stores one real object key rather than five columns that only change together.
+  markStorageKey  String?
+  // Brand color PRIMITIVES (mirror design-system/tokens/tokens.css --color-brand-*),
+  // injected per vendor as CSS custom properties in slice 4. Hex strings.
+  brandGreenDark  String
+  brandGreen      String
+  brandOrange     String
+  brandRed        String
+  brandCream      String
+  brandGreenTint  String
+  brandOrangeTint String
+  brandRedTint    String
+  // #75 — which Theme (if any) this vendor's colours were last copied from. Nullable:
+  // most rows never selected a theme, and picking one is a one-time copy, not a live
+  // binding (see the Theme model doc comment above). onDelete: SetNull so retiring a
+  // theme from the catalogue never cascades into deleting a vendor's own branding.
+  themeId         String?
+  theme           Theme?   @relation(fields: [themeId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model VendorConfig {
+  id                          String             @id @default(uuid())
+  vendorId                    String             @unique
+  vendor                      Vendor             @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  localityName                String // e.g. "Milton Keynes"
+  // #363 — the store's IANA timezone, region-shaped vendor data for the same reason
+  // localityName above is. Interprets every datetime-local field (campaign windows,
+  // discount-code windows) and decides which calendar day "today" is when the checkout
+  // slot picker offers dates. Default keeps every existing row, and any vendor created
+  // before a zone is chosen, on the platform default — see lib/local-datetime.ts.
+  timezone                    String             @default("Europe/London")
+  senderName                  String // transactional email sender identity
+  senderEmail                 String
+  searchPlaceholder           String? // header search-box copy, e.g. "Search halal lamb, basmati, lentils…"
+  // P7.5c+f (#239) — per-vendor storefront copy. Both nullable, and a null HIDES
+  // its element rather than falling back to neutral filler: platform-written
+  // marketing is still a claim made on a vendor's behalf, and the copy these
+  // replaced ("100% Certified HMC Halal Fresh Meat Cut Daily", "Same-Day Local
+  // Dispatch") was rendering for every vendor, SriMart included.
+  bannerNote                  String? // header's second banner line
+  // #1078 — the header banner's FIRST line. Unlike bannerNote, null does not hide it: null keeps the
+  // line derived from this vendor's own name and locality (components/layout/Header.tsx), which is
+  // vendor data rather than platform-written copy. A set value replaces it as plain text.
+  bannerHeadline              String?
+  heroSubtitle                String? // hero's supporting paragraph, under the tagline
+  // P9.2 (#407, #405) — per-vendor social and contact identity, same null rule as the two
+  // lines above: a null HIDES that link rather than falling back to a platform default. A
+  // platform-written social link is a claim made on a vendor's behalf, which is exactly what
+  // #239 fixed. Both URLs are validated https-only on write (lib/social-contact-form.ts) —
+  // they are the first vendor-editable values in this repo that land inside an href.
+  facebookUrl                 String? // full https profile URL
+  instagramUrl                String? // full https profile URL
+  whatsappNumber              String? // digits only, E.164 without the leading +, for wa.me
+  // #1233 — per-vendor WhatsApp community group invite URL and QR code object key for
+  // /whatsapp-offers. Same null-hides rule (#239): a vendor without a WhatsApp group shows
+  // neither the top community banner nor the bottom WhatsApp CTA on /whatsapp-offers.
+  // whatsappCommunityUrl is validated https://chat.whatsapp.com/<invite-code> on write;
+  // whatsappCommunityQrKey is a relative object-storage key (ADR-003).
+  whatsappCommunityUrl        String?
+  whatsappCommunityQrKey      String?
+  // #1055 — storefront footer identity, same null rule as the social links above: a null HIDES
+  // that footer element rather than falling back to a platform default (#239). Bracketed
+  // placeholders such as "[YOUR EMAIL]" are legal values (approved defaults) and render as text;
+  // the footer only builds a tel:/mailto: href from a value that passes the real format check.
+  contactPhone                String?
+  contactEmail                String?
+  companyNumber               String?
+  vatNumber                   String?
+  registeredOffice            String?
+  openingHoursNote            String? // line under the opening hours
+  showSecureCheckoutNote      Boolean            @default(false) // "Secure checkout powered by Stripe"
+  // P3a — delivery rules are vendor data, never constants (the AI Studio mockup hardcoded a
+  // £30 threshold). Prisma-level defaults mean a newly-inserted vendor is valid without the
+  // seed supplying values. P3a reads only the threshold (cart banner); applying the fee and
+  // the minimum to a payable total is P3b.
+  deliveryFeePence            Int                @default(349)
+  freeDeliveryThresholdPence  Int? // null = free delivery never offered
+  minimumOrderPence           Int                @default(0) // 0 = no minimum
+  // #1083 — Click & Collect's own minimum, separate from the delivery minimum above, which exists to
+  // cover a van run collection does not need. 0 = no minimum, the same convention. The default is
+  // the owner's ruling; before this column, collection silently inherited the delivery minimum.
+  collectionMinimumOrderPence Int                @default(0)
+  offerCollection             Boolean            @default(false)
+  // P5a — loyalty settings are vendor data for the same reason the delivery rules
+  // above are (#135). Defaults mean an existing VendorConfig row stays valid with
+  // no backfill, and loyaltyEnabled defaults OFF so the feature ships dark for any
+  // vendor that hasn't opted in.
+  loyaltyEnabled              Boolean            @default(false)
+  // #1015 — the guided help assistant. OFF by default for the same reason loyalty is: it ships
+  // dark everywhere, and a store admin turns it on at /staff/assistant. It renders only when
+  // whatsappNumber is also set, because the WhatsApp handoff is half of what it does.
+  assistantEnabled            Boolean            @default(false)
+  // #1134 — whether this store asks shoppers for marketing consent (/register, /account/data,
+  // /privacy). OFF by default so it ships dark; a store admin turns it on at /staff/storefront.
+  marketingConsentEnabled     Boolean            @default(false)
+  bookingWindowDays           Int                @default(14)
+  slotHoldDurationMinutes     Int                @default(15)
+  offerDeliverySlots          Boolean            @default(false)
+  expressCollectionEnabled    Boolean            @default(false)
+  pointsPerPoundEarned        Int                @default(1) // points per whole £1 of eligible spend
+  pencePerPointRedeemed       Int                @default(1) // 100 points = £1
+  minRedeemPoints             Int                @default(100) // below this, redemption isn't offered
+  tierWindowDays              Int                @default(30) // rolling window tier qualification looks back over
+  pointsExpiryMonths          Int? // null = points never expire
+  // #905 — which of Product's six label booleans this vendor's staff product form offers. They
+  // gate the STAFF FORM only: the storefront stays data-driven (a badge/facet shows only where a
+  // product carries the flag), and switching one off keeps every product's stored value —
+  // features/admin/catalogue.ts strips a disabled label from the write rather than saving false.
+  // Default false, so a new vendor sees none until an admin opts in; the migration backfilled
+  // existing vendors from their own products. HMC is only offered while Halal is too.
+  showHalalLabel              Boolean            @default(false)
+  showFreshLabel              Boolean            @default(false)
+  showOrganicLabel            Boolean            @default(false)
+  showVegetarianLabel         Boolean            @default(false)
+  showGlutenFreeLabel         Boolean            @default(false)
+  showHmcCertification        Boolean            @default(false)
+  // #905 — what this store sells, in the admin's own words (max 200 chars, one line). Given to
+  // the AI prompts (list normalisation, synonym proposals, net-content suggestions) in place of
+  // a hardcoded "grocery" framing; null = neutral wording.
+  storeDescription            String?
+  // #962 — how dense this vendor's product listings are. A preset, never a free column count:
+  // Tailwind cannot build grid-cols-* from runtime values, and a free number allows layouts that
+  // break the card. Each preset maps to one static class string in lib/product-grid-density.ts.
+  productGridDensity          ProductGridDensity @default(STANDARD)
+  // #1017 — this vendor's share of the platform's one Workers AI account, in neurons per UTC day
+  // (Cloudflare's allowance resets at 00:00 UTC). Every AI call is checked against it and recorded
+  // in AiUsageEvent; 0 turns AI off for this vendor. A row value, not a constant, so the owner can
+  // change one vendor's figure with scripts/ai-usage.ts and no deploy.
+  aiDailyNeuronBudget         Int                @default(3000)
+  createdAt                   DateTime           @default(now())
+  updatedAt                   DateTime           @updatedAt
+}
+
+// #962 — product listing density presets; see VendorConfig.productGridDensity.
+enum ProductGridDensity {
+  COMPACT
+  STANDARD
+  SPACIOUS
+}
+
+// P5a — per-vendor loyalty tiers (#135). A shopper's tier is resolved from their
+// qualifying spend over VendorConfig.tierWindowDays; the highest threshold at or
+// below that spend wins. Multipliers are BASIS POINTS (10000 = 1.0x) — integer
+// arithmetic end to end, for the same reason money is pence.
+model VendorLoyaltyTier {
+  id             String   @id @default(uuid())
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  key            String // stable identifier, e.g. "SILVER"
+  name           String // display name
+  thresholdPence Int // qualifying spend at or above which this tier applies
+  multiplierBps  Int      @default(10000)
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([vendorId, key])
+  @@index([vendorId, thresholdPence])
+}
+
+model VendorDeliveryArea {
+  id       String @id @default(uuid())
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  prefix   String // postcode area ("MK", every district in it) or district ("MK9", exactly that one)
+
+  // #890 — per-area delivery money overrides, integer pence. null = use the matching VendorConfig
+  // default. 0 keeps VendorConfig's meaning: free delivery / no minimum / free delivery never
+  // offered here. Resolved by lib/delivery-pricing.ts; a district row beats an area row.
+  deliveryFeePence           Int?
+  minimumOrderPence          Int?
+  freeDeliveryThresholdPence Int?
+
+  @@unique([vendorId, prefix])
+}
+
+// #889 — how often a real postcode this vendor does not serve was entered, per outward-code
+// district per vendor-local day per surface. Aggregate only: no user, session, full postcode,
+// cookie or IP, so it is not personal data and sits outside data-rights export/erasure.
+model DeliveryRefusalCount {
+  id       String                @id @default(uuid())
+  vendorId String
+  vendor   Vendor                @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  district String
+  day      DateTime              @db.Date
+  source   DeliveryRefusalSource
+  count    Int                   @default(0)
+
+  @@unique([vendorId, district, day, source])
+}
+
+enum DeliveryRefusalSource {
+  HEADER
+  CHECKOUT
+}
+
+// ADR-006: Physical store location. Enforced 1:1 via unique(vendorId) for #402.
+model VendorLocation {
+  id           String   @id @default(uuid())
+  vendorId     String   @unique
+  vendor       Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  postcode     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// P2a — catalogue browsing (specs/2026-08-07-p2a-catalogue-browsing/). Matches the
+// representative schema already designed in specs/architecture.md §3.2.
+model Category {
+  id               String              @id @default(uuid())
+  vendorId         String
+  vendor           Vendor              @relation(fields: [vendorId], references: [id])
+  slug             String
+  name             String
+  parentId         String?
+  parent           Category?           @relation("Sub", fields: [parentId], references: [id])
+  children         Category[]          @relation("Sub")
+  sortOrder        Int                 @default(0)
+  isActive         Boolean             @default(true)
+  // #1135 — shoppers may attach a note to a basket line for products in this category (and its
+  // sub-categories). Decided by lib/custom-note.ts's productAcceptsNote, nowhere else.
+  allowsCustomNote Boolean             @default(false)
+  // #1278 — relative storage key for realistic category photography (ADR-003; never a URL)
+  imageKey         String?
+  products         Product[]
+  campaign         DepartmentCampaign?
+  assets           CategoryAsset[]
+
+  @@unique([vendorId, slug])
+  @@unique([id, vendorId])
+  @@index([vendorId, parentId, isActive])
+}
+
+// P8.5e (#356) — staff-editable hero campaign content, one row per top-level
+// Category. Reopens the "general campaign surface" ADR-004 (decision 5, 1.7.0)
+// named as future work, this time with the staff UI that made the deleted
+// VendorPromotion (P8.5b, #346) inert. `headline`/`subtitle` are free text —
+// a deliberate, narrow exception to "promotional content is data" (ADR-004
+// 1.8.0) — while `imageKey`/`linkUrl`/the schedule stay structured, and
+// `DepartmentHero` always renders the real product-price callout alongside a
+// campaign's copy regardless.
+model DepartmentCampaign {
+  id         String    @id @default(uuid())
+  vendorId   String
+  vendor     Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  categoryId String    @unique
+  category   Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  headline   String
+  subtitle   String?
+  imageKey   String? // RELATIVE key only (ADR-003) — never a URL
+  altText    String? // required by jsx-a11y whenever imageKey is set
+  linkUrl    String? // relative path only, e.g. "/categories/household?isOffer=true"
+  isActive   Boolean   @default(true)
+  startsAt   DateTime?
+  endsAt     DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  // Serves both queries this model has: "this vendor's active campaigns" (the
+  // hero read) and "does this category already have a campaign" (categoryId
+  // is unique, so a lookup by it alone is already indexed).
+  @@index([vendorId, isActive])
+}
+
+// #1285 — multi-candidate category and UI system icon assets (review, select, delete, gallery)
+model CategoryAsset {
+  id         String    @id @default(uuid())
+  vendorId   String
+  vendor     Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  slot       String?   // e.g. "delivery-van", "storefront", "quick-shop", "user-profile", "cart-floating", etc.
+  storageKey String    // relative key in R2
+  style      String    // "photo" | "3d-icon"
+  isSelected Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+
+  @@index([vendorId, categoryId])
+  @@index([vendorId, slot])
+}
+
+// P8.5c (#347) — a curated BUNDLE is a vendor-authored list of products already
+// in the catalogue, which "Add all N to basket" expands into ordinary CartItem
+// rows. It is deliberately NOT a purchasable SKU: that shape would need its own
+// inventory, its own decrement inside placeOrder's transaction, and its own
+// cases in refunds, loyalty and discounts — four subsystems changed to sell
+// three things the catalogue already holds.
+//
+// THERE IS NO STORED PRICE OR SAVING HERE, and that is the whole design.
+// A bundle's total is summed from its constituents' live Product.basePrice at
+// read time (lib/bundle-pricing.ts), so it can never drift out of date the way
+// a copied price would. The accepted cost: the figure cannot be hand-set, so a
+// genuine "save £4.50" needs a mechanism that actually reduces the charge —
+// that is P8.5d (#348), auto-applied quantity-triggered tier pricing, and it is
+// NOT built. Until it is, the storefront shows the derived total and makes no
+// savings claim at all rather than render a number with nothing behind it.
+model Bundle {
+  id        String       @id @default(uuid())
+  vendorId  String
+  vendor    Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  slug      String
+  name      String
+  tagline   String?
+  imageKey  String? // RELATIVE key only (ADR-003) — never a URL
+  altText   String? // required by jsx-a11y whenever imageKey is set
+  isActive  Boolean      @default(true)
+  sortOrder Int          @default(0)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  items     BundleItem[]
+
+  @@unique([vendorId, slug])
+  @@index([vendorId, isActive])
+}
+
+// One constituent line of a bundle. `quantity` is how many of that product the
+// bundle contributes, which is what makes "2 x 60g packs" expressible as data
+// rather than as the prototype's free-text label.
+//
+// @@unique([bundleId, productId]) keeps a product from appearing twice in one
+// bundle. sumLinesByProduct (lib/cart-rules.ts) would collapse duplicates
+// safely at add time anyway, but two rows for one product would render as two
+// visually identical constituent entries, which is a data defect, not a
+// rendering one.
+model BundleItem {
+  id        String  @id @default(uuid())
+  bundleId  String
+  bundle    Bundle  @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  sortOrder Int     @default(0)
+
+  @@unique([bundleId, productId])
+  @@index([bundleId, sortOrder])
+}
+
+// #398 (derivation half, P9.3) — Product.netContentUnit. Covers mass, volume and countable
+// items; a product with no unit here simply keeps rendering unitLabel as free text, exactly as
+// every existing product does today.
+enum NetContentUnit {
+  GRAM
+  KILOGRAM
+  MILLILITRE
+  LITRE
+  EACH
+}
+
+model Product {
+  id                        String                       @id @default(uuid())
+  vendorId                  String
+  vendor                    Vendor                       @relation(fields: [vendorId], references: [id])
+  slug                      String
+  name                      String
+  description               String
+  categoryId                String
+  category                  Category                     @relation(fields: [categoryId, vendorId], references: [id, vendorId])
+  basePrice                 Int // pence
+  unitLabel                 String // "£2.40 / kg"
+  // #398 (derivation half, P9.3) — net content, so unitLabel's implied price can be CHECKED
+  // rather than typed freehand (UK Price Marking Order exposure). Both nullable: most existing
+  // products carry neither and must keep working on unitLabel alone (R34). The amount is a WHOLE
+  // NUMBER in netContentUnit's own unit (e.g. netContentAmount=500, netContentUnit=GRAM for
+  // "500g") rather than a fractional amount in a coarser one — a half-kilogram product is entered
+  // as 500 GRAM, never 0.5 KILOGRAM, so no float is ever stored here either.
+  netContentAmount          Int?
+  netContentUnit            NetContentUnit?
+  // THE DENORMALISED SORT KEY ONLY (R30/R32) — recomputed by lib/repositories/products.ts on
+  // every create/update from basePrice and the two columns above, via
+  // components/product/unit-price.ts's deriveUnitPricePenceForSort(). NEVER read for display:
+  // the customer-facing unit price is computed fresh at render time by the same file's
+  // deriveUnitPriceLabel(), directly from basePrice and net content, so a rounding artefact in
+  // this column can never reach a price a shopper actually reads. Null whenever net content is.
+  unitPricePencePerBaseUnit Int?
+  isActive                  Boolean                      @default(true)
+  // #1211 (ADR-007) — why this product may not be sold yet. Null = unrestricted. A restricted
+  // product is NEVER active: the migration adds CHECK "Product_restricted_inactive_check", which
+  // Prisma cannot model, so the rule holds below the application too. PROHIBITED and
+  // AGE_RESTRICTED are hard blocks with no override path; the other two clear only through an
+  // audited ADMIN confirmation (lib/product-restriction.ts).
+  restriction               ProductRestriction?
+  restrictionAuditLogs      ProductRestrictionAuditLog[]
+  // #1135 — this product takes a shopper note even when its category does not.
+  allowsCustomNote          Boolean                      @default(false)
+  createdAt                 DateTime                     @default(now())
+  images                    ProductImage[]
+  netContentSuggestions     NetContentSuggestion[]
+  inventory                 Inventory?
+  reviews                   Review[]
+  favourites                Favourite[]
+  cartItems                 CartItem[]
+  orderItems                OrderItem[]
+  bundleItems               BundleItem[]
+  priceTier                 ProductPriceTier?
+  attributeValues           ProductAttributeValue[]
+  averageRating             Float                        @default(0) // denormalized, recomputed on every review write
+  reviewCount               Int                          @default(0)
+  // P2.5b1 — visual redesign foundation (specs/2026-08-07-p2-5b1-visual-foundation/).
+  // originalPrice, when set, is basePrice's pre-discount price — a discount badge is
+  // derived from the difference at render time, not a separate boolean flag that could
+  // drift out of sync with the actual prices.
+  origin                    String?
+  originalPrice             Int? // pence, pre-discount price
+  isHalal                   Boolean                      @default(false)
+  isFresh                   Boolean                      @default(false)
+  isOrganic                 Boolean                      @default(false)
+  // P2.6 slice 6 (#569) — dietary facets, deliberately the same boolean shape as the
+  // three flags above rather than a generic attribute model. An attribute table would
+  // make every facet an EXISTS join, harder to index, and would fork the codebase so
+  // isHalal and isVegetarian are queried two different ways for no gain a shopper sees.
+  isVegetarian              Boolean                      @default(false)
+  isGlutenFree              Boolean                      @default(false)
+  // HMC is a NAMED THIRD-PARTY CERTIFYING BODY, not a synonym for isHalal, and #239 was
+  // a real incident where this codebase asserted "100% Certified HMC Halal" for a vendor
+  // with no basis for it. So the flag never travels alone: lib/catalogue-form.ts requires
+  // both fields below when it is ticked, and nulls both when it is not. A certification
+  // claim with no provenance behind it is exactly what that rule exists to prevent.
+  isHmcCertified            Boolean                      @default(false)
+  hmcReference              String?
+  hmcVerifiedAt             DateTime?
+  brandId                   String?
+  brand                     Brand?                       @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  // #211 — vendor curation flag driving the homepage "Featured Products" rail.
+  // Independent of originalPrice's discount-badge derivation: featured and
+  // "on offer" are two separate concepts.
+  isFeatured                Boolean                      @default(false)
+  imageNeedsReview          Boolean                      @default(false)
+  // #523 — how many times the image pipeline has tried this product and failed.
+  //
+  // Workers AI permanently refuses some legitimate names: `Halal Chicken Thighs 1kg`
+  // returned `AiError: Input prompt contains NSFW content` on every attempt. Without a
+  // record of that, `getProductsWithoutImages` — newest-first and BOUNDED — re-selects
+  // the same doomed product on every scheduled run, consumes one of the run's slots,
+  // fails, and never reaches the products that could actually have been filled, while
+  // the job still reports success. The counter is what lets the selection give up.
+  //
+  // Reset to 0 whenever an image is successfully saved, so a product that later loses
+  // its image is retried rather than being permanently excluded by a historic failure.
+  imageAttemptFailures      Int                          @default(0)
+
+  @@unique([vendorId, slug])
+  @@index([vendorId, categoryId, isActive])
+  @@index([vendorId, isActive, basePrice]) // catalogue filter + sort
+  @@index([vendorId, isActive, isFeatured]) // homepage featured rail
+  // #398 (derivation half) — the derived unit-price sort key (R30/R37). No storefront sort
+  // control reads it yet (plan.md step 4 leaves that to P10's cursor work); this is what makes
+  // it genuinely queryable, proven by scripts/verify-unit-price-sort.ts.
+  @@index([vendorId, isActive, unitPricePencePerBaseUnit])
+  // #569 — the two new HIGH-cardinality facet predicates. The dietary booleans get no
+  // index of their own, matching isHalal/isFresh/isOrganic: a boolean splits the table
+  // roughly in half, so an index earns little and costs on every write.
+  @@index([vendorId, isActive, brandId])
+  @@index([vendorId, isActive, origin])
+  // #670 part 3 — the ORDERING every product list actually uses. findPage,
+  // listInventoryForStaff and listProductsForAdmin all sort (createdAt desc, id desc),
+  // and nothing above supports it: #503's EXPLAIN showed Seq Scan plus top-N heapsort
+  // over every row on each list page. Order has carried the equivalent
+  // @@index([vendorId, createdAt]) since P3b; Product never got one. Insurance rather
+  // than a present emergency at ~2,000 rows, per architecture.md's rule that every list
+  // is keyset-paginated AND every hot query has an index.
+  @@index([vendorId, createdAt, id])
+}
+
+// ---- P8.5d — Multi-buy tier pricing (#348) ----------------------------------
+
+/// A product's multi-buy tier: `groupQuantity` units for `groupPricePence`.
+/// "3 for £10.00". Applied automatically with nothing typed.
+///
+/// THIS IS A PRICE, NOT A DISCOUNT, and deliberately so. A codeless
+/// DiscountCode was rejected at /propose on three counts: DiscountRedemption
+/// has @@unique([orderId]) so an order carries at most one redemption row;
+/// evaluateCode (lib/discounts.ts) is subtotal-scoped and cannot express a
+/// per-line quantity predicate; and #273 exists because redemption rows were
+/// once written around placeOrder's transaction. Pricing a line differently
+/// leaves the whole discounts engine — its audit trail and both its concurrency
+/// guarantees — untouched. OrderItem already stores unitPricePence and
+/// lineTotalPence separately, so the per-order audit record needed no change.
+///
+/// A GROUP price, not a reduced unit price, because "3 for the price of 2" has
+/// no exact unit price: on a £5 item that is 1000/3 = 333p, charging £9.99
+/// forever. Groups are exact integer pence at every quantity. The arithmetic
+/// (whole groups at groupPricePence, remainder units at basePrice, clamped so a
+/// mistyped tier can never charge MORE than base) lives in lib/tier-pricing.ts.
+///
+/// EXACTLY ONE TIER PER PRODUCT, via @@unique([vendorId, productId]). Two
+/// concurrent multi-buys on one product ("3 for £10" and "5 for £15") would make
+/// a line total an optimal-packing problem with more than one defensible answer;
+/// one row makes the arithmetic unambiguous by construction. Editing a live tier
+/// is safe because orders snapshot OrderItem.lineTotalPence and never recompute.
+///
+/// No startsAt/endsAt: date windowing would re-open the hardcoded vendor
+/// timezone (#363), which P8.5f had just finished fixing a campaign date bug
+/// over. isActive only until #363 is resolved.
+model ProductPriceTier {
+  id              String   @id @default(uuid())
+  vendorId        String
+  vendor          Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// @unique carries the one-tier-per-product rule on its own (a product belongs
+  /// to exactly one vendor, so per-product and per-vendor-product mean the same
+  /// thing here) and is what lets `Product.priceTier` be a true 1-1. The
+  /// composite @@unique below is kept anyway: it is the index every vendor-scoped
+  /// read actually goes through, since R12a requires vendorId in the where clause
+  /// rather than trusting a bare productId lookup.
+  productId       String   @unique
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// Units per group. Always >= 2 — 1 would be a markdown, which is
+  /// Product.originalPrice's job. lib/tier-pricing.ts refuses anything lower.
+  groupQuantity   Int
+  /// Pence charged for one whole group.
+  groupPricePence Int
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([vendorId, productId])
+  @@index([vendorId, isActive])
+}
+
+// #900 — where an image came from, so an AI step can tell a real photo of the pack from an
+// image generated FROM the product's own name (reading a size off that just echoes the name) or
+// an Open Food Facts keyword match (possibly another product or size). Only STAFF_UPLOAD and
+// STAFF_CONFIRMED_PHOTO count as photo evidence. Every row that existed before #900 is UNKNOWN:
+// provenance is never backfilled by guessing from a storage key.
+enum ProductImageSource {
+  UNKNOWN
+  STAFF_UPLOAD
+  STAFF_CONFIRMED_PHOTO
+  OPEN_FOOD_FACTS
+  AI_GENERATED
+  PLACEHOLDER
+}
+
+model ProductImage {
+  id                    String                 @id @default(uuid())
+  productId             String
+  product               Product                @relation(fields: [productId], references: [id])
+  storageKey            String // RELATIVE key only — never a URL
+  alt                   String
+  sortOrder             Int                    @default(0)
+  isPrimary             Boolean                @default(false)
+  source                ProductImageSource     @default(UNKNOWN)
+  netContentSuggestions NetContentSuggestion[]
+
+  @@index([productId, sortOrder])
+}
+
+enum NetContentSuggestionStatus {
+  PENDING
+  ACCEPTED
+  EDITED
+  REJECTED
+  NO_ANSWER
+}
+
+enum NetContentEvidenceSource {
+  PHOTO
+  NAME
+  UNIT_LABEL
+  /// #928 — quoted from the first 500 characters of Product.description.
+  DESCRIPTION
+}
+
+enum UnitLabelCheck {
+  AGREES
+  DISAGREES
+  NOT_CHECKABLE
+}
+
+/// #900 — an AI-proposed net content for one product, PROPOSED, NEVER APPLIED: nothing reaches
+/// Product.netContentAmount/Unit until a staff member accepts or edits it on /staff/net-content.
+/// Written only by scripts/suggest-net-content.ts (offline, bounded), one row per model reply.
+///
+/// NO_ANSWER rows carry null value fields and exist so coverage is measurable and a product is
+/// not re-attempted on every run. A transport failure (throttle, timeout) writes NO row, so a
+/// transient fault never marks a product as attempted.
+///
+/// `model` is recorded per row so two models can be compared on the same catalogue — the
+/// suggester is model-agnostic by design (lib/net-content-suggester.ts).
+model NetContentSuggestion {
+  id               String                     @id @default(uuid())
+  vendorId         String
+  vendor           Vendor                     @relation(fields: [vendorId], references: [id])
+  productId        String
+  product          Product                    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productImageId   String?
+  productImage     ProductImage?              @relation(fields: [productImageId], references: [id], onDelete: SetNull)
+  amount           Int?
+  unit             NetContentUnit?
+  confidence       Int?
+  evidenceSource   NetContentEvidenceSource?
+  evidenceText     String?
+  unitLabelCheck   UnitLabelCheck?
+  model            String
+  latencyMs        Int
+  inputTokens      Int?
+  outputTokens     Int?
+  status           NetContentSuggestionStatus
+  finalAmount      Int?
+  finalUnit        NetContentUnit?
+  reviewedByUserId String?
+  reviewedBy       User?                      @relation("NetContentReviewer", fields: [reviewedByUserId], references: [id])
+  reviewedAt       DateTime?
+  createdAt        DateTime                   @default(now())
+
+  @@index([vendorId, status])
+  @@index([productId])
+}
+
+model Inventory {
+  id                  String    @id @default(uuid())
+  vendorId            String
+  vendor              Vendor    @relation(fields: [vendorId], references: [id])
+  productId           String    @unique
+  product             Product   @relation(fields: [productId], references: [id])
+  quantity            Int       @default(0)
+  lowStockThreshold   Int       @default(3)
+  // #876 — a CALENDAR DAY, not an instant: the UTC midnight of the vendor-local day staff expect
+  // the product back, the same convention as Order.fulfilmentDate (#811). Read and write it only
+  // through lib/local-datetime.ts's calendar-day helpers. Null = no expected date.
+  expectedRestockDate DateTime?
+  // #1211 (ADR-007 Decision 4) — whether `quantity` means anything. UNKNOWN is the default so a
+  // code path that creates a row without choosing fails CLOSED (unbuyable), never open. Rows that
+  // existed before the migration were given TRACKED, which is how they already behaved. Only
+  // lib/cart-rules.ts's purchasableQuantity() turns this into "can a shopper buy it".
+  stockMode           StockMode @default(UNKNOWN)
+  updatedAt           DateTime  @updatedAt
+
+  @@index([vendorId])
+}
+
+/// #1211 (ADR-007) — the restriction classes, most severe first. Severity order is load-bearing:
+/// a restriction may be tightened but never loosened except by an audited clear.
+enum ProductRestriction {
+  PROHIBITED
+  AGE_RESTRICTED
+  NOT_DELIVERABLE
+  NEEDS_REVIEW
+}
+
+/// #1211 — storefront purchase states only; this is NOT stock management (ADR-007 Decision 1).
+enum StockMode {
+  UNKNOWN
+  TRACKED
+  UNTRACKED
+}
+
+enum ProductRestrictionAuditAction {
+  RESTRICTION_SET
+  RESTRICTION_CLEARED
+}
+
+enum ProductRestrictionChangeSource {
+  PRODUCT_FORM
+  BULK_ACTION
+  IMPORT
+}
+
+/// #1211 — append-only record of every restriction decision. Nothing in the application updates
+/// or deletes a row (tests/product-restriction-audit-append-only.test.ts). productId has no
+/// onDelete, so the database refuses to delete a product with a trail; no application path deletes
+/// products. A null actorUserId means the change was written by a catalogue import.
+model ProductRestrictionAuditLog {
+  id              String                         @id @default(uuid())
+  vendorId        String
+  vendor          Vendor                         @relation(fields: [vendorId], references: [id])
+  productId       String
+  product         Product                        @relation(fields: [productId], references: [id])
+  action          ProductRestrictionAuditAction
+  fromRestriction ProductRestriction?
+  toRestriction   ProductRestriction?
+  actorUserId     String?
+  actor           User?                          @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  source          ProductRestrictionChangeSource
+  reason          String?
+  createdAt       DateTime                       @default(now())
+
+  @@index([vendorId, productId, createdAt])
+}
+
+// P2.5a — ratings & reviews (specs/2026-08-07-p2-5a-ratings-reviews/). One review
+// per user per product; resubmitting updates the existing row. Product's
+// averageRating/reviewCount are denormalized and recomputed on every write.
+model Review {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating    Int // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([vendorId, userId, productId])
+  @@index([vendorId, productId, createdAt])
+}
+
+// P10 (#232) — a product a shopper wants to come back to. Shown as "Favourites"; P6.6 called the
+// same obligation a wishlist, and that word survives only in the older spec.
+//
+// SHAPED ON `Review` ABOVE, deliberately: it is the existing precedent for a vendor-scoped row
+// keyed by user AND product, and it already carries the composite unique this needs. The two differ
+// only in payload — a review has a rating and a comment, a favourite has nothing but its own
+// existence, so the row IS the fact.
+//
+// AUTHENTICATED-ONLY, by owner decision at Gate 1 (2026-10-20). `userId` is a plain required FK
+// rather than the nullable user/guest-token pair `Cart` carries. A guest cart exists because an
+// anonymous shopper must be able to buy; a guest favourite would need a second guest-ownership
+// lifecycle, a merge-on-sign-in path and an orphan sweep, for a feature whose whole value is
+// returning later. The storefront shows a guest a sign-in link where the toggle would be, which is
+// the same split `ShoppingList` already uses.
+//
+// `onDelete: Cascade` ON ALL THREE RELATIONS. A favourite is meaningless without its product, its
+// owner or its vendor, and nothing reads it after any of the three is gone — unlike `Review`, whose
+// product and vendor relations deliberately restrict, because deleting a product that carries
+// published reviews should not silently discard them. Products are not hard-deleted by the app
+// today (only `ProductPriceTier` is), so this is a correctness guarantee rather than a hot path.
+//
+// THE UNIQUE CONSTRAINT IS THE CONCURRENCY CONTROL, not just a data-integrity rule. Two taps racing
+// each other both try to insert; the loser's duplicate-key error is treated as success, because the
+// product ends up favourited either way. `isDuplicateFavourite` in lib/favourites.ts owns that
+// decision, and it must accept BOTH codes the two Prisma adapters report (raw SQLSTATE "23505" and
+// Prisma's P2002) — see CLAUDE.md and scripts/verify-favourites.ts, which observes a real one.
+//
+// The index leads with the read path: "this shopper's favourites for this vendor, newest first".
+model Favourite {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([vendorId, userId, productId])
+  @@index([vendorId, userId, createdAt])
+}
+
+// P9.2 (#818) — business-level customer feedback, moderated before publication.
+//
+// NOT AN EXTENSION OF `Review` ABOVE, DELIBERATELY. That model is per-PRODUCT: `productId`
+// is required, it is part of the unique key, and every write recomputes
+// `Product.averageRating` inside a transaction (lib/repositories/reviews.ts). Making
+// `productId` nullable to reuse it would break the unique constraint's meaning and push a
+// null branch through that aggregate recompute. This is feedback about the SHOP, and it has
+// a moderation lifecycle `Review` has never had — product reviews publish on submit and
+// remain unmoderated, whatever #406's body claimed.
+//
+// ONE ROW PER CUSTOMER PER VENDOR, written as an upsert, the same shape as `upsertReview`.
+// A customer replaces their own feedback rather than accumulating rows, which is also the
+// duplicate control: flooding the moderation queue would need many accounts, not many posts.
+//
+// EDITING RESETS `status` TO PENDING and clears the moderation stamp. Without that,
+// approve-then-edit publishes text no one approved — a complete bypass of the only content
+// control this feature has. See lib/repositories/customer-feedback.ts.
+//
+// `verifiedPurchase` IS A SNAPSHOT, not a derivation. It is recomputed server-side on every
+// submit and edit from the customer's own DELIVERED/COLLECTED orders, and never read from
+// the client. Published text and its badge should not silently change months later because
+// order history moved; the moment a customer edits is the moment they re-assert the content.
+//
+// A purchase is NOT required to submit. The badge is the only thing it earns.
+enum FeedbackStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model CustomerFeedback {
+  id               String         @id @default(uuid())
+  vendorId         String
+  vendor           Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Display form captured at submit ("Sarah M."), not re-derived at render: a later account
+  // rename must not silently rewrite words already published under the old name.
+  authorName       String
+  rating           Int // 1-5
+  comment          String?
+  verifiedPurchase Boolean        @default(false)
+  status           FeedbackStatus @default(PENDING)
+  // The moderating staff user. SetNull rather than Cascade — a staff member leaving must not
+  // delete the customer feedback they once approved.
+  moderatedById    String?
+  moderatedBy      User?          @relation("FeedbackModerator", fields: [moderatedById], references: [id], onDelete: SetNull)
+  moderatedAt      DateTime?
+  // Internal only. Never rendered on any public surface.
+  moderationNote   String?
+  // SHA-256 of the submitter's IP, never the raw address — same reasoning as
+  // OrderLookupAttempt below. Abuse forensics only.
+  ipHash           String?
+  // Distinct from createdAt: an edit moves this, and both the per-row edit throttle and the
+  // storefront's newest-first ordering read it.
+  submittedAt      DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@unique([vendorId, userId])
+  @@index([vendorId, status, submittedAt])
+}
+
+// P9.2 (#818) — write-attempt counter for the feedback throttle. Deliberately the same shape
+// as OrderLookupAttempt and AuthenticationAttempt: one row per attempt, hashed IP, counted
+// over a window and swept by age, backed by Postgres because no Cloudflare rate-limiting
+// binding is provisioned.
+//
+// Counts submits AND edits identically. Throttling submission alone would convert flooding
+// into edit churn through the moderation queue, which costs a human the same attention.
+model CustomerFeedbackAttempt {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, ipHash, createdAt])
+}
+
+// P9.2 (#818) — outbound links to external review platforms. LINKS ONLY: nothing in this
+// application fetches, syncs, caches or displays review content from Google, Trustpilot or
+// anywhere else, and that is a standing boundary rather than a not-yet.
+//
+// A TABLE RATHER THAN COLUMNS ON VendorConfig, because the ask named "other future review
+// platforms" explicitly. Adding one is then data, not a migration, and no platform name is
+// compiled into the application. `platform` is the vendor's own label for the destination.
+//
+// A vendor with no active rows renders no link group at all (#239's null-hides rule).
+model VendorReviewLink {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  platform  String
+  // Validated https-only on write via parseSocialUrl (lib/social-contact-form.ts) — these are
+  // vendor-editable values that land inside an href, and `new URL("javascript:...")` parses.
+  url       String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([vendorId, platform])
+  @@index([vendorId, isActive, sortOrder])
+}
+
+// P10 (#1012) — the per-vendor approved-answer corpus. The prerequisite for every answering
+// surface, AI or not: before this existed the only shopper-facing document on the platform was
+// one hedged markdown page (`docs/shopper-help/shopping-guide.md`) serving every tenant at once.
+//
+// A TABLE RATHER THAN REPO MARKDOWN, for the reason #239 and ADR-004 already settled: an answer
+// is a claim, and a claim made on a vendor's behalf by the platform is the defect those fixed.
+// Aheed sells groceries and SriMart sells electronics; one authored set cannot serve both. The
+// rows are the vendor's own words, entered on /staff/faqs, and NOTHING here is seeded — see
+// `#1021` for the content itself.
+//
+// Shaped on VendorReviewLink above: same vendor-scoped-rows posture, same sortOrder/isActive
+// pair, so adding an answer is data rather than a migration or a deploy.
+//
+// A vendor with no active rows renders no FAQ section at all (#239's null-hides rule). There is
+// deliberately no platform-authored fallback answer.
+//
+// WHY THE UNIQUE KEY IS (vendorId, question) BUT WRITES ARE KEYED BY id. The unique stops one
+// vendor holding the same question twice, which is a data-quality rule worth having. It is NOT
+// the write key, because editing a question's wording would then orphan its answer into a new
+// row rather than correcting it — the one place this deliberately departs from
+// VendorReviewLink, whose `platform` label is short and stable in a way a question is not.
+// `lib/repositories/vendor-faqs.ts` therefore updates via `updateMany` on (id, vendorId).
+model VendorFaq {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  question  String
+  answer    String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([vendorId, question])
+  @@index([vendorId, isActive, sortOrder])
+}
+
+// P3a — cart foundation (specs/2026-08-09-p3a-cart-foundation/, #93).
+// One cart per (vendor, identity): shopping at two vendors gives two independent
+// carts, which falls straight out of ADR-004 row-level tenancy.
+// Identity is EXACTLY ONE of userId / guestToken — a guest cart is keyed by an
+// opaque token in a host-only cookie, and is merged into the account cart only
+// when the shopper explicitly chooses (never silently).
+model Cart {
+  id         String     @id @default(uuid())
+  vendorId   String
+  vendor     Vendor     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestToken String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  items      CartItem[]
+
+  @@unique([vendorId, userId])
+  @@unique([vendorId, guestToken])
+  @@index([vendorId])
+}
+
+// Deliberately stores NO price. Price is read from Product at render time and is
+// snapshotted into OrderItem at order creation (P3b) — a cart that cached prices
+// would silently serve stale money after a price change.
+model CartItem {
+  id         String   @id @default(uuid())
+  cartId     String
+  cart       Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  vendorId   String
+  vendor     Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  quantity   Int
+  // #1135 — normalised shopper note (lib/custom-note.ts); null when there is none.
+  customNote String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([cartId, productId])
+  @@index([cartId])
+}
+
+// P3b — checkout + order core (specs/2026-08-10-p3b-checkout-order-core/, #96).
+// PENDING_PAYMENT is the initial state: stock is decremented at order creation but
+// payment is not yet settled, so an order must NOT read as CONFIRMED (staff would
+// pick and deliver it). P3c's Stripe webhook moves it to CONFIRMED.
+enum FulfilmentMethod {
+  DELIVERY
+  COLLECTION
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  READY_FOR_COLLECTION
+  COLLECTED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+// Per-order delivery address SNAPSHOT. Written once and never updated — editing a
+// saved address later must not rewrite where a past order was delivered
+// (architecture.md §3.1: "historical snapshots are intentional"). userId is
+// nullable so a future saved-address book can reuse this table with no migration.
+model Address {
+  id            String   @id @default(uuid())
+  vendorId      String
+  vendor        Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+  recipientName String
+  phone         String
+  line1         String
+  line2         String?
+  city          String
+  county        String?
+  postcode      String
+  notes         String?
+  createdAt     DateTime @default(now())
+  orders        Order[]
+
+  @@index([vendorId])
+}
+
+// Exactly one of userId / guestEmail identifies the buyer (enforced in the
+// repository). Money is integer pence throughout; no discountTotal/loyaltyRedeemed
+// columns — those are P5's to add when they exist.
+//
+// NOT FULLY DESCRIBED BY THIS SCHEMA (P7.5d+e, #163). Three GIN trigram indexes —
+// Order_orderNumber_trgm_idx, Order_guestEmail_trgm_idx and User_email_trgm_idx —
+// exist in the database but CANNOT be declared here: Prisma's schema language has
+// no syntax for an index's access method or operator class, so `@@index` always
+// means a B-tree, which cannot serve the staff order search's `ILIKE '%term%'`.
+// They are created by migration 20260820143949_p7_5de_order_search_trigram, which
+// carries the full rationale. Consequence: `prisma migrate diff` may report drift
+// that is not drift, and `prisma migrate dev` may propose DROPPING them. Keep them.
+model Order {
+  id                   String                  @id @default(uuid())
+  vendorId             String
+  vendor               Vendor                  @relation(fields: [vendorId], references: [id])
+  orderNumber          String                  @unique
+  // P9.1 (#427/#428) — a guest order's actual credential. The order number is
+  // NOT one: it appears in emails, shared links, browser history and support
+  // threads, so knowing it must not return a name and a residential address.
+  // Nullable because every order placed before this migration has none; those
+  // guests fall back to /orders/lookup (order number + email). Never selected
+  // into OrderSummary — see findOrderForViewer.
+  confirmationToken    String?                 @unique
+  userId               String?
+  user                 User?                   @relation(fields: [userId], references: [id])
+  guestEmail           String?
+  addressId            String
+  address              Address                 @relation(fields: [addressId], references: [id])
+  fulfilmentMethod     FulfilmentMethod        @default(DELIVERY)
+  fulfilmentSlotId     String?
+  fulfilmentSlot       VendorFulfilmentSlot?   @relation(fields: [fulfilmentSlotId], references: [id])
+  fulfilmentDate       DateTime?
+  isExpress            Boolean                 @default(false)
+  targetFulfilmentTime DateTime?               @db.Timestamptz(3)
+  status               OrderStatus             @default(PENDING_PAYMENT)
+  currency             String                  @default("GBP")
+  subtotalPence        Int
+  // P5a (#135) — a GENERIC discount column, not a points-specific one: P5b's
+  // discount codes reduce the same total and must not need a second column and a
+  // second arithmetic rule. The order money identity is
+  // subtotalPence - discountPence + deliveryFeePence = totalPence.
+  discountPence        Int                     @default(0)
+  deliveryFeePence     Int
+  totalPence           Int
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  items                OrderItem[]
+  payment              Payment?
+  statusEvents         OrderStatusEvent[]
+  loyaltyEntries       LoyaltyLedgerEntry[]
+  discountUse          DiscountRedemption?
+  bindingRefusals      PaymentBindingRefusal[]
+  reconciliation       PaymentReconciliation?
+
+  @@index([vendorId, createdAt])
+  @@index([vendorId, status, createdAt])
+  // P7d (#218) — order history. listForUser filters {vendorId, userId} ordered by
+  // (createdAt desc, id desc); without userId in an index Postgres can only walk the
+  // VENDOR's orders in date order and discard other customers' rows, so a shopper's
+  // history costs the store's whole order volume. specs/architecture.md §3.4 claimed an
+  // Order(userId, createdAt) index served this — it never existed.
+  @@index([vendorId, userId, createdAt])
+}
+
+// productName / unitPricePence are SNAPSHOTS at purchase time — a later price or
+// rename must never rewrite what the customer actually bought.
+model OrderItem {
+  id             String  @id @default(uuid())
+  orderId        String
+  order          Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorId       String
+  vendor         Vendor  @relation(fields: [vendorId], references: [id])
+  productId      String
+  product        Product @relation(fields: [productId], references: [id])
+  productName    String
+  unitPricePence Int
+  quantity       Int
+  lineTotalPence Int
+  // #1135 — snapshot of the basket line's note, written by placeOrder only when the product still
+  // accepted notes at that instant. Personal data: exported and nulled by erasure (data-rights.ts).
+  customNote     String?
+
+  @@index([orderId])
+}
+
+model Payment {
+  id                String        @id @default(uuid())
+  orderId           String        @unique
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorId          String
+  vendor            Vendor        @relation(fields: [vendorId], references: [id])
+  status            PaymentStatus @default(PENDING)
+  provider          String
+  providerReference String?
+  amountPence       Int
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([orderId])
+}
+
+model OrderStatusEvent {
+  id        String      @id @default(uuid())
+  orderId   String
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorId  String
+  vendor    Vendor      @relation(fields: [vendorId], references: [id])
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  // Who moved it (P4b, #125). Null for system transitions — P3b's order
+  // placement and P3c's payment webhook have no acting user, and nullable is
+  // what lets this column be added with no backfill. SetNull, not Cascade:
+  // removing a departed staff member's account must not delete the audit trail
+  // of the orders they handled.
+  createdByUserId String?
+  createdBy       User?   @relation("OrderStatusEventActor", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+}
+
+// ---- P5a — loyalty points (#135, specs/2026-08-11-p5a-loyalty-points/) --------
+
+enum LoyaltyEntryKind {
+  EARN
+  REDEEM
+  REVERSAL
+  /// Added by #696. REVERSAL was already spoken for — it means "undoes this
+  /// order's REDEEM" and nothing else — and @@unique([orderId, kind]) allows
+  /// exactly one row per kind per order. A staff cancellation of a paid order
+  /// reverses BOTH sides, so it needs a second reversal kind rather than a
+  /// widened index: a distinct value keeps that unique constraint working
+  /// unchanged as the idempotency guard for both paths.
+  EARN_REVERSAL
+}
+
+/// The append-only audit trail of every points movement. `points` is SIGNED:
+/// EARN is positive, REDEEM negative, REVERSAL the exact negation of the REDEEM
+/// it undoes, EARN_REVERSAL the exact negation of the EARN it undoes. Nothing
+/// here is ever updated or deleted.
+///
+/// @@unique([orderId, kind]) is the structural idempotency guard: a duplicate
+/// Stripe delivery attempting a second EARN, or a double-submitted checkout
+/// attempting a second REDEEM, is refused by the database rather than by a check
+/// someone has to remember to write. #696 adds a fourth kind rather than
+/// relaxing this, so a cancelled paid order carrying both a REVERSAL and an
+/// EARN_REVERSAL is still one row per kind.
+model LoyaltyLedgerEntry {
+  id       String           @id @default(uuid())
+  vendorId String
+  vendor   Vendor           @relation(fields: [vendorId], references: [id])
+  // Nullable since P7b (#216). Erasure must sever the personal link WITHOUT
+  // destroying the row: a surviving Order keeps its discountPence, and this
+  // ledger is the only thing that explains where that number came from. The
+  // column was non-null with onDelete: Cascade, so deleting a User took the
+  // financial audit trail with it — against this model's own append-only rule.
+  // A null userId means "the person who earned or spent these points has been
+  // erased", never "no owner" — every write path still requires one.
+  userId   String?
+  user     User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  orderId  String
+  order    Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  kind     LoyaltyEntryKind
+  points   Int // signed
+
+  // Snapshotted on EARN only. Tier is resolved from a windowed spend query whose
+  // answer changes over time, so an audit trail that cannot explain its own
+  // numbers would not be one. Null on REDEEM/REVERSAL.
+  tierKey       String?
+  multiplierBps Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([orderId, kind])
+  @@index([vendorId, userId, createdAt])
+}
+
+/// The concurrency anchor for a shopper's balance at one vendor.
+///
+/// NOT a redundant cache of the ledger: a balance derived by SUM() cannot be
+/// compare-and-set, and every other contended resource in this schema is
+/// protected that way. This is the same pairing the stock path already uses —
+/// Inventory.quantity is the guarded counter, OrderItem is the record of what
+/// moved.
+///
+/// `lastActivityAt` is what makes expiry derivable at read time instead of
+/// needing a sweep job: points lapse when it falls further behind than
+/// VendorConfig.pointsExpiryMonths. A lapsed row's balancePoints is stale until
+/// its next EARN, which RESETS rather than increments (see lib/loyalty.ts).
+/// #1134 — how a marketing-consent choice was made.
+enum MarketingConsentSource {
+  REGISTRATION
+  ACCOUNT
+}
+
+/// #1134 — an append-only record of a shopper's marketing-consent choices for one vendor. The
+/// newest row for (vendorId, userId) is the current state; no row means not opted in. A log, not a
+/// mutable row, because the ICO expects a record of who consented, when, how and to what wording.
+/// `statement` is the exact text the shopper saw — an audit snapshot, like OrderItem's name.
+/// Consent is effective only once the user's email is verified (hasEffectiveMarketingConsent).
+model MarketingConsentEvent {
+  id        String                 @id @default(uuid())
+  vendorId  String
+  vendor    Vendor                 @relation(fields: [vendorId], references: [id])
+  userId    String
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  granted   Boolean
+  statement String
+  source    MarketingConsentSource
+  createdAt DateTime               @default(now())
+
+  @@index([vendorId, userId, createdAt])
+}
+
+model LoyaltyAccount {
+  id             String   @id @default(uuid())
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balancePoints  Int      @default(0)
+  lifetimePoints Int      @default(0)
+  lastActivityAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([vendorId, userId])
+}
+
+// ---- P5b — discount codes (#145, specs/2026-08-11-p5b-discount-codes/) --------
+
+enum DiscountKind {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+/// A vendor's discount code. Codes are per-vendor data for the same reason the
+/// loyalty settings and delivery rules above are — two vendors may run the same
+/// code string on their own terms, which @@unique([vendorId, code]) permits and
+/// a global unique would not.
+///
+/// `remainingRedemptions` COUNTS DOWN and is the concurrency anchor: null means
+/// unlimited, and the claim guard is `remainingRedemptions: { gt: 0 }` with a
+/// decrement. The natural shape — usedCount < maxRedemptions — is a
+/// column-to-column comparison, which Prisma cannot express in a `where` and
+/// which CLAUDE.md forbids solving with raw SQL. Counting down turns it into the
+/// same literal-to-column guard Inventory.quantity (P3b) and
+/// LoyaltyAccount.balancePoints (P5a) already use. Postgres arithmetic on NULL is
+/// NULL, so an unlimited code decrements to unlimited with no special case.
+///
+/// There is deliberately NO usedCount column: a "times used" figure for the admin
+/// list is derived from DiscountRedemption, so there is no second number that can
+/// disagree with the first.
+model DiscountCode {
+  id          String       @id @default(uuid())
+  vendorId    String
+  vendor      Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// Normalised by lib/discounts.ts `normaliseCode` (trimmed, uppercased) on both
+  /// the create and the lookup path — the unique index only means anything if both
+  /// sides agree on what "the same code" is.
+  code        String
+  description String?
+  kind        DiscountKind
+  /// BASIS POINTS for PERCENTAGE (1000 = 10%), PENCE for FIXED_AMOUNT. Integer
+  /// arithmetic end to end, for the same reason money is pence.
+  value       Int
+
+  /// Judged on the PRE-discount subtotal, matching VendorConfig.minimumOrderPence
+  /// and the free-delivery threshold.
+  minSubtotalPence     Int       @default(0)
+  startsAt             DateTime  @default(now())
+  endsAt               DateTime?
+  /// null = unlimited. See the counts-down note above.
+  remainingRedemptions Int?
+  /// null = no per-customer cap, which is also what makes a code guest-usable:
+  /// a cap cannot be counted without an identity, and a guest has none.
+  maxPerCustomer       Int?
+  isActive             Boolean   @default(true)
+
+  /// #987 — the shopper a REFERRAL code belongs to; null for every staff-created code. It is the
+  /// one source of truth for "whose code is this": the own-code refusal and the referrer's bonus
+  /// points both read it (they used to parse `description`). SetNull, not Cascade: erasing the
+  /// owner must not delete the code, because its redemptions cascade from the code and belong to
+  /// other shoppers' order history. An ownerless code still redeems and credits nobody.
+  referrerUserId String?
+  referrer       User?   @relation("ReferralCodeOwner", fields: [referrerUserId], references: [id], onDelete: SetNull)
+
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  redemptions DiscountRedemption[]
+
+  @@unique([vendorId, code])
+  /// At most one referral code per shopper per vendor. Postgres allows many NULLs under a unique
+  /// index, so staff codes (no owner) are unaffected.
+  @@unique([vendorId, referrerUserId])
+  @@index([vendorId, isActive])
+}
+
+/// One row per order that used a code. Append-only in normal operation, with a
+/// single deliberate exception: `releaseCodeRedemption` DELETES the row when an
+/// unpaid order is cancelled (see lib/repositories/discounts.ts for why this is a
+/// deletion rather than the reversal row the loyalty ledger writes).
+///
+/// `seq` is the shopper's zero-based use index for this code, and
+/// @@unique([codeId, userId, seq]) is what makes the per-customer cap structural
+/// rather than a count-then-write race: two concurrent claims both compute seq 0
+/// and the database refuses the second. Guests carry a null userId, and repeated
+/// NULLs do not collide in a Postgres unique index — correct, because a code with
+/// a per-customer cap refuses guests outright.
+///
+/// @@unique([orderId]) enforces at most one code per order.
+model DiscountRedemption {
+  id          String       @id @default(uuid())
+  vendorId    String
+  vendor      Vendor       @relation(fields: [vendorId], references: [id])
+  codeId      String
+  code        DiscountCode @relation(fields: [codeId], references: [id], onDelete: Cascade)
+  orderId     String
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId      String?
+  user        User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  seq         Int
+  amountPence Int
+  createdAt   DateTime     @default(now())
+
+  /// Set by #696 when staff cancel a PAID order: the use is given back to the
+  /// customer and to the code's remainingRedemptions, but the row STAYS.
+  ///
+  /// The asymmetry with releaseCodeRedemption — which deletes the row on the
+  /// unpaid path — is deliberate and is the same argument the loyalty ledger
+  /// makes for being append-only. A discount on a never-paid order is not a
+  /// financial event, so deleting it loses nothing. A discount on an order that
+  /// was actually paid for IS one: Order.discountPence survives on the cancelled
+  /// order, and this row is the only thing that explains where that number came
+  /// from.
+  ///
+  /// Retaining the row also keeps its `seq` occupied, which is why #696 allocates
+  /// seq as max(seq)+1 rather than by counting. Counting non-reversed rows to
+  /// pick the next seq would hand out a value a retained row already holds and
+  /// collide on @@unique([codeId, userId, seq]) — the trap the seq comment in
+  /// lib/repositories/discounts.ts warns about. Allocation reads every row; only
+  /// the per-customer CAP skips reversed ones.
+  reversedAt DateTime?
+
+  @@unique([orderId])
+  @@unique([codeId, userId, seq])
+  @@index([vendorId, codeId])
+}
+
+// ---- P6.7 — Team & Role Management (#P6.7) ----------------------------------
+
+/// Audit trail of role assignments within a vendor.
+// Guest order lookup rate limiting (P7a fix, #123/#192). #123's proposal asked
+// for "rate limiting / lockout... nothing in this codebase does this yet — it
+// would be the first" — true, and no Cloudflare KV/rate-limiting binding is
+// provisioned (checked wrangler.toml), so this reuses the existing Neon/Prisma
+// path rather than inventing new infra for a Fix-stage correction. One row per
+// attempt, pruned by age at query time (a count over a 60s window), not on a
+// schedule — the table stays small because lookup traffic is inherently low
+// volume, and Order-scale retention machinery would be over-building this.
+model OrderLookupAttempt {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  // SHA-256 of the caller's IP, not the IP itself — this table exists purely as
+  // a counter, so there is no reason to persist raw IPs at rest.
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, ipHash, createdAt])
+}
+
+/// #988 — one row per discount code a caller tried that did not exist, so the checkout's code
+/// checks cannot be used to test codes at the speed of a server action. Same shape and reasoning
+/// as OrderLookupAttempt: a counter keyed on vendor and a SHA-256 of the IP (never the raw IP),
+/// with a probabilistic one-hour retention sweep in lib/repositories/discount-code-throttle.ts.
+/// Only UNKNOWN results are recorded, so a shopper typing real codes is never throttled.
+model DiscountCodeAttempt {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, ipHash, createdAt])
+}
+
+model AuthenticationAttempt {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  // SHA-256 of the caller's IP, not the IP itself — this table exists purely as
+  // a counter, so there is no reason to persist raw IPs at rest.
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, ipHash, createdAt])
+}
+
+model VendorRoleAuditLog {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  userId    String
+  user      User     @relation("TargetUser", fields: [userId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actor     User?    @relation("ActorUser", fields: [actorId], references: [id], onDelete: SetNull)
+  oldRole   String?
+  newRole   String?
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, createdAt])
+}
+
+// Server-side capture of a thrown request error (#508), independent of Cloudflare Workers
+// Logs (#246, unconfirmed queryable) — written from instrumentation.ts's onRequestError, the
+// one place that still sees the real error before Next.js reduces it to a generic digest for
+// the client boundary (components/errors/ErrorPanel.tsx deliberately renders neither, #430/
+// #478/#479). No vendor relation — deliberately platform-wide like HealthCheck, since an error
+// boundary can fire before vendor context ever resolves (vendor resolution failing is itself
+// one thing that can throw), and resolving one here would risk a second DB read compounding
+// whatever already failed.
+model ErrorEvent {
+  id         String   @id @default(uuid())
+  digest     String?
+  message    String
+  stack      String?
+  path       String
+  method     String
+  routerKind String
+  routeType  String
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// Payment binding refusals (#454, P9.2) — the durable record of every LOUD refusal from
+// app/api/webhooks/stripe/route.ts. #429 made that route fail closed, correctly; the cost is
+// that a refusal against a GENUINE payment leaves a charged shopper's order stuck
+// PENDING_PAYMENT. That route returns 200 and nothing throws, so onRequestError never fires and
+// no ErrorEvent row is written — the only other trace is a console.error line whose retention is
+// still #246.
+//
+// vendorId and orderId are NULLABLE by necessity, not by looseness: `not-found` names an order
+// that does not exist, and `unbindable` refuses before the lookup happens, so neither can carry
+// either. orderNumber is always present — the route returns early on a falsy event.orderNumber
+// before any transition is attempted. Refusals resolving to no vendor are recorded for forensics
+// and read from the database directly; /staff/payments is a vendor-scoped recovery worklist, and
+// by construction a `not-found` refusal strands no order.
+//
+// The claimed* fields are what the EVENT asserted; the stored* fields are the snapshot of the
+// order's own Payment row at refusal time. Keeping both is what lets a reader see the mismatch
+// after the fact without re-deriving it. `already-processed` is never recorded: Stripe retries
+// aggressively and a duplicate delivery is the system working.
+model PaymentBindingRefusal {
+  id                       String    @id @default(uuid())
+  vendorId                 String?
+  vendor                   Vendor?   @relation(fields: [vendorId], references: [id])
+  orderId                  String?
+  order                    Order?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderNumber              String
+  reason                   String
+  provider                 String
+  claimedProviderReference String?
+  claimedAmountPence       Int?
+  claimedCurrency          String?
+  storedProviderReference  String?
+  storedAmountPence        Int?
+  storedCurrency           String?
+  // Written by the staff reconciliation action (#454): what Stripe said about the order's OWN
+  // stored session, never about the session id the refused event claimed.
+  resolution               String?
+  resolutionDetail         String?
+  resolvedAt               DateTime?
+  createdAt                DateTime  @default(now())
+
+  @@index([vendorId, createdAt])
+  @@index([createdAt])
+}
+
+// What the scheduled payment sweep concluded on its latest attempt at one order (#945).
+// DEFERRED and RETRYABLE_ERROR are rescheduled; REFUSED and PERMANENT_ERROR (and a
+// RETRYABLE_ERROR on its last allowed attempt) exhaust the row; the other three are terminal
+// because the order has left PENDING_PAYMENT.
+enum PaymentReconciliationOutcome {
+  DEFERRED
+  RETRYABLE_ERROR
+  PERMANENT_ERROR
+  REFUSED
+  CONFIRMED
+  RELEASED
+  ALREADY_HANDLED
+}
+
+// The sweep's memory of one order between runs (#945). Created the first time the sweep claims
+// the order, so it exists only for orders that reached the sweep at all.
+//
+// nextAttemptAt is both eligibility and the claim's lease: a claim pushes it forward, so a Worker
+// that dies mid-attempt leaves the row due again once the lease runs out. lastAttemptAt is the
+// fencing token — an outcome is written only while it still equals the claim instant.
+// consecutiveFailures counts retryable provider failures since the last definitive answer and is
+// kept apart from attemptCount so a long-open checkout is not exhausted by one transient error.
+// See specs/2026-09-29-p945-payment-reconciliation-hardening/plan.md for every field's reason.
+model PaymentReconciliation {
+  id                  String                        @id @default(uuid())
+  orderId             String                        @unique
+  order               Order                         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendorId            String
+  vendor              Vendor                        @relation(fields: [vendorId], references: [id])
+  attemptCount        Int                           @default(0)
+  consecutiveFailures Int                           @default(0)
+  lastAttemptAt       DateTime?
+  nextAttemptAt       DateTime
+  lastOutcome         PaymentReconciliationOutcome?
+  lastErrorStatus     Int?
+  exhaustedAt         DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
+
+  // Serves the staff "stopped retrying" list (vendor + exhausted).
+  @@index([vendorId, exhaustedAt])
+}
+
+// Search query log (#565, P2.6 slice 2) — every storefront search submission's outcome, so staff
+// can find recurring zero-result queries worth promoting into #566's synonym dictionary.
+//
+// NO USER LINK, deliberately (#570): a search history tied to a signed-in user is personal data,
+// which would put it in lib/repositories/data-rights.ts's export/erasure scope. vendorId + a
+// hashed IP — never the raw address — is the same shape as OrderLookupAttempt and
+// AuthenticationAttempt, which serves the curation purpose (which queries recur) without raising
+// the compliance question at all.
+//
+// directResultCount is the DIRECT (#564) search's own candidate count, captured before any
+// zero-result-ladder rung runs. recoveryRung is null when the direct search already succeeded,
+// and "typo"/"identity"/"broad"/"none" when the ladder had to run — "none" meaning every rung was
+// tried and none found anything, the queries most worth a human look.
+model SearchQueryLog {
+  id                String   @id @default(uuid())
+  vendorId          String
+  vendor            Vendor   @relation(fields: [vendorId], references: [id])
+  query             String
+  directResultCount Int
+  recoveryRung      String?
+  /// P2.6 slice 3 (#580). Did the DIRECT search match anything on NAME (ranking tier 0-2), as
+  /// opposed to only through some product's description prose? directResultCount and recoveryRung
+  /// together cannot express this: a query returning one tangential description hit logs
+  /// `directResultCount: 1, recoveryRung: null` — byte-identical to a query that worked perfectly —
+  /// so the rows most worth a human look were invisible. Nullable because rows written before this
+  /// column existed genuinely do not know, and "unknown" must not read as "thin": #566's proposal
+  /// step selects `false`, never `null`.
+  directNameMatch   Boolean?
+  ipHash            String
+  createdAt         DateTime @default(now())
+
+  @@index([vendorId, directResultCount, createdAt])
+  @@index([vendorId, directNameMatch, createdAt])
+}
+
+// Help assistant conversation log (#1014, built with #1015) — one row per conversation: the
+// shopper's first choice and how the conversation ended, so a store can see which questions
+// arrive and which end in a WhatsApp handoff, and write its #1021 answers from that.
+//
+// NO USER LINK AND NO ORDER NUMBER, deliberately, on SearchQueryLog's #570 precedent: vendorId plus
+// a hashed IP serves the purpose (what is asked, how often it escalates) without making the table
+// personal data in lib/repositories/data-rights.ts's export/erasure scope.
+//
+// openingQuestion is NEVER shopper-written. features/assistant/assistant.ts derives it on the
+// server — the platform's fixed label for a topic, or the vendor's own active VendorFaq question —
+// so no client can put free text in this column. It is a snapshot rather than a VendorFaq relation
+// so a store can edit or delete a question without rewriting what was logged.
+enum AssistantTopic {
+  DELIVERY
+  COLLECTION
+  REWARDS
+  DISCOUNT_CODES
+  STORE_QUESTION
+  ORDER_STATUS
+  ITEM_SWAP
+  CANCEL_PAID_ORDER
+  OTHER
+}
+
+/// ABANDONED until an answer is shown (ANSWERED) or the handoff is tapped (HANDED_OFF, terminal).
+enum AssistantOutcome {
+  ANSWERED
+  HANDED_OFF
+  ABANDONED
+}
+
+model AssistantConversation {
+  id              String           @id @default(uuid())
+  vendorId        String
+  vendor          Vendor           @relation(fields: [vendorId], references: [id])
+  topic           AssistantTopic
+  openingQuestion String
+  outcome         AssistantOutcome @default(ABANDONED)
+  ipHash          String
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([vendorId, createdAt])
+  @@index([vendorId, ipHash, createdAt])
+}
+
+enum SearchSynonymStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SearchSynonymSource {
+  SEED
+  STAFF
+  AI
+}
+
+/// P2.6 slice 3 (#566, closing #396) — a vendor's curated search alias dictionary, so a shopper
+/// typing the word they actually use ("bhindi", "haldi", "keema") reaches the shelf.
+///
+/// CURATED RATHER THAN AI-PER-QUERY. A table is deterministic, costs nothing per query, adds no
+/// latency to the hottest read path and is reproducible in tests. AI expansion on every search would
+/// put a paid, non-deterministic call in front of every shopper — and, on a public unauthenticated
+/// endpoint with no middleware layer available on this stack, an attacker-controlled one (#571).
+/// AI here only ever PROPOSES rows for a human to approve, offline, triggered by a store admin.
+///
+/// EXPANSION, NEVER REPLACEMENT. An approved row widens what a query matches; the shopper's own
+/// word always stays in the search. See lib/search-expansion.ts, where that invariant lives in the
+/// SearchTermGroup type rather than in a comment.
+///
+/// @@unique([vendorId, alias]) does more than prevent duplicates: it is what bounds the expanded
+/// predicate. One alias resolves to at most one canonical term, so a term group holds at most two
+/// variants however large the dictionary grows. Many aliases MAY share a canonical term (qeema and
+/// keema both mean minced meat) — that direction is deliberately unconstrained.
+model SearchSynonym {
+  id        String              @id @default(uuid())
+  vendorId  String
+  vendor    Vendor              @relation(fields: [vendorId], references: [id])
+  /// The word a shopper types. Stored lowercased on write; lib/search-expansion.ts also
+  /// lowercases on read, since a row predating that rule cannot be fixed retroactively.
+  alias     String
+  /// The catalogue's own word, added to the query alongside the alias — never in place of it.
+  canonical String
+  status    SearchSynonymStatus @default(PENDING)
+  source    SearchSynonymSource @default(STAFF)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@unique([vendorId, alias])
+  @@index([vendorId, status])
+}
+
+/// P2.6 slice 4 (#567) — per-caller throttle for the AI normalisation pre-pass on
+/// /shop-your-list.
+///
+/// #571 ruled an AI call reachable from a public, unauthenticated endpoint is
+/// attacker-controlled cost against a Workers AI quota shared with the product-image
+/// pipeline. That was resolved for #565 by moving AI offline; it cannot be here, because
+/// interpreting the list IS the feature and the shopper is waiting on it. So the limit is
+/// per route and lives in Postgres — no KV, D1 or rate-limiting binding is provisioned in
+/// wrangler.toml, and CLAUDE.md records that no proxy.ts can ship on this stack to hold a
+/// central one.
+///
+/// Same shape as OrderLookupAttempt and AuthenticationAttempt deliberately: a hashed IP,
+/// never the raw address, because this table is only ever a counter. Rows are swept on a
+/// low-probability sweep in the repository — OrderLookupAttempt had none and grew unbounded
+/// until #468 added one.
+///
+/// Being over this limit is not an error: the caller skips the pre-pass and the existing
+/// deterministic matcher runs, so a throttled shopper still gets their list matched.
+// #1017 — the per-vendor Workers AI ledger: one row per call that reached the model. Every vendor
+// shares one Cloudflare account credential (lib/config.ts getAiEnv), so this is the only place a
+// vendor's AI spend is attributed. A vendor cost record, deliberately with NO user link — so it is
+// not personal data and stays outside lib/repositories/data-rights.ts (the SearchQueryLog
+// precedent, #570). Neurons are stored x1000 as an integer, rounded up: no floats, same discipline
+// as money. 90-day retention sweep in lib/repositories/ai-usage.ts.
+enum AiFeature {
+  LIST_NORMALISATION
+  SEARCH_SYNONYMS
+  NET_CONTENT
+  PRODUCT_IMAGE
+  CAMPAIGN_IMAGE
+  PRICING_REVIEW
+}
+
+// REPORTED = Workers AI's own figure for the call; ESTIMATED = computed from lib/workers-ai.ts.
+enum AiNeuronSource {
+  REPORTED
+  ESTIMATED
+}
+
+model AiUsageEvent {
+  id           String         @id @default(uuid())
+  vendorId     String
+  vendor       Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  feature      AiFeature
+  model        String
+  inputTokens  Int?
+  outputTokens Int?
+  milliNeurons Int
+  neuronSource AiNeuronSource
+  createdAt    DateTime       @default(now())
+
+  @@index([vendorId, createdAt])
+}
+
+model ListNormalisationAttempt {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id])
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([vendorId, ipHash, createdAt])
+}
+
+model VendorExpressSchedule {
+  id        String @id @default(uuid())
+  vendorId  String
+  vendor    Vendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  dayOfWeek Int // 0 = Sunday, 1 = Monday...
+  openTime  String // HH:mm
+  closeTime String // HH:mm
+}
+
+// ---------------------------------------------------------------------------
+// Reference data MOVED OUT (#764).
+//
+// PostcodeReference, PlaceReference, ReferenceDataset and ReferenceDataSyncRun
+// briefly lived here and are gone. They now live in their own Neon project,
+// `uk-location-reference`, declared in prisma/reference/schema.prisma with its
+// own client and migration history.
+//
+// WHY, IN NUMBERS. A full-GB Code-Point import into this database succeeded at
+// 1,749,109 rows and occupied 456.9 MB, taking the whole project to 489.8 MB of
+// its 512 MB ceiling — 89% of the budget for one reference table, against under
+// 5 MB for every transactional table combined. The Open Names import then failed
+// outright with a project-size-limit error, and ordinary writes began failing
+// too. Shared UK reference data is not Aheed's data, it dwarfs Aheed's data, and
+// it competes for a budget sized for orders and products.
+//
+// Aheed reaches that data through lib/reference/, never through a table here.
+// CustomerAddress below stays: it IS Aheed's data, vendor- and user-scoped.
+// ---------------------------------------------------------------------------
+
+/// A customer's saved, REUSABLE address (#764).
+///
+/// Deliberately NOT the same table as `Address`. `Address` is a per-order snapshot
+/// written once inside placeOrder's transaction and never updated, because
+/// architecture.md requires that editing a saved address must not rewrite where a
+/// past order was delivered. This table is the editable thing a checkout form is
+/// populated FROM; the snapshot remains what an order is delivered TO. Correcting
+/// a typo here changes nothing about any existing order.
+///
+/// Vendor-scoped and user-scoped, because unlike the reference tables above this
+/// IS domain data: ADR-004's mandatory `vendorId` filter applies in full, and a
+/// saved address must never surface to another vendor or another customer.
+/// `userId` is required — a guest has no identity to own a durable record, so
+/// guests continue to rely on the delivery-postcode cookie.
+model CustomerAddress {
+  id            String    @id @default(uuid())
+  vendorId      String
+  vendor        Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label         String?
+  recipientName String
+  phone         String
+  line1         String
+  line2         String?
+  city          String
+  county        String?
+  postcode      String
+  notes         String?
+  isDefault     Boolean   @default(false)
+  lastUsedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([vendorId, userId])
+}
+
+// P10 (#116) — a shopper's saved, reusable shopping list.
+//
+// ## Why there is no productId here
+//
+// P4's `reorderItems` already answers "the same products as last time, exactly", and #116's own
+// text warned that it "probably supersedes half of what a saved list is for". A list of product
+// ids would answer the same question under a different name. This model answers the different
+// question a weekly grocery shopper actually has: "here is my standing list in my own words —
+// show me what you have for it this week."
+//
+// So an item stores the shopper's LINE, not a product. On open, the list is re-matched through
+// the pass P3d (#114) and P2.6 (#566, #567) already ship. The consequences are all good ones: a
+// delisted product simply stops matching (no nullable FK, no onDelete decision against Product,
+// no "no longer available" branch), and a line this shop has never stocked can be stored at all,
+// which under a product-id model it could not.
+//
+// `userId` is NON-NULLABLE, matching CustomerAddress: a guest has no durable identity to own a
+// saved record, and a weekly-reuse feature is aimed squarely at a returning identified shopper.
+// Guests keep the stateless /shop-your-list path, which still writes nothing.
+model ShoppingList {
+  id        String             @id @default(uuid())
+  vendorId  String
+  vendor    Vendor             @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  items     ShoppingListItem[]
+
+  @@index([vendorId, userId])
+}
+
+// One saved line. `rawText` is what the shopper wrote; `terms` is what we search for.
+//
+// They are DIFFERENT FACTS, which is why both are stored. `parseList(rawText)` would only ever
+// reproduce the deterministic parse — when the AI pre-pass in lib/list-normalisation.ts ran,
+// `terms` holds the NORMALISED words, and those cannot be recovered from the original line
+// without calling the model again. Saving them means re-opening a list costs one DB query and
+// no Workers AI call.
+//
+// `terms` is a space-joined String and deliberately NOT a Json column (architecture.md §3.1
+// forbids Json for domain data) and NOT a child table (nothing ever queries an individual term —
+// they are read back whole as one line's search input, and every per-line decision happens in
+// pure code afterwards). The join is lossless by construction: toTerms() emits lowercase tokens
+// with whitespace already split out, so no token can contain a space.
+model ShoppingListItem {
+  id       String       @id @default(uuid())
+  listId   String
+  list     ShoppingList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  rawText  String
+  terms    String
+  quantity Int
+  measure  String?
+  brand    String?
+  position Int
+
+  @@index([listId])
+}
+
+// #1060 — the storefront footer's weekly opening hours: one row per weekday, real HH:mm times
+// (the VendorExpressSchedule convention), or closed all day. A weekday with no row is "not set" and
+// the footer omits it. Replaces #1055's free-text VendorOpeningHours. The invariant (closed => both
+// times null; open => both set and openTime < closeTime) is enforced by lib/footer-hours-form.ts.
+model VendorWeeklyHours {
+  id        String  @id @default(uuid())
+  vendorId  String
+  vendor    Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  dayOfWeek Int // 0 = Sunday, 1 = Monday...
+  openTime  String? // HH:mm
+  closeTime String? // HH:mm
+  closed    Boolean @default(false)
+
+  @@unique([vendorId, dayOfWeek])
+}
+
+// #1060 — a dated holiday / closure override of the weekly hours. One per calendar day (saving a
+// date again replaces it). `date` is the store-local calendar day at UTC midnight, the same
+// convention as `Order.fulfilmentDate` (lib/local-datetime.ts).
+model VendorHoursOverride {
+  id        String   @id @default(uuid())
+  vendorId  String
+  vendor    Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date
+  label     String
+  openTime  String? // HH:mm
+  closeTime String? // HH:mm
+  closed    Boolean  @default(false)
+
+  @@unique([vendorId, date])
+}
+
+// #1055 — which payment-method badges the footer shows. Display order is this declaration
+// order, fixed in code. The images are platform static assets (public/payment-methods/), not
+// vendor uploads: a card scheme's logo is the same for every vendor.
+enum PaymentBadgeMethod {
+  VISA
+  MASTERCARD
+  AMEX
+  APPLE_PAY
+  GOOGLE_PAY
+}
+
+model VendorPaymentBadge {
+  id       String             @id @default(uuid())
+  vendorId String
+  vendor   Vendor             @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  method   PaymentBadgeMethod
+
+  @@unique([vendorId, method])
+}

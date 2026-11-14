@@ -1,0 +1,1027 @@
+---
+id: architecture
+title: System Architecture — Aheed Online Store
+audience: [dev]
+type: doc
+status: approved
+version: "1.45.0"
+updated: 2026-10-30
+visibility: internal
+summary: The technical source of truth for infrastructure and Clean Architecture layering — Cloudflare Workers + Neon + S3-compatible storage, vendor-agnostic and multi-tenant (vendor-scoped) by design.
+tags: [architecture, cloudflare, neon, clean-architecture, multi-tenancy]
+related: [adr-001-hosting, adr-002-auth-library, adr-003-storage-abstraction, adr-004-multi-tenancy, adr-007-storefront-scope-restrictions-stock-states, multitenancy-slice1-vendor-schema]
+---
+
+# System Architecture — Aheed Online Store
+
+**Status:** Approved architecture baseline. Supersedes the GCP-origin design in the original
+ADR-001. This document is the technical source of truth for infrastructure and layering; it is
+governed by the SDD constitution (propose → spec → validate → changelog).
+
+**Design goal:** a **PostgreSQL-first, vendor-agnostic, cost-effective** cloud-native storefront.
+Every external dependency (compute, database, object storage, payments, email) sits behind an
+environment-configured seam so the platform can move clouds without a rewrite.
+
+> Related decisions: `decisions/ADR-001-hosting.md` (revised — Cloudflare + Neon),
+> `decisions/ADR-002-auth-library.md` (unchanged — Better Auth),
+> `decisions/ADR-003-storage-abstraction.md` (new — S3-compatible storage port).
+
+---
+
+## 1. Updated Technology Stack
+
+| Concern | Choice | Portability seam |
+|---|---|---|
+| Web + API | **Next.js (App Router, TypeScript)** on **Cloudflare** (Pages/Workers via the OpenNext adapter) | Framework-standard; API is plain route handlers + Server Actions. Origin can move to Node/containers unchanged. |
+| Database | **Neon Serverless PostgreSQL** | Standard Postgres wire protocol. `DATABASE_URL` / `DIRECT_URL` only. |
+| ORM | **Prisma** (with driver adapter for the serverless/edge connection) | Schema + queries are provider-neutral Postgres. Adapter is the only swap point. |
+| Object storage | **Cloudflare R2**, accessed **only via the S3-compatible API** (AWS SDK v3 S3 client) | `StorageService` port; `S3_*` env vars. No R2-specific SDK or feature. |
+| Image delivery | CDN in front of the bucket | DB stores **relative keys**; `CDN_BASE_URL` resolved at runtime. |
+| Payments | **Stripe** (Elements/Checkout + webhooks) | `PaymentService` port; card data never touches our servers. |
+| Transactional email | **Resend** | `EmailService` port; swappable for SES/SendGrid. |
+| Auth | **Better Auth** (self-hosted, bearer tokens, RBAC) | Unchanged from ADR-002. |
+| Validation | **zod** (shared client/server, plus env parsing) | — |
+| Caching | Next.js Data/Route cache (portable) + optional edge KV behind a `CacheService` port | Degrades to DB-only; KV ↔ Redis swap. |
+
+**Where it runs (#1323, 2026-10-29).**
+- **Cloudflare:** the Workers (the app, the scheduler and the internal docs site) and the R2 image
+  buckets run in the **Merqify Cloudflare account**, under flat `merqify.com` hosts. Staging is
+  `aheed-staging.merqify.com`, `srimart-staging.merqify.com` and `images-staging.merqify.com`;
+  production is `aheed.merqify.com`, `srimart.merqify.com` and `images.merqify.com`; the docs are
+  `docs-shoplocal.merqify.com`, behind Access, and `deploy-docs-internal` refuses to deploy them
+  unless an Access application guards that host (`#1328`).
+- **Neon:** the staging and production databases are **new projects in a new Neon account** (London,
+  `eu-west-2`), filled from the old staging database by `scripts/migrate-to-new-neon.ts`.
+- **Cells (owner, 2026-10-29).** The app holds **one database connection per Worker**, so isolation
+  between businesses comes in two forms:
+  - **Within a cell, by store ID.** The ShopLocal platform cell (`Shoplocal` and
+    `Shoplocal Staging`, at `shoplocal.merqify.com`) holds many stores in one database: SriMart and
+    the Aheed Food Centre demo. ADR-004 separates them by store ID.
+  - **Between cells, by deployment.** A business that operates independently with its own data gets
+    a **dedicated cell**: the same code deployed as its own Workers, with its own Neon projects,
+    bucket and secrets, whose database holds that one business. The first is Aheed Food Centre
+    (`aheedfoodcentre.co.uk`; Neon `Aheed Food Centre` and `Aheed Food Centre Staging`).
+  - A cell can later move into the client's own Cloudflare and Neon accounts as a unit.
+  - **Shared by every cell:** the codebase, the Merqify Workers Paid plan, and the read-only
+    `uk-location-reference` database (public data, no client data).
+  - A dedicated-cell store does not appear in the ShopLocal marketplace by itself. Listing it needs
+    a feed into the platform cell, which is not designed yet.
+- **The old setup:** the Nocaped account and the old Neon projects are no longer deploy targets.
+  Runbook: `docs/developer-portal/env-setup.md`, "Merqify account".
+- **Clients' domains:** a client's own domain reaches these Workers through Cloudflare for SaaS
+  custom hostnames, while the client keeps its own zone. That is a later slice, not yet built.
+
+**Cost posture:** Neon and R2 both scale to (near) zero when idle; Workers bill per request; R2 has
+**zero egress**. At the MVP's scale this is a low fixed-cost footprint with no idle compute bill.
+
+---
+
+## 2. System Architecture Diagram
+
+### 2.1 Request / data flow
+
+```mermaid
+flowchart TD
+    U["Users (mobile-first browsers)"] --> EDGE["Cloudflare Edge — CDN + WAF"]
+    EDGE --> APP["Next.js on Cloudflare Workers<br/>(Server Components · Server Actions · Route Handlers = REST API)"]
+
+    subgraph CleanArch["Application origin (Clean Architecture)"]
+      APP --> SVC["Application / Service layer<br/>(use cases, orchestration, transactions)"]
+      SVC --> REPO["Repository layer<br/>(ports: ProductRepo, OrderRepo, InventoryRepo …)"]
+      REPO --> PRISMA["Prisma Client (+ serverless driver adapter)"]
+    end
+
+    PRISMA --> NEON[("Neon Serverless PostgreSQL")]
+    SVC --> STORE["StorageService (S3 API port)"] --> R2[("Object Storage — R2 via S3 API")]
+    SVC --> PAY["PaymentService port"] --> STRIPE["Stripe"]
+    SVC --> MAIL["EmailService port"] --> RESEND["Resend"]
+
+    R2 --> CDN["CDN (CDN_BASE_URL)"] --> U
+    STRIPE -- "webhooks (idempotent)" --> APP
+```
+
+**Route-aware header via a second route group, not `proxy.ts` (P8.5f, revised).** `components/layout/Header.tsx`
+— rendered once by a shared layout — must render differently on `/` (the postcode checker) than on
+every other storefront route (search). A **layout cannot see which page it wraps**, so the header
+cannot decide this from inside `app/(storefront)/layout.tsx` alone.
+
+P8.5f's first attempt was a root `proxy.ts` (Next 16's rename of `middleware.js`) annotating each
+request with an `x-pathname` header for `Header` to read. **That approach is unbuildable on this
+project's pinned `@opennextjs/cloudflare` (latest published, `1.20.2`) and was reverted the same
+day.** Next 16 forces every Proxy file onto the Node.js runtime and forbids opting out — setting
+`export const runtime` in a Proxy file throws — but `@opennextjs/cloudflare` unconditionally
+`process.exit(1)`s the build the moment it detects Node-runtime middleware
+(`ERROR Node.js middleware is not currently supported. Consider switching to Edge Middleware.`).
+There is no `proxy.ts` configuration that satisfies both constraints at once on this toolchain pin.
+Confirmed twice: identically under local `npm run preview` and on a real `staging` deploy (PR #367)
+— the build step failed both times with the same error, and no new Worker version went live from
+that push.
+
+The fix instead adds a second route group, `app/(landing)/`, holding only `page.tsx` for `/` (route
+groups — the parenthesised segment — don't affect the URL, so this is still served at `/`). Both
+`app/(storefront)/layout.tsx` and `app/(landing)/layout.tsx` render the same extracted
+`components/layout/StorefrontChrome.tsx`, passing an explicit `isLanding` boolean into `Header` —
+the same pattern `isPortal` already used for `app/(admin)/layout.tsx`. No middleware, no request
+header, no build-time risk: every route's layout already knows which route it is, which is the
+property a request-scoped proxy was trying to reconstruct in a place structurally unable to have it
+for free.
+
+### 2.2 Layering (Dependency Inversion — arrows point inward)
+
+```mermaid
+flowchart LR
+    P["Presentation<br/>RSC · Server Actions · Route Handlers"] --> A["Application<br/>Use cases / Services"]
+    A --> D["Domain<br/>Entities · value objects · ports (interfaces)"]
+    A -. depends on abstractions .-> I["Infrastructure<br/>Prisma repos · S3 storage · Stripe · Resend · Cache"]
+    I -. implements ports .-> D
+```
+
+The **domain and application layers know nothing about Neon, R2, Cloudflare, or Stripe.** They
+depend on ports (interfaces). Infrastructure supplies implementations, wired at the composition
+root. That inversion is what makes the migrations in §4 mechanical.
+
+**Strict flow (enforced in review):**
+`Users → Next.js (Cloudflare) → Backend (Server Actions/Route Handlers) → Service → Repository → Prisma → Neon + Object Storage + Stripe.`
+No layer skips inward; components never touch Prisma or the S3 client directly.
+
+---
+
+## 3. Database Design Approach
+
+### 3.0 Two databases: the transactional one, and the shared reference one
+
+This application reads from **two separate Neon projects**, and the split is load-bearing.
+
+| Database | Owns | Reached through |
+|---|---|---|
+| Aheed's application database | Vendors, customers, orders and their immutable `Address` snapshots, `CustomerAddress`, carts, products, delivery configuration — every transactional and tenant-owned concern | `lib/db.ts` |
+| **`uk-location-reference`** | `PostcodeReference`, `PlaceReference`, dataset versions/checksums, materialised area coverage, sync/audit state, and future compatible UK location datasets | `lib/reference/` only |
+
+**Why the split exists, in numbers** (#764, 2026-09-15). Reference data was first built into the
+application database. A full-GB OS Code-Point Open import succeeded — 1,749,109 rows — and occupied
+**456.9 MB**, taking the project to **489.8 MB of its 512 MB ceiling**, against under 5 MB for every
+transactional table combined. The OS Open Names import then failed outright with `could not extend
+file because project size limit (512 MB) has been exceeded`, and ordinary application writes began
+failing too, which surfaced as three unrelated live-database tests failing for reasons that had
+nothing to do with their subject matter.
+
+Shared national reference data is not a tenant's data, it dwarfs a tenant's data, and it competes
+for a storage budget sized for orders and products. It now lives in its own project, reusable by any
+tenant, with its own schema (`prisma/reference/schema.prisma`), its own migration history and its own
+generated client.
+
+**Three rules follow, and none of them is optional.**
+
+1. **Nothing under `app/`, `components/` or `features/` touches the reference client.** The boundary
+   is `lib/reference/`. The reference database can be reshaped, moved, or put behind a network API
+   without any of those files changing.
+2. **The reference service never owns vendor-specific judgement.** It answers "is this postcode
+   covered and current, and what is near it". Whether a particular shop delivers there is Aheed's
+   question, answered from that vendor's own `VendorDeliveryArea` rows in
+   `lib/delivery-eligibility.ts`. A tenant's commercial rules must never reach shared platform
+   infrastructure, and that infrastructure's availability must never decide a tenant's rules.
+3. **Coverage is demand-driven, and absence of coverage is not absence of fact.** The reference
+   database is UK-wide capable but materialises only the postcode areas configured in
+   `UK_LOCATION_REF_POSTCODE_AREAS`. So a missing row is ambiguous, and the ambiguity is resolved
+   explicitly: a covered area with no active row is **INVALID**; an area never imported is
+   **UNVERIFIED**. Every infrastructure failure — unconfigured, unreachable, never synced — is also
+   UNVERIFIED. **An infrastructure or coverage gap must never be converted into telling a customer
+   their address is wrong**; it degrades to manual entry instead. Verified live by pointing the
+   reference database at an unreachable host and confirming HTTP 200 with UNVERIFIED rather than a
+   500 or a false rejection.
+
+   **Demand-driven runs in both directions, and only the additive one is automatic** (#770). A
+   scheduled sync imports newly configured areas, but nothing in it can retire an area that has
+   left the configuration: `apply` and `findOutstandingAreas` are each scoped to the areas being
+   imported — deliberately, so one area's import cannot damage another's — which means an
+   unconfigured area is never touched again by any run. It then sits frozen at whatever release
+   imported it while its coverage row goes on claiming authority, so a postcode issued there
+   afterwards is answered INVALID: precisely the outcome the paragraph above forbids. Retiring an
+   area is therefore an explicit operation (`sync-reference-data.ts --decommission`), never a side
+   effect of a refresh, and it **removes the coverage row before the data rows** so the area
+   degrades to UNVERIFIED rather than passing through a window in which it reads as INVALID. It
+   refuses outright when no areas are configured, because "nothing is required" must never be read
+   as "remove everything".
+
+   **Drift between the two is reported, not assumed away.** `/api/health`'s `reference` block
+   (`lib/reference/reference-status-service.ts`) carries the configured areas, each source's covered
+   areas, and the difference in both directions; `scripts/verify-reference-coverage.ts` answers the
+   same question about a database named by an env file, and exits non-zero on drift. Both exist
+   because every failure in this subsystem is silent by design — a deployed Worker with no reference
+   binding and a healthy one serve identical pages — so an operator needs a surface that says which
+   it is.
+
+**Storage is scarce in the reference database too.** Both large tables use their natural key
+(`normalisedPostcode`, `sourceId`) rather than a surrogate UUID, and carry no per-row timestamps or
+source metadata — that belongs on the dataset row, where one row describes millions. The surrogate
+key and its redundant index cost a measured 261 bytes per row; the natural key costs 148.4.
+
+**EPC open data was investigated and REJECTED as an address source**, and the ruling is recorded here
+rather than only in a slice folder so it is not silently reopened. Much of the dataset is published
+under OGL, but its **address and postcode fields carry additional licensing restrictions** because
+they incorporate OS AddressBase Premium / Royal Mail PAF-derived data, and address-level EPC records
+raise data-protection questions of their own. No EPC data is imported, exposed or depended upon.
+`lib/address-lookup-provider.ts` is the seam a lawfully licensed provider plugs into later; until one
+exists, `addresses[]` in the public API is empty by design and street-level hints must never be put
+there.
+
+
+### 3.1 Modelling rules
+
+- **Strict relational / 3NF.** Every entity is a typed table with explicit foreign keys. **No
+  `Json` columns, no document blobs, no key-value bags** for domain data.
+- **No raw SQL in application code.** All access goes through Prisma's typed query API. (DDL for
+  indexes lives in migrations, which is standard portable SQL, not application queries.) **One
+  documented exception exists**, added by #674 (2026-09-08): the parameterised INSERT in
+  `lib/error-event-fallback.ts`, reachable only from `instrumentation.ts`'s error handler. The
+  ordinary recorder writes through a freshly constructed Prisma client and therefore a fresh WASM
+  query compiler, so it cannot record a failure that originated in that constructor; the fallback
+  is `fetch`-based and shares none of that machinery.
+
+  **The exception's scope is exactly this, and this section is where it is defined** (it previously
+  deferred to `CLAUDE.md`, which deferred back here — a circular reference resolved in #786): **one
+  statement, one table** (`ErrorEvent`, which carries no vendor relation), reachable only from
+  `instrumentation.ts`'s `onRequestError` fallback branch, with every value passed as a numbered
+  placeholder through `sql.query(text, params)` and nothing interpolated. The rule's purpose
+  survives intact — the model is still declared in `schema.prisma`, the migration still creates the
+  table, and the statement names only columns Prisma already describes. **Do not widen this into a
+  general-purpose raw-SQL helper**: a second raw statement needs its own argument at `/propose`, not
+  this one's precedent. Note also what it is *not* — the compare-and-set rule in §3.4 ("which raw
+  SQL is not permitted to rescue") is about contended hot-path writes and is untouched. Full
+  reasoning: `specs/2026-09-08-error-event-fallback-capture/plan.md`.
+- **Provider-neutral types only.** Integers, `text`/`varchar`, `boolean`, `timestamptz`, `numeric`,
+  Prisma enums (compile to standard Postgres enums), `uuid`. **No** `money`, no Neon/RDS-specific
+  extensions in the hot path. `citext`/`pg_trgm` are optional and only via portable migrations.
+  **`pg_trgm` is now actually installed** (P7.5d+e, #163, migration
+  `20260820143949_p7_5de_order_search_trigram`) — the first extension this database has ever
+  carried, and still provider-neutral: `pg_trgm` is a stock contrib module, not a Neon feature.
+  It backs three GIN trigram indexes (`Order.orderNumber`, `Order.guestEmail`, `User.email`) that
+  make the staff order search's leading-wildcard `ILIKE` servable; no B-tree can do that, which is
+  why the indexes could not simply be `@@index` declarations.
+  **Standing consequence:** Prisma's schema language cannot express an index's access method or
+  operator class, so `schema.prisma` no longer fully describes the database. `prisma migrate diff`
+  may report drift that is not drift, and `prisma migrate dev` may propose **dropping** these
+  indexes — keep them and re-assert the migration. This is the first exercise of the
+  hand-authored-DDL exception ruled on in P7d (#218); the migration carries the disclosure that
+  ruling requires. **This warning fired for real in P8.5d (#348)**, two slices after it was
+  written: `prisma migrate diff` for an unrelated new table emitted `DROP INDEX` for all three
+  trigram indexes, and applying that output verbatim would have destroyed order and customer
+  search. They were stripped before the migration was saved, and
+  `prisma/migrations/20260825190000_p8_5d_product_price_tier/migration.sql` names the three
+  statements it omits so a regeneration does not silently reintroduce them. Treat the paragraph
+  above as an operational instruction, not a theoretical caveat.
+
+  is no longer "possible" — it has fired on **every migration this project has generated since**
+  `#508` (2026-09-01): six occurrences by `#569` (2026-09-05), namely `#508`, then once per P2.6
+  slice carrying a migration (`#565`, `#566`, `#567`), and again at `#569`. Adding a new model
+  (`ErrorEvent`) with **no relationship whatsoever** to `Order` or `User` was enough for
+  `prisma migrate dev` to emit `DROP INDEX` for all three hand-authored `pg_trgm` indexes. So:
+  1. **Generate every migration with `--create-only` and read the generated `migration.sql` before
+     letting it apply.** At `#508` the erroneous drop **executed** against the dev database before
+     anyone read the file. A `--create-only` run is not a precaution here; it is the procedure.
+  2. **Recovery needs three steps, not one.** Re-adding the `CREATE INDEX` is not enough: restore
+     the indexes on the already-mutated database, rewrite the migration file to remove the erroneous
+     drops (so a fresh `migrate deploy` elsewhere never repeats them), **and** reconcile Prisma's
+     own `_prisma_migrations` checksum for that file — delete the stale row and
+     `prisma migrate resolve --applied <name>` — since editing an already-applied migration leaves
+     the recorded checksum stale.
+  3. **When `migrate dev` refuses and offers a reset, never accept it** (dev, 2026-09-24, `#895`:
+     checksum drift on `20260820200500_p8_image_needs_review`). Generate the SQL without a database
+     instead — `prisma migrate diff --from-schema-datamodel <base-branch schema.prisma>
+     --to-schema-datamodel prisma/schema.prisma --script` — write it into a hand-named, correctly
+     sorting migration directory, read it, then `prisma migrate deploy`. Neither datamodel contains
+     the `pg_trgm` indexes, so this diff cannot propose dropping them. Used by `#876` and `#613`.
+- **Money as integer minor units (pence).** Currency stored explicitly (`GBP` default). Avoids
+  float drift and locale-bound types.
+- **Images/large files never in the DB.** Only a **relative storage key** (e.g.
+  `products/{productId}/{uuid}.webp`). Full URL is composed at read time from `CDN_BASE_URL`.
+- **Historical snapshots are intentional.** `OrderItem` stores name + unit price at purchase time —
+  a recorded fact, not a normalization breach.
+- **`OrderItem.lineTotalPence` is independently load-bearing, not `unitPricePence × quantity`**
+  (P8.5d, #348). It was that product until multi-buy tier pricing shipped. A `ProductPriceTier`
+  prices whole groups at a group price and charges the remainder at base, so a tiered line's
+  effective unit price is *fractional* and the multiplication is simply wrong for it. The two
+  columns now record different facts — what the product listed at, and what the line actually
+  charged — which is what makes an auto-applied multi-buy auditable without a `DiscountRedemption`
+  row. **Never re-derive a line total from unit price and quantity**; `lib/tier-pricing.ts` is the
+  only place that arithmetic lives, and both the cart and `placeOrder` go through it.
+- **A multi-buy tier is a PRICE, not a discount** (P8.5d, #348). It never touches `DiscountCode`,
+  writes no `DiscountRedemption`, and consumes no `remainingRedemptions`. The consequence that
+  surprises people: because a tier is inside the subtotal rather than a deduction from it, the
+  vendor's `minimumOrderPence` and the free-delivery threshold are judged on the *tier-reduced*
+  figure — the opposite of how discount codes and loyalty redemption behave, and deliberate.
+
+### 3.1a Delivery areas, per-area pricing and refusal counts (#613, #890, #889 — 2026-09-24)
+
+- **Geography is postcode strings on `VendorDeliveryArea`.** A row is an AREA (`MK`, every
+  district in it) or a DISTRICT (`MK9`, exactly that outward code), compared as strings by
+  `lib/delivery.ts` — never interpreted as a pattern. When both match, the district row wins
+  (`matchDeliveryArea`). Ranges and comma lists (`MK1-MK10`) are an **input convenience only**,
+  expanded to ordinary rows by `lib/delivery-area-form.ts`; nothing stores a range or an exclusion.
+  ADR-004's `Region`/`Location` tables remain unbuilt (ADR-006, note of 2026-09-24).
+- **Per-area delivery money is three nullable override columns on the same row** —
+  `deliveryFeePence`, `minimumOrderPence`, `freeDeliveryThresholdPence`, integer pence; `null` =
+  the `VendorConfig` default, field by field. `0` keeps `VendorConfig`'s meaning (free delivery /
+  no minimum / free delivery not offered), which is how an area opts out of a store-wide offer.
+  Delivery only: Click & Collect always uses the vendor defaults.
+- **One resolver decides a shopper's charges:** `lib/delivery-pricing.ts`'s pure
+  `resolveDeliveryRules(vendorDefaults, areas, postcode, method)`. Every surface showing or charging
+  delivery money calls it — the checkout page, `place-order`, the cart drawer, `/cart`, the landing
+  banner — through `lib/delivery-pricing-service.ts` (the `delivery-postcode` cookie) or, in
+  `place-order`, with the delivery ADDRESS postcode. No surface reads the vendor-wide fields
+  directly.
+- **No silent price change at checkout.** The checkout page carries the charges it quoted
+  (`quotedDeliveryRules`, `<fee>:<minimum>:<threshold>`); `place-order` refuses, moves the cookie,
+  and asks the shopper to review when the address resolves to different **values**. Comparing values
+  rather than the matched row is deliberate: a shopper with no cookie whose area has no overrides is
+  never refused.
+- **`DeliveryRefusalCount`** holds out-of-area demand: one row per vendor, outward-code district,
+  vendor-local day (`@db.Date`) and source (`HEADER` / `CHECKOUT`), incremented by an `upsert`.
+  Recorded only for `OUTSIDE_DELIVERY_AREA` (a real postcode, confirmed by the reference database,
+  that the vendor does not serve); never from the public lookup API. It carries **no personal
+  data** — no user, session, full postcode, cookie or IP — and so sits outside data-rights export
+  and erasure; adding any such column would change that. A failed count is logged and never
+  changes the shopper's response.
+- **Client choice:** the bulk insert (`createMany`) and the charges update (`updateMany`) take the
+  WebSocket client (#382); the refusal `upsert` and the single-row `create` use HTTP.
+  `scripts/verify-delivery-areas.ts` proves both adapters against a real database.
+
+### 3.2 Core schema (representative Prisma excerpt)
+
+> **Multi-tenancy (ADR-004, slice 1 — `specs/2026-08-08-multitenancy-slice1-vendor-schema/`).**
+> The live schema is **vendor-scoped**: a `Vendor` aggregate (with `VendorBranding`/`VendorConfig`/
+> `VendorDeliveryArea`) is the tenancy root, and every domain table (`Category`, `Product`,
+> `Inventory`, `Review`, and future `Order`/`Cart`) carries a required `vendorId` FK. Global slug
+> uniques are now **per-vendor composites** (`@@unique([vendorId, slug])`), and read indexes lead
+> with `vendorId`. `User` and the other auth tables stay **global** (identity is platform-wide).
+> **Authorization is two-tier (slice 3a):** `User.role` is the *platform* role (platform `ADMIN` =
+> operator, transcends vendors; `/dev` gates on it), while `VendorMembership(userId, vendorId, role)`
+> carries *per-vendor* staff/admin — `requireVendorRole()` allows platform admins or matching members
+> of the current vendor. Read-side `vendorId` filtering is enforced centrally in the repository layer
+> (slice 2). **Host→tenant resolution (slice 3b):** the request host maps to a vendor via a
+> `VendorDomain(host)` table (`lib/tenant.ts`); an unresolved host redirects to `/coming-soon`. No
+> Next middleware is used (edge runtime is forbidden) — **each top-level layout gates the tenant**:
+> `app/(storefront)/layout.tsx` and, since P6a, `app/(admin)/layout.tsx`. This is a per-layout
+> obligation, not a property of one file: `getCurrentVendorId()` *throws* on an unresolvable host,
+> so a new route group whose layout omits the redirect turns an unknown host into a 500 instead of
+> `/coming-soon`. Both layouts also share the brand-token injection via `lib/vendor-theme.ts`.
+> **Branding & config are data-driven (slice 4):** a vendor's colours, name, logo, locality, delivery
+> area, metadata and email sender come from `VendorBranding`/`VendorConfig`/`VendorDeliveryArea` via
+> `lib/repositories/vendor.ts`, reached through `lib/vendor-service.ts`'s `getCurrentVendorProfile`
+> (per-request `cache()`; the accessor moved out of the repository in P8.1b, #252, so every export
+> in `lib/repositories/vendor.ts` takes `vendorId` explicitly — and, since #411, its Prisma client
+> too, which is what makes the file loadable by a plain `tsx` script); the eight brand primitives are injected as CSS
+> custom properties so components are unchanged. **Auth cookie scoping is per-request, same-vendor-only
+> (slice 3c):** `getAuth()`'s `baseURL`, `trustedOrigins` and cookie domain are resolved per request
+> from the host alone (`lib/auth-origin.ts`, no DB call) — **host-only sessions by default, trusting
+> only that vendor's own origin** (a sibling vendor's origin is rejected exactly like an unknown
+> origin — reopening cross-vendor trust would undermine isolation, #83); the parent-domain
+> family-cookie (SSO) path is config-gated behind an optional `AUTH_COOKIE_FAMILY_DOMAIN`, unset today
+> (no subdomain family exists). **The cart is vendor-scoped (P3a):** `Cart`/`CartItem` carry
+> `vendorId`, so one shopper has an independent cart per vendor. Cart identity is **exactly one of**
+> `userId` or an opaque `guestToken` in a host-only `store_cart` cookie (#1080), and carts are created lazily
+> (first add only — crawling this public storefront writes nothing). A guest cart meeting a saved cart
+> is **never silently merged**: the shopper picks combine / keep-saved / keep-new, and the cookie is
+> cleared only once a resolution is applied. The cart stores **no prices** — unit price is read from
+> `Product` at render and snapshotted into `OrderItem` only at order creation (P3b) — and stock is
+> advisory in the cart but authoritative at that decrement. **Orders are vendor-scoped (P3b):**
+> `Address`/`Order`/`OrderItem`/`Payment`/`OrderStatusEvent` all carry `vendorId`, and an order
+> number never resolves on another vendor's host. An order opens as **`PENDING_PAYMENT`** — stock is
+> decremented at creation (a conditional `updateMany` guard inside one transaction, so overselling
+> is structurally impossible), but nothing is paid until P3c's webhook moves it to `CONFIRMED`; an
+> unpaid order must never read as `CONFIRMED` or staff would pick and deliver it. **The delivery
+> address is snapshotted per order** (its own `Address` row, written once), for the same reason
+> `OrderItem` snapshots name and unit price: editing a saved address later must not rewrite where a
+> past order was delivered. The excerpt below predates
+> tenancy and is kept as a shape reference — see `prisma/schema.prisma` for the authoritative,
+> vendor-scoped models.
+
+```prisma
+enum Role            { CUSTOMER STAFF ADMIN }
+enum OrderStatus     { PENDING_PAYMENT CONFIRMED OUT_FOR_DELIVERY DELIVERED CANCELLED }
+enum PaymentStatus   { PENDING SUCCEEDED FAILED REFUNDED }
+enum DiscountType    { PERCENTAGE FIXED }
+enum LoyaltyTxnType  { EARN REDEEM }
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  role      Role     @default(CUSTOMER)
+  createdAt DateTime @default(now())
+  addresses Address[]
+  orders    Order[]
+  loyalty   LoyaltyAccount?
+  @@index([role])
+}
+
+model Category {
+  id        String     @id @default(uuid())
+  slug      String     @unique
+  name      String
+  parentId  String?
+  parent    Category?  @relation("Sub", fields: [parentId], references: [id])
+  children  Category[] @relation("Sub")
+  sortOrder Int        @default(0)
+  isActive  Boolean    @default(true)
+  products  Product[]
+  @@index([parentId, isActive])
+}
+// THE CATEGORY TREE IS TWO LEVELS DEEP. `parent`/`children` is a self-relation
+// with no depth limit in the schema, but a category's parent must itself be
+// top-level — enforced in lib/repositories/categories.ts (P6b1, #159), not by a
+// constraint. Two reasons it is a rule rather than a preference: the storefront
+// can only render two levels (listTopLevel() plus getBySlug()'s single children
+// fetch), so a grandchild would be invisible rather than nested; and capping the
+// depth makes a cycle — a category reachable from itself — unrepresentable,
+// with no recursive walk to get wrong. Anything that writes a Category must
+// preserve this.
+//
+// A CATEGORY IS VISIBLE TO SHOPPERS ONLY IF IT AND ITS PARENT ARE ACTIVE (#1131).
+// `lib/category-visibility.ts` holds the one predicate, and every storefront
+// product read in lib/repositories/products.ts carries it (a source-scanning
+// test fails a read that does not), so switching a department off hides its
+// products, its subcategories' products, its page and its sitemap entries
+// without altering a single Product row. Switching it back on restores all of
+// it. That is why deactivating a category no longer requires emptying it first:
+// #159's "deactivate or move the products first" refusal existed to avoid
+// rewriting rows the owner never saw, and nothing is rewritten any more. Carts,
+// orders and bundles that already hold such a product are not reconciled.
+
+model Product {
+  id          String         @id @default(uuid())
+  slug        String         @unique
+  name        String
+  description String
+  categoryId  String
+  category    Category       @relation(fields: [categoryId], references: [id])
+  basePrice   Int            // pence
+  unitLabel   String         // "£2.40 / kg"
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  images      ProductImage[]
+  inventory   Inventory?
+  @@index([categoryId, isActive])
+  @@index([isActive, basePrice])   // catalogue filter + sort
+}
+
+model ProductImage {
+  id         String  @id @default(uuid())
+  productId  String
+  product    Product @relation(fields: [productId], references: [id])
+  storageKey String  // RELATIVE key only — never a URL
+  alt        String
+  sortOrder  Int     @default(0)
+  isPrimary  Boolean @default(false)
+  @@index([productId, sortOrder])
+}
+
+model Inventory {
+  id                String   @id @default(uuid())
+  productId         String   @unique
+  product           Product  @relation(fields: [productId], references: [id])
+  quantity          Int      @default(0)
+  lowStockThreshold Int      @default(3)
+  expectedRestockDate DateTime? // #876 — a calendar DAY: UTC midnight of the vendor-local day
+  updatedAt         DateTime @updatedAt
+}
+
+model Order {
+  id             String        @id @default(uuid())
+  orderNumber    String        @unique
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id])
+  guestEmail     String?
+  status         OrderStatus   @default(CONFIRMED)
+  currency       String        @default("GBP")
+  subtotal       Int
+  deliveryFee    Int           @default(0)
+  discountTotal  Int           @default(0)
+  loyaltyRedeemed Int          @default(0)
+  total          Int
+  createdAt      DateTime      @default(now())
+  items          OrderItem[]
+  statusEvents   OrderStatusEvent[]
+  payment        Payment?
+  @@index([userId, createdAt])       // keyset order history
+  @@index([status, createdAt])       // staff dashboard
+}
+
+model OrderItem {
+  id         String  @id @default(uuid())
+  orderId    String
+  order      Order   @relation(fields: [orderId], references: [id])
+  productId  String
+  productName String // snapshot
+  unitPrice   Int    // snapshot, pence
+  quantity    Int
+  lineTotal   Int
+  @@index([orderId])
+}
+// … Address, OrderStatusEvent, Payment, Cart/CartItem, Discount,
+//    LoyaltyAccount, LoyaltyTransaction, LoyaltyConfig, Review …
+```
+
+### 3.3 Object-storage integration
+
+The port (`lib/storage.ts`) exposes five operations: `putObject`, `publicUrl`, `presignPut`,
+`headObject` and `deleteObject` (added 2026-08-17, #211 — see ADR-003's implementation note). All
+are standard S3 (`PutObject`, `HeadObject`, `DeleteObject`, SigV4 query signing) — nothing
+R2-specific, per ADR-003.
+
+1. **Upload (admin, browser-direct — P6b2/#167).** The Worker signs a short-lived `PUT` with
+   `presignPut` and the browser uploads **straight to storage**; no image byte transits the Worker,
+   so its request-size and CPU limits are not in the path. The Worker then confirms what landed
+   with `headObject` before persisting the key — a presigned PUT cannot police a body it never sees.
+   **Requires bucket CORS** allowing `PUT` from the vendor origins, per bucket and per environment.
+2. **Upload (server-side).** `putObject(key, bytes, contentType)` for bytes the server already
+   holds — `prisma/seed.ts`'s placeholder images are the only current caller.
+3. **Read**: the presentation layer composes `${CDN_BASE_URL}/${storageKey}`. The DB has no
+   knowledge of which CDN or bucket is live.
+
+**Product image keys are `products/{productId}/{uuid}.webp` and are immutable.** Replacing an image
+writes a **new** object and repoints `ProductImage.storageKey`; nothing is ever overwritten, so a
+CDN cache purge is never part of the flow — which is what keeps a provider-specific purge call (and
+a purge-scoped API token) out of a deliberately vendor-agnostic port. Keying on the product id
+rather than the slug survives a slug edit, which P6b1 made possible.
+
+**There is no delete operation on the port.** Superseded objects therefore accumulate; cleanup is
+**#174**, which must first choose between an inline delete and a scheduled sweep (the latter would
+be the first cron trigger in `wrangler.toml`).
+
+Because the key is relative and the base URL is env-resolved, moving buckets or CDNs is a config
+change, not a data migration of DB rows (see §4.2).
+
+### 3.4 Performance strategy (target: ~1,000 orders/day, mobile-first)
+
+**Indexing.** Composite indexes aligned to real access paths and **lead with `vendorId`** (ADR-004).
+The list below is reconciled against `prisma/schema.prisma` as of P7d (#218) — every index named
+here exists in the schema:
+`Product(vendorId, categoryId, isActive)` and `Product(vendorId, isActive, basePrice)` for
+browse+filter+sort; `Product(vendorId, isActive, isFeatured)` for the homepage rail;
+`Order(vendorId, userId, createdAt)` for order history; `Order(vendorId, status, createdAt)` for the
+staff dashboard and `Order(vendorId, createdAt)` for the unfiltered list; per-vendor unique indexes
+on `slug` (`@@unique([vendorId, slug])`), plus `orderNumber` and `Inventory.productId`. Add a
+partial/trigram index for name search only when the catalogue grows.
+
+> **This paragraph named two indexes that did not exist**, until P7d checked it against the schema
+> rather than against another document. It claimed `Order(userId, createdAt)` served order history
+> and `Order(status, createdAt)` served the staff dashboard; neither was ever created, and both
+> omitted the leading `vendorId` that ADR-004 requires of every tenant-scoped index. The staff
+> dashboard was in fact already covered by `Order(vendorId, status, createdAt)`. Order history was
+> not covered at all — `listForUser` filters `{vendorId, userId}` ordered by `(createdAt desc, id
+> desc)`, so Postgres could only walk the **vendor's** orders in date order and discard other
+> customers' rows, making one shopper's history cost the whole store's order volume. P7d added
+> `Order(vendorId, userId, createdAt)`. At the row counts measured then (118 orders) the fix was
+> not observable — every query was dominated by the ~15ms Neon round-trip — so this is a
+> correctness-of-documentation and future-proofing change, not a measured speed-up. Don't claim it
+> as one.
+
+(product grids, order history, admin tables). Never `OFFSET` — it degrades linearly and is the
+classic mobile-scroll performance trap. Prisma `cursor` + `take` implements this directly.
+
+into Prisma arguments.** It arrives from a query string a shopper or an owner may have edited,
+bookmarked, truncated or forged, and `keysetCursorArgs()` resolves anything that is not a single
+well-formed id to the first page rather than throwing.
+`tests/pagination-guard-coverage.test.ts` walks `lib/repositories/` and fails if any other file
+builds the argument by hand. Both failure modes were measured live before the guard existed
+(`#682`): a malformed or stale id returned **HTTP 200 with an empty list**, because Prisma does not
+error on a cursor matching no row — so a bad bookmark rendered a 2,000-product catalogue as empty —
+and a **repeated** `cursor` parameter, which is `string[]` at runtime whatever the page's
+`searchParams` type declares, reached Prisma as `cursor: { id: [...] }` and threw
+`PrismaClientValidationError` (**HTTP 500**). The guard narrows the runtime type, which is what
+makes the page-level annotation true rather than aspirational.
+
+**One scoped exception: ranked storefront search** (P2.6 slice 1, `#564`). `searchProducts` in
+`lib/repositories/products.ts` fetches at most `SEARCH_CANDIDATE_LIMIT + 1` (201) matching rows —
+the extra row is a truncation sentinel, discarded before ranking — ranks at most
+`SEARCH_CANDIDATE_LIMIT` (200) of them in pure code (`lib/search-ranking.ts`), and paginates by
+**slicing that ranked array** — its
+cursor is a non-negative integer offset into the candidate set, not a row id. Every other list,
+including `listProducts` and this same page's browse mode, is unchanged.
+
+The reason keyset cannot serve it: a cursor's ordering key has to *be* the sort key, and relevance is
+not a stored column. Prisma cannot express the ranking in `orderBy`, and computing it in SQL would
+need `$queryRaw`, which `CLAUDE.md` forbids in `lib/repositories/*`.
+
+**This does not reopen `OFFSET`.** The prohibition above exists because `OFFSET` degrades linearly:
+page ten reads and discards nine pages of rows. Here the database query is **bounded and identical
+for every page** — it always fetches at most 201 rows and the slicing happens in memory — so page ten
+costs exactly what page one costs. The rule's stated rationale is not engaged.
+
+What *is* given up, and is not hidden: a query matching more than 200 products cannot reach the rest,
+and which 200 are ranked is decided by the fetch's own `createdAt desc, id desc` order rather than
+by relevance. `ProductPage.truncated` carries that fact to the UI so the shopper is told the list is
+partial — set from a **sentinel row** (the fetch asks for one more than the cap) so it means "more
+matches provably exist", not merely "the cap was reached", which would misreport a catalogue holding
+exactly 200 matches. Raising the cap needs either an index that can serve ranking or the `pg_trgm` work in
+`#286`; until then the bound is deliberate, and this exception must not be cited to justify offset
+pagination over an **unbounded** query anywhere else.
+
+### Composing `where` fragments: never emit a bare top-level `OR` from a filter
+
+**A filter predicate must not put `OR` (or `AND`) at the top level of the object it returns.** Added
+1.26.0 (P2.6 slice 6, `#569`), from a defect caught in review rather than in production.
+
+`lib/repositories/products.ts` composes a product query from independent fragments — the vendor and
+active scope, `buildFilterWhere(filters)`, and a search predicate. Three of those fragments already
+emit a compound key: `buildDirectSearchWhere` returns `AND`, and the zero-result ladder's
+`identitySearchPredicate` and `broadSearchPredicate` (`#565`) each return `OR`. While fragments were
+merged with an object spread, any two sharing a key meant **the later one silently won**.
+
+The "on offer" facet was the first filter that needed a compound key. Written the obvious way, as
+`where.OR = [...]`, it would have been dropped on exactly the two ladder rungs — handing a shopper
+products that are not on offer while the applied-filter chip still said the filter was active. Both
+objects are valid `Prisma.ProductWhereInput`, so `lint`, `typecheck`, `test` and `build` would all
+have stayed green, and the failure only appears for a shopper who has a facet applied *and* whose
+query falls through to recovery.
+
+Two rules follow, and the second is the one that generalises:
+
+1. A filter fragment nests a compound clause under `AND`, never at the top level.
+2. **Fragments are combined with `combineWhere`, not with a spread.** It nests into `AND` only when
+   two fragments actually share a key, so a query with no collision keeps exactly the shape it had
+   before — but a collision can no longer silently discard half a predicate.
+
+This is the same failure shape as `#568`'s `categoryId`-ordering trap in the same function, and the
+reason to write it here rather than only in that slice's `plan.md`: the next person to add a filter
+will read this file, not a dated spec folder.
+
+### Vendor-defined filters sit beside the label booleans (`#912`)
+
+Added 1.35.0. A product has **two** filter mechanisms, on purpose:
+
+- **The six label booleans** on `Product` (`isHalal`, `isFresh`, `isOrganic`, `isVegetarian`,
+  `isGlutenFree`, `isHmcCertified`). These are platform-defined yes/no columns, each switchable per
+  vendor (`#905`). They stay columns for the reason `#569` gave: a boolean needs no join and indexes
+  simply.
+- **Vendor-defined filters.** `VendorAttribute`, `VendorAttributeOption` and
+  `ProductAttributeValue` hold value filters a vendor invents ("Colour: Black"), with at most one
+  value per product per filter. Composite foreign keys make "this option belongs to this filter,
+  and this filter belongs to this vendor" a database fact.
+
+Do not migrate one mechanism into the other as a side effect. Merging them is a decision of its own.
+
+**Two kinds of vendor filter** (1.36.0, `#918`). `VendorAttribute.kind` is `LIST` (pick from the
+filter's values) or `NUMBER` (a decimal, with an optional `unit` such as `W` or `in`). The kind is
+set at creation and never changes. A value row holds **either** `optionId` **or** `numericValue`
+(`Decimal(10,2)`; measurements are not money, so the pence rule does not apply), and the database
+`CHECK` `ProductAttributeValue_one_value_check` enforces exactly one. Which kind a value may take is
+checked in the repository, against its filter. No Prisma `Decimal` leaves `lib/repositories/`:
+numbers travel as strings and render through `lib/attribute-number.ts`.
+
+A vendor filter travels in the URL as:
+
+- **`attr_<attributeSlug>=<optionSlug>`** for a list filter. **The parameter may repeat**
+  (`attr_colour=black&attr_colour=white`), meaning either value, because a plain GET form with
+  ticked checkboxes submits it that way. Values of one filter combine with OR; filters combine with
+  AND. This is the one deliberate exception to `#689`: every fixed key, and every range key, still
+  treats a repeated parameter as applying nothing. Every href builder therefore **appends**, never
+  sets, filter pairs.
+- **`attr_<attributeSlug>_min` / `_max`** for a number filter, one chip per bound, like
+  `minPrice`/`maxPrice`. Slugs are `[a-z0-9-]`, so the suffix cannot collide with one.
+
+Slugs never change on rename, so shared links keep working. An unknown slug, a value that fails
+its kind's rule, or a key naming a filter of the other kind applies no predicate and renders no
+chip.
+
+A filter with **`showOnCard`** set is also shown on product cards, through `productSummarySelect`,
+so every card path gets it from the one select. Text search (the direct and broad rungs) also
+matches list-filter **option names**, and a candidate matched that way counts as a direct match
+for the thin-result notice. Number values are not text-searched.
+
+**`components/product/filter-params.ts` is the only place a filter key is defined.** It holds the
+fixed keys plus the `attr_` list and range rules. Every href builder and the chip module derive from
+it (`#601`). Before `#912`, a key had to be registered in three unsynchronised lists, and forgetting
+one silently dropped the filter on "Next page".
+
+**Query optimization.** Explicit `select`/`include` (never over-fetch); batch relations to kill
+N+1; per-request memoization with React `cache()`; wrap order creation in a single
+`prisma.$transaction` that decrements `Inventory` atomically; push aggregation (reports) into the
+database rather than the app.
+
+**Caching (layered, portable-first).**
+- CDN caches images and static assets (swappable).
+- ~~Next.js Data Cache / ISR for catalogue and product pages~~ — **doesn't hold as written**: Next's
+  own SSG-based ISR requires prerendering in plain Node (`next build` or on-demand), but Prisma on
+  this stack loads via `@prisma/client/wasm`, which only works in the Workers runtime — attempting
+  it hard-fails the build (`Unknown file extension ".wasm"`, found shipping P2a,
+  `specs/2026-08-07-p2a-catalogue-browsing/`). Catalogue/product pages are `force-dynamic`
+  (server-rendered per request, same as the auth pages) until a caching layer that doesn't require
+  Node-side Prisma execution is added — the edge KV option below, or Cloudflare's own edge cache in
+  front of the Worker.
+- **Cloudflare's edge cache in front of the Worker is not a future option — it is already active,
+  and it required an explicit opt-out for the admin panel** (P7.5a, #237). The bullet above lists it
+  as something that *could* be added; in fact `/staff/reports` was measured serving a signed-in
+  admin stale financial figures on staging (£2,982.02/109 cached against £3,003.49/110 uncached,
+  the database agreeing with the uncached read) while the page was `force-dynamic` and Next was
+  therefore not the cache. The app emitted **no `Cache-Control` at all**, which leaves an
+  intermediary free to choose its own policy. Every `/staff/:path*` response now carries
+  `private, no-store, must-revalidate` from `next.config.mjs`'s `headers()`. The general rule this
+  establishes: **a route whose response is per-session or role-gated must state its cacheability
+  explicitly** — `force-dynamic` governs Next's rendering, not what sits in front of the Worker, and
+  the two are easy to confuse because the symptom (a stale page) looks identical. Storefront routes
+  are deliberately left cacheable.
+- **Storefront HTML is NOT edge-cached today, measured 2026-09-23 (#876).** "Deliberately left
+  cacheable" above means only that `next.config.mjs` adds no `Cache-Control` to them. It does not
+  mean anything caches them. On production and staging, `/`, two category pages and
+  `/search?q=rice` all return `Cache-Control: private, no-cache, no-store, max-age=0,
+  must-revalidate` (Next's own header for per-request dynamic rendering), with no `cf-cache-status`
+  and no `Age`. So a server-rendered stock count or price is fresh at render time. `#400`'s
+  proposal to move stock badges to an async fetch rested on the opposite assumption and was dropped
+  on this measurement. Re-measure before designing anything around storefront edge caching.
+  `docs/developer-portal/runtime-pitfalls.md`'s edge-caching section explains why a header alone
+  never proves a cache forms.
+- Optional **edge KV** for hot reads (categories, homepage rails) behind a `CacheService` port; if
+  absent it falls through to the DB. KV ↔ Redis is a one-file swap.
+- **Cloudflare KV is in use for one thing: the job activity markers** (`#1324`). The `JOB_SIGNALS`
+  namespace, bound to both the application Worker and `workers/scheduler`, holds two timestamps that
+  tell the scheduler's 15-minute tick whether the payment sweep or the error-rate check has any work.
+  An idle store therefore never wakes Neon, except in the ungated daily run. The application reaches it
+  **only through `lib/job-signals.ts`**, and an absent binding, a failing call or an unparseable value
+  **fails open to running the job**. KV here decides *when* a job runs, never *what* it does; the
+  database stays the source of truth for every order. Detail: `docs/developer-portal/env-setup.md`,
+  "Gated ticks".
+- The **database is always the source of truth**; caches are accelerators with explicit TTLs and
+  tag-based invalidation on write.
+
+**Connection handling.** Serverless functions use Neon's pooled endpoint (PgBouncer) at runtime and
+the **direct** endpoint for migrations (`DIRECT_URL`). This keeps connection counts flat under
+bursty Worker invocations.
+
+### Restricted products and stock states (`#1211`, ADR-007)
+
+These are owner rulings, recorded in `specs/decisions/ADR-007-storefront-scope-restrictions-stock-states.md`.
+The slice spec is `specs/2026-10-22-catalogue-restrictions-stock-states/`.
+
+- **Imported, visible and purchasable are three different states.**
+  - **Visible** is `Product.isActive`.
+  - **Purchasable** is decided by exactly one function, `purchasableQuantity()` in
+    `lib/cart-rules.ts`, called by the cart, the checkout render, bundles, the storefront mappers
+    and `placeOrder`.
+  - Nothing else derives availability. A guard test fails on a re-derived quantity comparison.
+- **A restricted product is never active, enforced by Postgres:**
+  `CHECK "Product_restricted_inactive_check"`. `Product.restriction` has two classes:
+  - **Hard blocks:** `PROHIBITED` and `AGE_RESTRICTED`. No path, role or confirmation enables them.
+    That holds until age verification with a record of the check exists (`#1200` option 2).
+  - **Admin overrides:** `NOT_DELIVERABLE` and `NEEDS_REVIEW`. An ADMIN may enable one only after
+    confirming it is legally sellable and can be fulfilled, with a reason. Enabling clears the
+    restriction in one conditional write and appends to `ProductRestrictionAuditLog`.
+
+  The rules live in `lib/product-restriction.ts`; bulk actions call the same functions per product.
+  A restriction can be tightened but never loosened, except by that audited clear.
+- **The audit log is append-only by construction.** No application code may update or delete
+  `ProductRestrictionAuditLog`, and a guard test enforces it.
+- **Stock has three explicit states on `Inventory.stockMode`, and none means stock management**
+  (ADR-007 Decision 1):
+
+  | State | Purchasing |
+  | --- | --- |
+  | `UNTRACKED` | Allowed, no quantity check, no decrement. A cart line is capped at `MAX_ADD_QUANTITY`. |
+  | `TRACKED` | Allowed while quantity > 0, under the existing atomic oversell guard. |
+  | `UNKNOWN`, or no `Inventory` row | **Blocked**, and also the column default, so a code path that forgets to choose fails closed. |
+
+  `quantity` is meaningful only under `TRACKED`. Stock writes in `placeOrder` and the cancellation
+  paths filter on `stockMode: "TRACKED"`.
+- **A catalogue import writes through `lib/catalogue-import-policy.ts`:**
+  - every row is created hidden, with stock `UNKNOWN`;
+  - a re-import never activates a product, never clears or loosens a restriction, and never touches
+    stock;
+  - the department → restriction map is per-client import input, never platform code (ADR-004).
+
+---
+
+## 4. Migration Strategy (zero lock-in, proven by construction)
+
+### 4.1 Database: Neon → AWS RDS / GCP Cloud SQL / Azure / self-hosted
+
+Because the schema uses only standard Postgres and all queries go through Prisma, the migration is
+config + data, not code:
+
+1. **Provision** the target at the **same major Postgres version**.
+2. **Recreate schema**: `prisma migrate deploy` against the target (schema is provider-neutral), or
+   `pg_dump --schema-only | psql`.
+3. **Move data**: `pg_dump`/`pg_restore` for a maintenance-window cutover, **or** Postgres **logical
+   replication** (Neon publisher → target subscriber) for near-zero downtime.
+4. **Swap the connection**: change `DATABASE_URL` / `DIRECT_URL`, and swap the Prisma **driver
+   adapter** (Neon serverless adapter → standard `pg` adapter / managed pooler such as RDS Proxy or
+   Cloudflare Hyperdrive). This is the *only* code touch, isolated to `lib/db`.
+5. **Verify & cut over**: `prisma migrate status`, run the smoke/integration suite (Gate 3), flip
+   traffic, keep the old DB read-only as a rollback for one cycle.
+
+*No application query, no schema definition, and no domain code changes.*
+
+### 4.2 Object storage: R2 → AWS S3 / GCP Cloud Storage / MinIO / any S3-compatible
+
+Because storage lives behind the `StorageService` port and the DB holds **relative keys**:
+
+1. **Provision** the target bucket.
+2. **Copy objects** preserving keys: `rclone sync` or `aws s3 sync` (both endpoints speak S3).
+   Relative keys are identical on both sides, so **every `storageKey` in the DB stays valid**.
+3. **Repoint config**: change `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`,
+   `S3_REGION`, and `CDN_BASE_URL`. Front the new bucket with CloudFront / Cloud CDN as needed.
+4. **Cut over**: dual-read during the sync window if desired, then flip `CDN_BASE_URL`.
+
+*No code change, no DB row change.* This is the payoff of storing keys, not URLs, and using the
+S3 API rather than an R2-specific SDK.
+
+---
+
+## 5. Development Guidelines
+
+- **Respect the layers.** Presentation → Service → Repository → Prisma. UI/components never import
+  Prisma or the S3 client. Cross-cutting integrations live behind ports in `lib/*`.
+- **Program to interfaces (DIP/SOLID).** Services depend on `ProductRepository`, `StorageService`,
+  `PaymentService`, `EmailService`, `CacheService` — not concretions. One implementation per port,
+  wired at the composition root.
+- **Config only through validated env.** Parse every variable through a typed zod schema in
+  `lib/config`. No literal endpoints, buckets, or keys in code. Required: `DATABASE_URL`,
+  `DIRECT_URL`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`,
+  `CDN_BASE_URL`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`.
+- **Storage keys, never URLs, in the DB.** Compose URLs at read time only.
+- **No raw SQL, no `Json` columns** for domain data. If you reach for either, revisit the model.
+  The single permitted exception is `lib/error-event-fallback.ts`'s parameterised INSERT (#674) —
+  diagnostic, not domain data, and the only way to record a failure in Prisma's own query-compiler
+  construction. See section 3.1.
+- **Money is integer pence + explicit currency.** Never floats. Loyalty points are integers and
+  tier multipliers are basis points, for the same reason.
+- **An order's money identity is `subtotal − discount + delivery = total`** (P5a, #135; P5b, #145).
+  The discount column is generic rather than points-specific, and as of P5b it has **two
+  contributors** — a discount code and a loyalty redemption — summed into the one column by the one
+  arithmetic. **Precedence is code first, then points:** the code is evaluated against the
+  pre-discount subtotal, so a percentage cannot shrink because points were also spent, and points
+  then fill only the remaining headroom above the payment provider's floor. Both the free-delivery
+  threshold, the vendor's minimum order and a code's own minimum spend are judged on the subtotal
+  **before** any discount — custom already earned is not clawed back by paying with points, and
+  spending points cannot disqualify a code.
+- **Writes that touch multiple tables run in a transaction.** Order placement decrements stock,
+  claims any discount code, spends any loyalty points, writes items, records payment intent, and
+  emits a status event atomically; payment confirmation flips status and credits points in one
+  transaction, and cancellation releases stock, returns points and gives back the code use in
+  another.
+- **A contended counter is compare-and-set, never read-then-write.** `Inventory.quantity` (stock),
+  `Order.status` (transitions), `LoyaltyAccount.balancePoints` (points) and
+  `DiscountCode.remainingRedemptions` (code uses) are all guarded by a conditional `updateMany`
+  whose `WHERE` repeats the value it read, with the append-only companion row (`OrderItem`,
+  `OrderStatusEvent`, `LoyaltyLedgerEntry`, `DiscountRedemption`) written in the same transaction.
+  **A guard column therefore counts in whichever direction Prisma can express**: code uses count
+  DOWN because `usedCount < maxRedemptions` compares two columns, which a Prisma `where` cannot do
+  and which raw SQL is not permitted to rescue. A
+  balance derived by `SUM()` cannot be guarded that way, which is why the counter exists alongside
+  its ledger rather than instead of it.
+- **A referral code is owned by a foreign key, and unknown codes are throttled** (`#987`, `#988`,
+  `#991`). A referral code's owner is `DiscountCode.referrerUserId`, a nullable foreign key to
+  `User`: it is unique per vendor and set with `onDelete: SetNull`. The own-code refusal and the
+  referrer's bonus points both read it, never the free-text `description`. A shopper's code is
+  random (`REF-` plus 8 characters), looked up by its owner rather than derived from the user id,
+  and created, awaited, the first time it is shown (`getOrCreateReferralCode`). Unknown discount
+  codes are throttled per vendor and per hashed IP, at 10 per minute, through the
+  `DiscountCodeAttempt` table. The limit applies at both places a code is checked, the Apply
+  preview and order placement, and it fails open.
+- **Webhooks are idempotent.** Verify Stripe signatures; key side effects on the event id.
+- **AI does not sit on a public request path unless it is bounded, optional and argued.** The
+  default established by `#571` (P2.6) and first implemented in slice 3 (`#566`) stands: a model
+  call reachable from an unauthenticated route — `/search` being the case that raised it — is
+  attacker-controlled cost, being paid, non-deterministic, sharing a Workers AI quota with the
+  product-image pipeline, on a stack with **no middleware layer available to rate-limit it
+  centrally** (see `CLAUDE.md` on why no `proxy.ts` can ship here). So AI normally runs only behind
+  an authenticated staff action or a scheduled job, and its output is **proposed, never applied**:
+  `lib/search-synonym-proposals.ts` writes `PENDING` rows a human approves, exactly as the image
+  pipeline writes rows an admin reviews.
+
+  **This line read "AI never sits on a public request path" until 2026-09-04, and P2.6 slice 4
+  (`#567`) made that false** — `/shop-your-list`'s normalisation pre-pass
+  (`lib/list-normalisation.ts`) is a model call on a public, unauthenticated route, by design.
+  `#571`'s resolution could not transfer: interpreting the pasted list **is** the feature and the
+  shopper is waiting on it, so there was no offline place to move it to. It was allowed because it
+  satisfies all four of the following, which is the test a future exception has to meet — not
+  because the rule was relaxed:
+  1. **The feature degrades rather than fails without it.** The deterministic matcher it enriches
+     shipped in P3d and still works; every failure path — no credential, throttled, oversized,
+     non-OK, timeout, unparseable — returns the pre-AI result. A limit here never produces an error
+     page, which is what makes limiting it affordable.
+  2. **Cost is bounded in every direction**: per caller (`ListNormalisationAttempt`, the
+     `OrderLookupAttempt` shape), per submission (`MAX_AI_INPUT_CHARS` alongside `MAX_LIST_LINES`),
+     and per call (an abort deadline, so a hung upstream cannot hang a form submit). One `fetch`
+     per submission regardless of list length.
+  3. **The model cannot decide anything a shopper receives.** It rewrites the shopper's words into
+     search terms; the catalogue match stays deterministic against real vendor-scoped rows, so its
+     output is still *proposed, never applied* — the guarantee is preserved, just enforced by the
+     matcher instead of by a staff queue.
+  4. **Its output is validated, not trusted.** Indices are range- and duplicate-checked so a reply
+     cannot move an item onto a line the shopper did not write; anything unclaimed keeps its
+     deterministic parse.
+  5. **Its spend is metered against the vendor's daily budget (`#1017`, 2026-10-10).** The call is
+     checked against `VendorConfig.aiDailyNeuronBudget` before it is made and recorded in
+     `AiUsageEvent` after, so one vendor's traffic cannot exhaust the platform's shared allowance.
+     Added after the four above, and it applies retroactively: `/shop-your-list` meets it.
+
+  A proposed AI call on a public path that cannot answer all five belongs offline, as `#571` said.
+
+  **Every Workers AI call is metered per vendor (`#1017`, 2026-10-10).** All vendors share one
+  Cloudflare account credential (`getAiEnv()`), so the account's daily neuron allowance is one
+  pool. Every call site — the shop-your-list pre-pass, synonym proposals, net-content suggestions,
+  product images and campaign images — goes through `lib/ai-meter.ts`. It refuses a call once the
+  vendor's neurons since 00:00 UTC (Cloudflare's reset) reach `VendorConfig.aiDailyNeuronBudget`
+  (default 3,000; `0` turns AI off for that vendor), and records each call in `AiUsageEvent`. Each
+  feature degrades on a refusal exactly as it does when AI is unavailable. `AiUsageEvent` is the
+  **only per-vendor AI cost figure**; it carries no user link, so it is not personal data. Neurons
+  come from Workers AI's own reported figure where the reply carries one, otherwise from the dated
+  rate table in `lib/workers-ai.ts`. A model missing from that table is over-charged at the highest
+  listed rate, never refused and never free. The check is best-effort, not compare-and-set, and it
+  fails closed on a database error. **The Workers plan is a platform setting, `WORKERS_AI_PLAN`,
+  Free by default (`#1028`, owner ruling 2026-10-19).** Unset, empty or any value other than exactly
+  `paid` resolves to `free`, so a typo never lifts the shared cap. **Free:** besides each vendor's
+  own budget, the meter refuses every vendor once the platform's total since 00:00 UTC reaches the
+  shared 10,000-neuron allowance, with a refusal that names the platform rather than the store
+  (`AiBudgetCheck.scope`). The platform stops itself before Cloudflare does. **Paid:** no shared
+  cap; usage above the allowance is billed at $0.011 per 1,000 neurons, and `/staff/ai-usage` shows
+  platform admins the day's estimated charge. In both modes the per-vendor budget still applies.
+  **The shared count is this platform's own ledger, not Cloudflare's meter.** Part of it is
+  estimated, and other usage on the same Cloudflare account is invisible to it, so it protects
+  against our own spend, not against Cloudflare's own cut-off. Which plan the account is actually
+  on is an owner reading of the dashboard; setting `WORKERS_AI_PLAN=paid` follows it. The platform
+  total is the one ledger read with no `vendorId` (`sumPlatformMilliNeuronsSince`, allowlisted in
+  `tests/repository-vendor-scoping.test.ts`). Store admins read their usage on `/staff/ai-usage`;
+  only a platform admin can change a budget, enforced in the server action (`#1029`).
+  Model ids are config as well as code: `LIST_NORMALISATION_AI_MODEL`, `SEARCH_SYNONYM_AI_MODEL` and
+  `NET_CONTENT_AI_MODEL` override each feature's named default (`#1016`).
+
+  **Net-content suggestions (`#900`, 2026-09-25) follow the default, not the exception.** Three
+  things are established:
+  - **Offline and proposed, never applied.** `scripts/suggest-net-content.ts` asks a model to read
+    a product's pack size and stores each answer as a `NetContentSuggestion` row. It is bounded by
+    `--limit` and a neuron budget. Only a staff Accept or Edit on `/staff/net-content` copies a
+    value onto `Product`, in a compare-and-set transaction that never overwrites a net content a
+    person entered. **A second entry point (`#927`, 2026-09-28):** the page's "Suggest net
+    content" button, the server action `suggestNetContent` in
+    `features/admin/net-content-suggestions.ts`, behind `requireVendorRole("ADMIN")`. It runs the
+    same loop for the signed-in vendor, bounded to 10 products and 150 neurons per click, and
+    refuses a model with no rate. It is an authenticated staff action under the default above, not
+    a new exception, and like the script it writes suggestion rows only.
+  - **Model-agnostic.** Callers depend on the `NetContentSuggester` interface in
+    `lib/net-content-suggester.ts`. The model id is data: `--model`, then `NET_CONTENT_AI_MODEL`,
+    then the default `@cf/google/gemma-4-26b-a4b-it`. Any per-model request options sit in a table
+    beside the id, never in code branches, and every row records its model. The reply is validated
+    like any untrusted input: quoted evidence must literally occur in the name, the unit label, or
+    the description excerpt actually sent (its first 500 characters, `#928`), and a count (`EACH`)
+    must be stated. Description evidence is also refused when the name states a metric size of its
+    own, or when the excerpt states more than one; both are checked in code, not only asked for in
+    the prompt.
+  - **Image provenance is data (`ProductImage.source`).** Only `STAFF_UPLOAD` and
+    `STAFF_CONFIRMED_PHOTO` images may be read as evidence. An `AI_GENERATED` image was rendered
+    from the product's own name, so reading a size off it only echoes the name. An
+    `OPEN_FOOD_FACTS` keyword match may be another product. Rows that predate `#900` stay
+    `UNKNOWN` and are never backfilled by guessing.
+
+  **A prompt learns what the shop sells only from the vendor (`#905`, 2026-09-26).** No prompt
+  may assume a product category. Every prompt builder opens neutrally and takes the vendor's
+  `VendorConfig.storeDescription` as a **required** `string | null` argument. It is inserted through
+  `lib/store-description.ts`'s `storeDescriptionPromptLine` as one quoted line of at most 200
+  characters, as data after a fixed label, so admin-written text cannot add instructions of its
+  own. `null` means neutral wording, never a grocery default.
+- **A public unauthenticated read endpoint is bounded by its inputs and its cache, not by a
+  per-request throttle row.** Established by P2.6 slice 5 (`#568`) for
+  `app/api/search/suggest/route.ts`, the first public JSON route this storefront serves. The three
+  throttles that existed before it — `order-lookup-rate-limit`, `list-normalisation-rate-limit`,
+  `auth-rate-limit` — each write a row per attempt, which is right for a *write* path reached once
+  per submission and wrong for a *read* path reached once per keystroke: the guard would be a
+  heavier write than the read it guards. So a hot public read is bounded instead by a minimum input
+  length (`parseSearchQuery` already drops sub-two-character tokens, so the cheapest abusive query
+  never reaches the database), hard `take` caps bound to a named constant, a client-side debounce,
+  and a short public `Cache-Control` so repeats are served at Cloudflare's edge.
+
+  **The multi-tenancy of that cache is an assumption to verify per environment, not a given.**
+  Cloudflare's cache key includes the hostname by default, which is the only thing keeping one
+  vendor's suggestions out of another's response. `#502` is the standing precedent that a key can
+  legitimately behave differently in dev, staging and production, so per-host isolation on any
+  edge-cached vendor-scoped response is verified against a **deployed** environment carrying both
+  vendor hosts — never against local preview, which has no edge in front of it at all.
+- **Every list is keyset-paginated; every hot query has an index** shipped in the same migration.
+- **SDD gates still apply.** Spec before code, tests + `validation.md` before done, changelog
+  before merge. NFR targets in §3.4 are Gate-3 acceptance criteria.
+
+---
+
+## 6. Future Scaling Roadmap
+
+The clean seams mean growth is handled by swapping or adding infrastructure, not rewriting.
+
+- **MVP (~1k orders/day).** Single Neon project (autoscale, scale-to-zero), Workers, R2 + CDN.
+  Low fixed cost; zero egress.
+- **Growth (~10k orders/day).** Turn on Neon autoscaling/read replicas; add the edge `CacheService`
+  (KV/Redis) for catalogue reads; introduce **Cloudflare Hyperdrive** (or a managed pooler) for
+  connection efficiency; move long-running work (emails, report rollups) to a queue behind a
+  `JobQueue` port.
+- **Scale-out reads.** Route read-heavy catalogue traffic to replicas; keep writes on primary. Edge
+  KV/CDN (not Next's own ISR — see the Caching section above) absorb most anonymous browsing before
+  it reaches the DB.
+- **Enterprise / off-Cloudflare.** Migrate DB to RDS/Cloud SQL with replicas (§4.1) and storage to
+  S3/GCS (§4.2) — both are config-level. If the edge runtime is ever a constraint, the same Next.js
+  app runs on Node/containers unchanged because the API is standard route handlers.
+- **Specialized subsystems as they earn their place.** Dedicated search (Meilisearch/OpenSearch)
+  behind a `SearchService` port; a separate OLAP store for analytics so reporting never competes
+  with checkout on the OLTP database; multi-region read replicas for latency.
+
+Each step is an infrastructure swap at a single seam — the domain, application, and data model stay
+put. That is the definition of the vendor-agnostic posture this architecture was built to hold.

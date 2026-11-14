@@ -1,0 +1,556 @@
+---
+id: staff-tabs-guide
+title: "Staff Daily Operations Playbook"
+audience: [staff]
+type: runbook
+status: approved
+version: "2.15.0"
+updated: "2026-10-27"
+visibility: internal
+summary: "How to use every page in the Staff Panel: picking and dispatching orders, managing catalogue products, categories, brands, product filters, bundles, promotions, inventory, search dictionary moderation, customer feedback moderation, and finding the guides. One section per menu item."
+tags: ["staff", "guide", "ui", "fulfillment", "inventory", "catalogue", "synonyms", "feedback"]
+---
+
+# Staff Daily Operations Playbook
+
+Welcome to the **Staff Panel**. This guide covers every page you can open, one section per menu
+item. If a page is not listed here, your account cannot open it — the Store Admin Management Guide
+covers the owner-only pages.
+
+The panel's menu is grouped, and you see five groups beside **Overview**:
+
+- **Orders & Fulfilment** — Orders. (Fulfilment and Payment Issues belong to a store admin.)
+- **Catalogue** — Products, Live Inventory & Availability, Categories, Brands, Product filters,
+  Net content review.
+- **Offers & Loyalty** — Promotions, Bundles. (Loyalty and Discount codes belong to a store admin.)
+- **Customers & Content** — Customer Feedback, Search dictionary. (Customers, Help Centre Answers
+  and Help Assistant belong to a store admin.)
+- **Insights & Help** — this **Runbook**. (Reports belong to a store admin.)
+
+A sixth group, **Store setup**, is entirely a store admin's: storefront settings, delivery areas,
+team access and the AI allowance. You will not see it at all.
+
+## Overview
+
+The **Overview** is the panel's front door. It tells you how many orders are waiting for someone to
+act on them, and gives you a card for each page you can reach.
+
+If a card is missing that a colleague has, that is because their account is a store admin and yours
+is staff. That is normal and not a fault.
+
+## Live Inventory & Availability — `/staff/inventory`
+
+**Purpose:** Keep what the website says is in stock matching what is actually on the shelf. This is
+the page you use most, and the one that most directly stops a customer ordering something you cannot
+pick.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Adjust a product's stock quantity, and switch a product on or off for
+shoppers. You cannot change a price, a name, a photo or which department a product sits in from
+this page — those changes are made under Catalogue (`/staff/products`).
+
+**Typical workflow:** You spot a gap on the shelf during a shift. Search for the product by name,
+correct its quantity to what is really there, and carry on. If the item has gone and you know when
+it is coming back, set it to zero and give it an **expected restock date** on its Catalogue page
+(`/staff/products`), so shoppers see "Back in stock" with that date instead of just "Out of stock".
+If you do not expect it back at all, switch it off rather than setting it to zero — a switched-off
+product disappears from the shop instead of showing as unavailable.
+
+**Important fields and filters:** There is a single search box that matches on the product name. The
+page loads the first 100 products and does not paginate, so **use the search box rather than
+scrolling** if you cannot see what you need — a large catalogue will not all be on screen.
+
+**Common mistakes and limitations:** The system already reduces stock automatically when a customer
+orders. You do not need to deduct picked items by hand, and doing so will take the count too low.
+Only correct a figure when you have physically checked it. Setting a quantity to zero still leaves
+the product listed as out of stock; switching it off removes it from the shop entirely.
+
+**Stock tracking and restricted products:** The quantity buttons appear only for products whose stock
+is **Tracked**. A product marked **Not tracked** or **Unknown — not for sale** shows that label
+instead, because its count means nothing; change how a product is tracked on its Catalogue page. A
+**restricted** product shows its restriction under the switch, and switching it on is refused with a
+message saying why. The switch goes back to Hidden. Restricted products are reviewed on the
+Catalogue page (see "Restricted products" there).
+
+**What happens after changes are saved:** The change is live for shoppers immediately — the
+storefront and the product's own page both refresh. There is no separate publish step and no undo,
+so re-check a figure before you leave the row.
+
+## Fulfillment & Orders — `/staff/orders`
+
+**Purpose:** Your work queue. This is where paid orders are picked, dispatched and marked delivered,
+and where you look up an order when a customer calls.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Move an order to its next status, move several at once, search past orders, and
+open any order for its full history.
+
+**Typical workflow:** Open the page and you land on the **action queue** — only orders that need
+someone to do something, newest first. Pick an order, then move it from *Confirmed* to *Out for
+delivery*, and to *Delivered* once it arrives. When several orders go out on the same run, tick them
+and use the bulk control rather than advancing each one.
+
+**Important fields and filters:** With no filters set, the page deliberately shows **only orders
+awaiting action** — delivered and cancelled orders are hidden so the queue stays a worklist. To see
+anything else you must choose a status explicitly, including "All statuses". The search box matches
+an order number or a customer email. Results are paged 20 at a time, and the page link carries your
+current filter with it.
+
+**Common mistakes and limitations:** An order sitting in *Pending payment* is not yours to advance —
+the customer's payment never completed, and there is no control to push it forward. Those are
+handled on the Payment Issues page. If you filter to a status and then think the store has lost
+orders, check the filter first: leaving the queue is an explicit act, so it is easy to forget you are
+still in a filtered view. The banner at the top tells you which view you are in.
+
+**What happens after changes are saved:** The status change is recorded immediately with your name
+against it and appears in the order's history. The customer sees the new status on their own order
+page. Status moves cannot be undone from this page, so read the order number before you act on a bulk
+selection.
+
+> **Note on operational rules:** For authoritative guidance on cancellations, payment exceptions, and how fulfilment slots interact with order states, see the canonical [Order & Fulfilment Operations](/staff/runbook/order-fulfilment-core) guide.
+
+
+## Internal Operational Runbook — `/staff/runbook`
+
+**Purpose:** The guides for running the shop, including this one. Read-only.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Read the operational guides for your role. Choose a document from the list on
+the left and it opens on the right.
+
+**Typical workflow:** You hit something you have not done before — an unusual order, a stock
+question — and check the relevant guide here before asking.
+
+**Important fields and filters:** The tabs above the list filter by who a document is written for.
+**All** shows everything available to you; **Staff** shows this playbook; **Store admin** shows the
+owner's guide, which you can read even though you cannot open all the pages it describes. A tab only
+appears when there is at least one document behind it, so the set of tabs you see is the set that
+actually has content.
+
+**Common mistakes and limitations:** These documents are guidance, not a live view of the shop —
+nothing here shows current stock or orders. If a guide and the actual page disagree, trust the page
+and report the guide so it can be corrected.
+
+**What happens after changes are saved:** Nothing is editable here. Documents change when someone
+updates them and the site is redeployed.
+
+## Customer data and loyalty
+
+- **Loyalty points** are earned and deducted automatically at checkout. You do not manage them by
+  hand, and there is no control on any staff page to adjust a customer's balance.
+- **Security.** Customer names, addresses and emails are confidential. Look up a customer's order
+  only when you are actively helping them with it.
+- **Refunds are not issued from this panel.** If a customer needs money back, escalate to a store
+  admin — there is no refund control anywhere in the staff or admin pages.
+
+
+## Categories — `/staff/categories`
+
+**Purpose:** The departments shoppers browse by, and the subcategories under them.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Create a department, create a subcategory under a department, rename either,
+change its web address, reorder it, and hide it from shoppers.
+
+**Typical workflow:** You reorganise a section of the shop. Create the new department first, then its
+subcategories, then move products into them from the Catalogue page.
+
+**Important fields and filters:** The New Category creation form is positioned at the top of the
+page above the category list. The tree is **exactly two levels deep** — a department, and
+subcategories under it. You cannot nest a subcategory inside another subcategory, and that limit is
+deliberate rather than an oversight. Each category's web address must be unique across the shop. The
+category list features individual expand/collapse toggle arrows for each department with subcategories,
+as well as global **Expand All** and **Collapse All** controls at the top of the list.
+
+**Hiding and showing a department:** Untick **Visible in the shop** on a category's edit page and
+save. Shoppers then stop seeing that category everywhere: its page, its subcategories, its
+products in search and on their own pages, its slide in the homepage carousel, and its entry in the
+header's department list. Nothing is deleted or changed — the products, subcategories and the
+promotion stay exactly as they were. Tick the box again and save, and all of it comes back. You do
+not have to hide or move the products first: the edit page tells you, beside the checkbox, how many
+products and subcategories will be hidden with it.
+
+**Common mistakes and limitations:** Subcategories are grouped hierarchically under their parent
+departments, so use the toggle arrows to show or hide nested children. A product that a shopper
+already had in their basket before you hid its department stays in that basket. While a department
+is hidden, it is still listed on the Promotions page and you can still edit its promotion, but
+shoppers do not see that promotion until the department is shown again.
+
+**What happens after changes are saved:** The shop's navigation updates immediately, including the
+department list in the header search bar. Products already assigned to a category stay assigned to
+it through a rename.
+
+
+## Icon & Visual Asset Gallery — `/staff/icons`
+
+**Purpose:** Unified visual library to browse, generate, preview, select, and delete category imagery and UI system icons across the store.
+
+**Who can access:** Staff and store admins
+
+**Read-only for staff:** Staff see the gallery read-only, with the note "Only an admin can generate or change visual assets." Only a store admin can generate, activate, deactivate or delete.
+
+**What you can do:** View all generated candidate images for departments and system slots, generate new candidates with AI, inspect high-resolution previews, set active candidates, **deactivate** the active one, and permanently delete obsolete assets. Every preview is shown in the same circle shoppers see.
+
+**Typical workflow:** When refreshing department visuals or system touchpoints, navigate to `/staff/icons`, generate candidate styles, preview them in high resolution, activate the best image, and delete redundant candidates.
+
+**Important fields and filters:** Filter tabs permit switching between All Assets, Category Imagery, System Icons (the 3D icons) and **Flat icons** (the smaller emoji-style icons, stored as `icon:<name>`). Search filters by department name or slot key. The Quick Generator allows picking between Category or System Icon, choosing the target department or slot (grouped under "3D icons" and "Flat icons"; the full list and where each appears is the "Replaceable icon inventory" in the Icon & Visual Asset Standards Guide), and choosing between Studio Photography and 3D Rendered Icon presets.
+
+**Deactivate:** On the active card, or in its preview, **Deactivate** switches the image off without deleting it. The storefront goes back to the built-in artwork (for a department, its icon or illustration), and you can activate the image again later.
+
+**Common mistakes and limitations:** A flat icon replacement only shows where that icon is drawn at 32 px or larger; smaller uses keep the built-in glyph. Deleting an active candidate automatically selects the next most recent candidate or clears the active slot. System slot assignments update touchpoint renders across the storefront instantly.
+
+**What happens after changes are saved:** Selected active images immediately update category cards, navigation scrollers, and touchpoints across the storefront with zero cache staleness.
+
+
+## Brands — `/staff/brands`
+
+**Purpose:** The brands shoppers can filter by, such as Shan or TRS.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Add a brand, rename it, and remove one.
+
+**Typical workflow:** You start stocking a new brand. Add it here first, then set it on each of that
+brand's products from the Catalogue page. Until at least one product carries a brand, the brand
+filter has nothing to show and does not appear to shoppers.
+
+**Important fields and filters:** A brand has a name shoppers see and a web address used in filter
+links. Both must be unique within your shop.
+
+**Common mistakes and limitations:** Creating a brand does nothing visible on its own — a brand with
+no products behind it is invisible in the shop. The work that makes it appear is setting the brand on
+products. Avoid creating near-duplicates ("TRS" and "T.R.S."), because shoppers will see both as
+separate filter options. Removing a brand that products use asks you to tick **Also remove it from N
+products** first. Those products stay in the shop, with no brand; set a new brand on them from the
+Catalogue page if they need one.
+
+**What happens after changes are saved:** The brand becomes available in the Catalogue product form
+straight away, and appears as a shopper-facing filter once a product carries it. A removed brand
+disappears from the product form, the shop's brand filter, and every product that carried it.
+
+
+## Product filters — `/staff/attributes`
+
+**Purpose:** Your shop's own filters. A **list** filter, such as Colour, has values (Black, White)
+that shoppers tick to narrow the catalogue. A **number** filter, such as Power in watts, holds a
+number on each product, and shoppers give a from/to range.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Add a filter, choosing its type: **Pick from a list** or **Number**, with an
+optional unit for a number filter. Rename a filter or change its position, change a number filter's
+unit, and choose whether the filter shows on product cards. Add values to a list filter, and rename
+a value or change its position. Delete a value or a whole filter.
+
+**Typical workflow:** You want shoppers to filter headphones by colour. Add a filter called Colour,
+then add the values Black and White to it. Open each product on the Catalogue page and pick its
+colour under **Product filters**. The Colour filter appears in the shop once at least one product
+carries a value. For chargers, add a **Number** filter called Power with the unit `W`, then type each
+charger's wattage on its product page.
+
+**Important fields and filters:** A filter or value name can be up to 40 characters, and a unit up to
+10. A shop can have up to 20 filters, and each list filter up to 50 values. A number can have up to
+8 digits and 2 decimal places, and cannot be negative. **Position** sets the order: lower numbers
+show first, in the shop and on this page. The short code under each name (for example
+`attr_colour`) is the web address shoppers' filter links use. It is fixed when you create the filter
+and does not change when you rename it, so links shoppers have shared keep working. **Show on
+product cards** puts the filter's value on each product's card in the shop, not only on its product
+page.
+
+**Common mistakes and limitations:** A filter's type is chosen when you add it and cannot be changed
+later; delete it and add it again as the other type. A number filter has no values list. A filter
+shows in the shop only where a product in view carries a value for it, so a new filter with no
+products behind it is invisible to shoppers. Each product holds one value per filter, so a product
+cannot be both Black and White; list the two colours as separate products instead. Shoppers can
+tick several values of one list filter to see products with any of them. **Show on product cards**
+is saved with the name and position, so saving with it unticked turns it off. Deleting a value or
+filter that products use asks you to tick **Also remove it from N products** first. The products stay
+in the shop; they lose only that value.
+
+**What happens after changes are saved:** Changes show on the Catalogue product form straight away.
+In the shop, the filter lists, applied-filter chips, product cards and each product's
+**Specifications** list follow on their next page load.
+
+
+## Promotions — `/staff/promotions`
+
+**Purpose:** Department campaign banners — the headline, image and link that front a department.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Write a campaign headline and subtitle for a department, upload a banner image,
+set a link, and schedule when it runs.
+
+**Typical workflow:** You are running a seasonal push on a department. Pick the department, write the
+headline, upload the banner, set the dates, and save.
+
+**Important fields and filters:** **Only top-level departments can carry a campaign.** A campaign is
+rendered on the department hero, and that only ever displays top-level departments, so there is
+nowhere for a subcategory campaign to appear.
+
+**Common mistakes and limitations:** A campaign's headline and subtitle are free text, so a typo goes
+live exactly as typed — read it back before saving. Scheduling a campaign does not switch anything
+else off; if two departments both run campaigns, both display on their own pages. The real product
+price callout is always shown alongside your campaign copy and cannot be suppressed by it.
+**Auto-Generate** (the AI banner button) is reserved for store admins and counts against the store's
+daily AI allowance: once that is used up it is refused until 00:00 UTC, and uploading a banner still
+works.
+
+**What happens after changes are saved:** The banner appears on that department's page as soon as its
+schedule allows.
+
+
+## Bundles — `/staff/bundles`
+
+**Purpose:** Curated multi-product deals, such as a weekly meat box or a breakfast set.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Create a bundle, give it a name and tagline, choose the products and quantities
+inside it, upload an image, and control the order bundles appear in.
+
+**Typical workflow:** You decide to promote a weekly box. Create the bundle, add each product with
+the quantity a customer receives, add an image, and save.
+
+**Important fields and filters:** Every product in a bundle must already exist in your catalogue. The
+quantity is how many of that product the customer gets, not a stock figure. **There is no price field
+to set** — the price shown to a shopper is always the live sum of the products' own current prices,
+recalculated on every view.
+
+**Common mistakes and limitations:** Because the price is always live, changing a product's own price
+changes every bundle containing it immediately, with nothing to review or re-save on the bundle
+itself. Removing a product from the catalogue that a bundle still references will leave that bundle
+incomplete, and a product going out of stock drops it from the bundle until it returns.
+
+**What happens after changes are saved:** The bundle appears in the shop's bundle listing
+immediately.
+
+
+
+
+
+
+## Catalogue — `/staff/products`
+
+**Purpose:** The list of everything your shop sells, and the place where products are created and
+edited. This is the record of the product; the day-to-day stock figure lives under Inventory.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Add a product, edit its name, description, price and unit label, record its net
+content so the shop can work out a real price per kilo or litre, set its department, choose its
+brand, mark dietary and provenance flags, feature it on the homepage, and manage its photographs.
+
+**Typical workflow:** A new line arrives. Create the product, fill in name, price and unit label,
+add the net content if the item is sold by weight or volume, choose the department it belongs in,
+upload a photo, then set its opening stock. After that, staff keep the stock figure current from the
+Inventory page and you only return here when something about the product itself changes.
+
+**Important fields and filters:** Price is entered in pounds and pence. The unit label is what the
+shopper sees next to the price, so make it match how you actually sell the item. **Net content
+amount** and **Net content unit** are the pair that matter for pricing law: fill both in — for
+example `500` and `Grams` — and the shop works out the price per kilogram itself and shows that
+instead of your unit label, so it can never drift from the price you charge. Leave them empty and
+nothing changes: the product goes on showing the unit label you typed. The amount is a whole number
+in the unit you pick, so enter half a kilo as `500` grams rather than `0.5` kilograms. **Expected
+restock date** is optional: give the day you expect an out-of-stock product back, and shoppers see
+"Back in stock" with that date on the product card, the quick view and the product page. It shows
+only while stock is zero, and only until that date has passed, so a date you forget to clear never
+tells a shopper something stale. Clearing the field removes it. **Unlike the
+shop itself, this list shows switched-off products too** — that is deliberate, because otherwise you
+could never find a product to switch back on.
+
+**Common mistakes and limitations:** A product must be assigned to a department, and it can sit in a
+top-level department or in one of its subcategories. Both are valid, so check you have picked the one
+shoppers will browse. Marking a product as HMC certified requires the certificate reference and
+verification date; the flag cannot be set without them, and that is intentional. Net content is
+all-or-nothing — an amount with no unit, or a unit with no amount, is refused with the field marked,
+because neither half prices anything on its own. It also describes **one** pack: a 1kg bag and a 5kg
+bag are two separate products here, not two sizes of one. Switching a product off hides it from
+shoppers but does not delete it or affect orders already placed. **Auto-fill Missing Images** and
+the product photo's AI generate button count against the store's daily AI allowance. Once it is used
+up, generation is refused until 00:00 UTC, and the products it skipped stay in line for the next
+run. Uploading a photo yourself is never affected.
+
+**A product that arrives switched off:** Some products are added in bulk with no stock and switched
+off, for example the Fish range or a catalogue imported from a spreadsheet. They appear in this
+list, but shoppers cannot see them. To put one on sale:
+
+1. Check its price is what you will charge, and add a photograph.
+2. Choose its **Stock tracking** on its page here, and set a quantity if it is Tracked.
+3. Tick **Visible in the shop**.
+
+Until you do, it stays hidden, so nothing is offered at a price you have not confirmed. An imported
+product's stock starts as **Unknown — not for sale**, and stays unbuyable until someone chooses
+Tracked or Not tracked.
+
+**Stock tracking:** Every product has one of three settings, on its page under Price & stock.
+
+- **Tracked:** it sells while its stock count is above zero, and orders reduce the count.
+- **Not tracked:** it sells without any count, and orders leave the count alone. Use this when the
+  shop does not keep stock figures in this system.
+- **Unknown — not for sale:** shoppers see it as out of stock.
+
+Changing the setting never changes the stored count, so switching back to Tracked restores the last
+figure. The **Stock** filter above the list finds each group.
+
+**Restricted products:** A product can carry a restriction, shown as a red label in the list and in
+the **Restriction** section at the foot of its page. A restricted product is always hidden. The
+**Restriction** filter above the list finds them.
+
+- **Prohibited — cannot be sold** and **Age-restricted — cannot be sold online yet:** these cannot
+  be made available by anyone, on any page. The page explains why and offers no switch.
+- **Not deliverable** and **Needs review:** only a store admin can make these available. They tick
+  the confirmation that the product is legally sellable and can be fulfilled, and give a reason,
+  then press **Clear restriction and make available**. The product goes on sale immediately.
+  Staff accounts see the restriction but no control.
+- **Restricting a product:** a store admin can restrict a product, or make an existing restriction
+  stricter, from the same section. It hides the product immediately. A restriction can never be
+  made less strict there; the only way back is the confirmed clear above.
+- **History:** every restriction change is listed under **Restriction history** on the product's
+  page, with the time, who made it (or "Import"), where it was made and the reason given. Entries
+  cannot be edited or removed.
+
+**Changing many products at once:** Tick products in the list (or **Select all on this page**;
+choose 100 under **Per page** to work through a large catalogue faster), choose an action under
+**With selected**, and press **Preview**. The actions are:
+
+- **Make available**
+- **Hide**
+- **Mark stock as not tracked**
+
+The preview says how many will change, and **lists every restricted product by name**. Those that
+**will be skipped** are hard-blocked, or restricted products in a staff account. Those made
+available **only if you confirm** are a store admin's Not deliverable and Needs review products,
+which need the same confirmation and a reason as on a product's page. Press **Apply** to go ahead,
+or **Cancel**. Apply re-checks every product at that moment, so nothing a single change would refuse
+gets through in bulk. Afterwards a summary lists what was updated, what was skipped and why, and
+anything that failed because it changed after you selected it. Hiding or marking stock as not
+tracked never removes a restriction or makes a product visible.
+
+**What happens after changes are saved:** The change is live immediately — the storefront, the
+department listing and the product's own page all update. Existing orders are unaffected: they keep
+the price and details captured when the customer ordered.
+
+
+
+
+
+## Search dictionary — `/staff/search-synonyms`
+
+**Purpose:** Teach the shop's search that two words mean the same thing, so a shopper typing
+*bhindi* reaches okra.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Add a synonym by hand, edit or remove one, and approve or reject the entries the
+system proposes from searches that found nothing. Generating new AI proposals from recent searches
+is reserved for store admins.
+
+**Typical workflow:** You notice customers searching for a word your product names do not use. Add
+that word as an alias pointing at the term your catalogue actually uses. Periodically, review the
+proposed entries and approve the ones that make sense.
+
+**Important fields and filters:** An entry maps an **alias** (what the shopper types) to a
+**canonical** term (what your catalogue calls it). Approved entries **widen** a search: the shopper's
+own word always stays in the query, so an entry can add results but can never silently replace what
+they asked for.
+
+**Common mistakes and limitations:** A synonym pointing at a word that appears in no product name
+does nothing. Proposals come from real failed searches and are suggestions, not facts — read each one
+before approving, because an incorrect mapping will surface products a shopper did not ask for.
+Generating AI proposals counts against the store's daily AI allowance; once it is used up the button
+is refused until 00:00 UTC, while adding entries by hand keeps working.
+
+**What happens after changes are saved:** Approved entries affect shopper searches immediately;
+rejected proposals are removed from the queue.
+
+
+
+
+## Net content review — `/staff/net-content`
+
+**Purpose:** Check the pack size (net content) an AI suggested for a product before it is saved.
+The shop works out the price per kg, per litre or per item that shoppers see from this value, so a
+wrong one shows a wrong price.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** For each suggestion, accept it as it stands, correct the amount or unit and
+save your corrected value, or reject it. The page also shows a pilot summary: how many suggestions
+were accepted, corrected, rejected or unanswered, how often the suggestion agreed with the
+product's unit label, how long the AI took and which AI model made them.
+
+**Typical workflow:** A store admin presses **Suggest net content** at the top of the page. Only
+store admins see this button; staff see a note instead. One click asks the AI about at most 10
+products that have no pack size and have never been asked about before, and a line under the
+button says how many got a suggestion, how many got no answer and how many failed. Click again for
+the next 10. Then, for each suggestion, read it and the text the AI quoted as its evidence, compare
+it with the packaging if you can, and accept, correct or reject it. If it quoted a photo, the photo
+is shown beside it.
+
+**Important fields and filters:** **Suggested** is the pack size, with the price shoppers would
+see. **Confidence** is the AI's own estimate, not a guarantee. **From the product name / unit
+label / description / photo** shows where it found the value, with the exact text it quoted. The
+AI also reads the start of the product's description, so a size written only there can be
+suggested; when it quotes the description, check the quoted text really is this product's pack
+size. The coloured badge
+compares the suggestion with the price written in the unit label: **Matches** is reassuring,
+**Does NOT match** means look carefully, and **can't be checked** means the label states no size or
+price per kg.
+
+**Common mistakes and limitations:** The AI never changes a product by itself, and it is not given
+a pack size for products where one does not apply (such as an electrical item sold singly): those
+get no suggestion and stay without a value. Accept and Save refuse if the product already has a
+net content — change it on the product's own page instead. The AI only reads photos that staff
+uploaded or confirmed as a real photo of the pack (**Confirm real photo** on the product page);
+against the store's daily AI allowance; once it is used up the button is refused until 00:00 UTC, and
+reviewing the suggestions already waiting keeps working.
+
+**What happens after changes are saved:** Accepting or saving writes the net content to the
+product straight away, and shoppers see the derived unit price and the product appears under the
+pack-size filter. Rejecting changes nothing on the product; the suggestion leaves the queue either
+way.
+
+
+
+
+## Customer feedback — `/staff/feedback`
+
+**Purpose:** Read and approve the feedback customers leave about the shop, so the approved ones
+appear on the shop's home page.
+
+**Who can access:** Staff and store admins
+
+**What you can do:** Read every piece of feedback, approve one so it appears on the home page,
+reject one so it does not, un-approve one you approved earlier, approve everything waiting in a
+single click, and write an internal note against any of them.
+
+**Typical workflow:** Feedback waiting to be checked is listed first. Read it, then approve it or
+reject it. If you later change your mind about one you approved, un-approve it and it disappears
+from the home page again.
+
+**Important fields and filters:** Each entry shows the star rating, the customer's first name and
+surname initial, what they wrote, and when. **Verified customer** means that person had an order
+marked delivered or collected when they wrote it — it is added automatically and cannot be set by
+hand. The status is **PENDING** (waiting for you), **APPROVED** (on the home page) or **REJECTED**
+(not shown). The internal note is for your team only and is never shown to the customer or on the
+shop.
+
+**Common mistakes and limitations:** You cannot write feedback for a customer, and you cannot edit
+what one of them wrote — you can only decide whether it appears. That is deliberate: publishing
+words a customer did not write would be inventing a review.
+
+**Reject spam, abuse, anything containing someone's personal details, and anything unrelated to the
+shop — but not simply because it is critical.** A one-star review that describes a real experience
+is honest feedback and belongs on the site. Publishing only the flattering ones makes the whole
+section misleading, which is worse for trust than a low rating.
+
+**What happens after changes are saved:** Approving publishes it to the home page and rejecting or
+un-approving removes it, both straight away. If a customer edits feedback you already approved, it
+comes back to you as **PENDING** and disappears from the home page until you check it again — so
+what is published is always something a person has read.

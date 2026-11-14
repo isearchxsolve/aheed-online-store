@@ -1,0 +1,193 @@
+import { getAiEnv } from "@/lib/config";
+import { storeDescriptionPromptLine } from "@/lib/store-description";
+import {
+  extractWorkersAiReplyText,
+  extractWorkersAiUsage,
+  WORKERS_AI_MODEL_REQUEST_OPTIONS,
+  type WorkersAiUsage,
+} from "@/lib/workers-ai";
+
+/**
+ * AI-proposed synonyms for staff approval (P2.6 slice 3, #566).
+ *
+ * WHY THIS IS NOT ON THE REQUEST PATH, AND MUST NEVER BE.
+ * `#571` ruled that an AI call reachable from `/search` — a public, unauthenticated endpoint, on a
+
+ * — is attacker-controlled cost against a Workers AI quota already shared with the product-image
+ * pipeline. So AI here only ever PROPOSES rows, offline, when a signed-in store admin presses a
+ * button; every proposal lands as `PENDING` and reaches a shopper only once a human approves it.
+ * The storefront read path never imports this module.
+ *
+ * Transport is the plain Cloudflare REST API with the existing `CLOUDFLARE_ACCOUNT_ID` /
+ * `CLOUDFLARE_API_TOKEN`, exactly as `lib/image-generation.ts` does — no new credential, no new
+ * infrastructure, and no proprietary AI binding, keeping the vendor-agnostic constraint.
+ */
+
+/**
+ * How many distinct failing queries one run sends to the model.
+ *
+ * Bounded because the prompt is built from them and a run is a paid call: an unbounded log read
+ * would make the cost of pressing the button a function of how long the log has been accumulating.
+ */
+export const PROPOSAL_QUERY_LIMIT = 50;
+
+/** Ceiling on what one run will write, however many the model returns. */
+export const PROPOSAL_RESULT_LIMIT = 25;
+
+/**
+ * The model proposals run on by default (#1016). Same deprecated-but-serving id as
+ * lib/list-normalisation.ts's NORMALISATION_MODEL; `SEARCH_SYNONYM_AI_MODEL` overrides it. Reply
+ * text and request options are read through lib/workers-ai.ts, so an override to a chat-completion
+ * model such as Gemma 4 works without a code change.
+ */
+export const DEFAULT_SYNONYM_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
+export interface SynonymProposal {
+  alias: string;
+  canonical: string;
+}
+
+/**
+ * `model` and `usage` travel with every result that reached the model, so the caller can charge the
+ * vendor's AI budget (#1017) for a call that was billed even when its reply was useless.
+ */
+export type ProposalResult =
+  | { ok: true; proposals: SynonymProposal[]; model: string; usage: WorkersAiUsage }
+  | { ok: false; error: string; model?: string; usage?: WorkersAiUsage };
+
+/**
+ * The prompt. Exported so the #905 prompt test can assert its framing. `storeDescription` is
+ * required, never defaulted: the vendor's own words replace the grocery framing this used to assume
+ * for every vendor, and `null` keeps it neutral.
+ */
+export function buildSynonymPrompt(
+  queries: readonly string[],
+  vocabulary: readonly string[],
+  storeDescription: string | null,
+): string {
+  const describe = storeDescriptionPromptLine(storeDescription);
+  return [
+    "You map words UK shoppers type into the words this shop's catalogue uses.",
+    ...(describe ? [describe] : []),
+    "",
+    "Failed or near-miss searches:",
+    ...queries.map((query) => `- ${query}`),
+    "",
+    "Words that appear in this shop's product names:",
+    vocabulary.join(", "),
+    "",
+    "For each failed search that is a genuine synonym, transliteration or regional name for",
+    "something in the vocabulary list, output one JSON object with keys 'alias' (what the shopper",
+    "typed) and 'canonical' (the catalogue's word). Skip anything you are unsure about, and skip",
+    "misspellings — those are handled elsewhere. Reply with a JSON array only, no prose.",
+  ].join("\n");
+}
+
+/**
+ * Parses the model's reply defensively.
+ *
+ * A language model's output is untrusted input, not a return value: it may wrap the array in prose
+ * despite the instruction, emit malformed JSON, or invent fields. Anything that is not two non-empty
+ * strings is dropped rather than repaired, and the whole batch is capped. Nothing here reaches a
+ * shopper regardless — every row lands `PENDING` — but a staff approval queue full of garbage is
+ * its own way of making the feature useless.
+ */
+export function parseProposalResponse(raw: string): SynonymProposal[] {
+  const start = raw.indexOf("[");
+  const end = raw.lastIndexOf("]");
+  if (start === -1 || end === -1 || end < start) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const proposals: SynonymProposal[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { alias, canonical } = entry as { alias?: unknown; canonical?: unknown };
+    if (typeof alias !== "string" || typeof canonical !== "string") continue;
+    const a = alias.trim().toLowerCase();
+    const c = canonical.trim().toLowerCase();
+    if (a === "" || c === "" || a === c) continue;
+    proposals.push({ alias: a, canonical: c });
+    if (proposals.length >= PROPOSAL_RESULT_LIMIT) break;
+  }
+  return proposals;
+}
+
+/**
+ * Ask the model for alias mappings. Degrades to a message rather than throwing when the account
+ * credentials are absent, matching `lib/image-generation.ts` — a store without AI configured must
+ * still be able to open and use the dictionary page.
+ */
+export async function proposeSynonyms(
+  queries: readonly string[],
+  vocabulary: readonly string[],
+  storeDescription: string | null,
+): Promise<ProposalResult> {
+  if (queries.length === 0) {
+    return { ok: false, error: "No failed searches to learn from yet." };
+  }
+
+  const env = getAiEnv();
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !apiToken) {
+    return {
+      ok: false,
+      error: "AI suggestions are not configured for this environment. Add entries by hand instead.",
+    };
+  }
+
+  const model = env.SEARCH_SYNONYM_AI_MODEL ?? DEFAULT_SYNONYM_MODEL;
+
+  let response: Response;
+  try {
+    response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(WORKERS_AI_MODEL_REQUEST_OPTIONS[model] ?? {}),
+          messages: [
+            { role: "user", content: buildSynonymPrompt(queries, vocabulary, storeDescription) },
+          ],
+        }),
+      },
+    );
+  } catch {
+    return { ok: false, error: "Could not reach the AI service. Try again in a moment." };
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error:
+        response.status === 429
+          ? "The AI service is busy right now. Try again in a few seconds."
+          : `The AI service returned an error (${response.status}).`,
+    };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return { ok: false, error: "The AI service returned an unreadable response." };
+  }
+
+  // #1016 — the shared reader handles a string `response`, an already-parsed one (Llama 3.1 on a
+  // JSON answer) and a chat-completion `choices` reply (Gemma 4). Reading only a string `response`,
+  // as this did before, returned zero proposals for the latter two.
+  return {
+    ok: true,
+    proposals: parseProposalResponse(extractWorkersAiReplyText(payload)),
+    model,
+    usage: extractWorkersAiUsage(payload),
+  };
+}

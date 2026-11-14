@@ -1,0 +1,1770 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// lib/repositories/orders.ts imports lib/db (→ @prisma/client/wasm, unresolvable
+// under vitest) and lib/tenant. Mock both so the module loads; every test below
+// drives placeOrder with a fake tx, which is exactly why R9a made it take its
+// client and vendorId as explicit arguments.
+vi.mock("@/lib/db", () => ({ getPrisma: vi.fn() }));
+vi.mock("@/lib/tenant", () => ({ getCurrentVendorId: vi.fn() }));
+// Keep the provider out of these tests: they assert what the ORDER TRANSACTION
+// writes. The adapter itself is covered by tests/payments.test.ts.
+// Hoisted so an individual test can swap in a failing provider (P7.5a, #234)
+// without changing the default any other test sees.
+const paymentStub = vi.hoisted(() => {
+  const succeed = async () => ({
+    provider: "stub",
+    status: "PENDING",
+    providerReference: null,
+    redirectUrl: null,
+  });
+  return {
+    succeed,
+    createPayment: succeed as () => Promise<unknown>,
+    // #1324 — the last input placeOrder handed the provider, for the expiresAt assertion.
+    lastInput: null as unknown,
+  };
+});
+vi.mock("@/lib/payments", () => ({
+  // The real value, restated: the mock replaces the whole module.
+  CHECKOUT_SESSION_TTL_MS: 35 * 60 * 1000,
+  getPaymentService: () => ({
+    createPayment: (input: unknown) => {
+      paymentStub.lastInput = input;
+      return paymentStub.createPayment();
+    },
+  }),
+}));
+
+/** What the fake `order.create` stamps, standing in for the column default (#1324). */
+const ORDER_CREATED_AT = new Date("2026-10-28T12:00:00.000Z");
+
+const {
+  placeOrder,
+  CheckoutError,
+  toProvenance,
+  findOrderForViewer,
+  cancelConfirmedOrder,
+  findNextPaymentSweepDueAt,
+} = await import("@/lib/repositories/orders");
+
+const VENDOR = "v-aheed";
+
+type FakeState = {
+  cart: {
+    id: string;
+    items: { productId: string; quantity: number; customNote?: string | null }[];
+  } | null;
+  products: {
+    id: string;
+    name: string;
+    basePrice: number;
+    isActive: boolean;
+    restriction?: string | null;
+    inventory: { quantity: number; stockMode?: string } | null;
+    /** #1135 — absent means "does not take notes", as for every pre-#1135 case. */
+    allowsCustomNote?: boolean;
+    category?: { allowsCustomNote: boolean; parent: { allowsCustomNote: boolean } | null };
+  }[];
+  /** How many rows the guarded decrement claims to have updated. */
+  decrementCount: number;
+  /** P8.5d (#348) — active multi-buy tiers visible to this checkout. */
+  priceTiers: {
+    productId: string;
+    groupQuantity: number;
+    groupPricePence: number;
+    isActive: boolean;
+  }[];
+  // P5a (#135) — the loyalty rows placeOrder now touches.
+  loyaltyConfig: {
+    loyaltyEnabled: boolean;
+    pointsPerPoundEarned: number;
+    pencePerPointRedeemed: number;
+    minRedeemPoints: number;
+    tierWindowDays: number;
+    pointsExpiryMonths: number | null;
+  } | null;
+  loyaltyAccount: { balancePoints: number; lastActivityAt: Date } | null;
+  /** How many rows the guarded points debit claims to have updated. */
+  loyaltyDebitCount: number;
+  /** How many rows releaseOrder's guarded cancel claims to have updated (P7.5a). */
+  releaseCount: number;
+};
+
+let state: FakeState;
+const created: Record<string, unknown[]> = {};
+
+/**
+ * The order's lines as `releaseOrder` and `restoreCartFromOrder` read them back.
+ * Derived from what the order transaction actually wrote rather than restated,
+ * so a change to the order lines cannot leave the compensation asserting against
+ * stale fixtures.
+ */
+function orderItemRows(): { productId: string; quantity: number; customNote?: string }[] {
+  return (
+    created.orderItem as { productId: string; quantity: number; customNote: string | null }[]
+  ).map((row) => ({
+    productId: row.productId,
+    quantity: row.quantity,
+    // #1135 — only a real note is carried, so every pre-#1135 expectation keeps its shape.
+    ...(row.customNote ? { customNote: row.customNote } : {}),
+  }));
+}
+
+/** Minimal Prisma double: only the calls placeOrder actually makes. */
+function fakePrisma() {
+  const tx = {
+    cart: { findFirst: async () => state.cart },
+    // #1211 — every pre-#1211 fixture describes an unrestricted, TRACKED product, so the double
+    // supplies those two fields rather than every case restating them. A case that needs another
+    // stock mode or a restriction sets it on the fixture and it wins over these defaults.
+    product: {
+      findMany: async () =>
+        state.products.map((p) => ({
+          restriction: null,
+          ...p,
+          inventory: p.inventory && { stockMode: "TRACKED", ...p.inventory },
+        })),
+    },
+    // P8.5d (#348) — placeOrder reads multi-buy tiers inside the transaction.
+    // Empty by default: every pre-P8.5d case below asserts base-price totals,
+    // and no tier means lib/tier-pricing.ts returns exactly unitPrice ×
+    // quantity, so those expectations stay true rather than being adjusted.
+    // The tiered cases set `state.priceTiers` explicitly.
+    productPriceTier: { findMany: async () => state.priceTiers },
+    inventory: {
+      updateMany: async (args: unknown) => {
+        created.inventoryUpdate.push(args);
+        return { count: state.decrementCount };
+      },
+    },
+    address: {
+      create: async ({ data }: { data: unknown }) => {
+        created.address.push(data);
+        return { id: "addr-1" };
+      },
+    },
+    order: {
+      findUnique: async () => null, // no order-number collision
+      create: async ({ data }: { data: { orderNumber: string } }) => {
+        created.order.push(data);
+        return { id: "order-1", orderNumber: data.orderNumber, createdAt: ORDER_CREATED_AT };
+      },
+      // P7.5a — releaseOrder's guarded cancel. count 0 means someone already
+      // handled it, which is how the real path stays idempotent.
+      updateMany: async (args: unknown) => {
+        created.orderCancelled.push(args);
+        return { count: state.releaseCount };
+      },
+    },
+    orderItem: {
+      createMany: async ({ data }: { data: unknown[] }) => {
+        created.orderItem.push(...data);
+        return { count: data.length };
+      },
+      // What releaseOrder reads back to return stock. Derived from what the
+      // order actually created, so the two cannot drift.
+      findMany: async () => orderItemRows(),
+    },
+    payment: {
+      create: async ({ data }: { data: unknown }) => {
+        created.payment.push(data);
+        return {};
+      },
+      updateMany: async (args: unknown) => {
+        created.paymentFailed.push(args);
+        return { count: 1 };
+      },
+    },
+    // P7.5a — reverseRedemption / releaseCodeRedemption run inside
+    // releaseOrder's transaction. Neither has anything to reverse in these
+    // tests; they just have to be callable.
+    discountRedemption: {
+      findFirst: async () => null,
+      deleteMany: async () => ({ count: 0 }),
+    },
+    discountCode: { updateMany: async () => ({ count: 0 }) },
+    orderStatusEvent: {
+      create: async ({ data }: { data: unknown }) => {
+        created.statusEvent.push(data);
+        return {};
+      },
+    },
+    cartItem: {
+      deleteMany: async (args: unknown) => {
+        created.cartCleared.push(args);
+        return { count: 1 };
+      },
+    },
+    vendorConfig: { findUnique: async () => state.loyaltyConfig },
+    loyaltyAccount: {
+      findUnique: async () => state.loyaltyAccount,
+      updateMany: async (args: unknown) => {
+        created.loyaltyDebit.push(args);
+        return { count: state.loyaltyDebitCount };
+      },
+    },
+    loyaltyLedgerEntry: {
+      create: async ({ data }: { data: unknown }) => {
+        created.loyaltyEntry.push(data);
+        return {};
+      },
+      // reverseRedemption looks for a REDEEM to reverse; these tests have none.
+      findUnique: async () => null,
+    },
+  };
+  return {
+    $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+    // placeOrder writes the provider reference after the transaction commits.
+    payment: {
+      update: async ({ data }: { data: unknown }) => {
+        created.paymentUpdate.push(data);
+        return {};
+      },
+    },
+    // P7.5a (#234) — restoreCartFromOrder runs OUTSIDE releaseOrder's
+    // transaction, so these are top-level, not on `tx`.
+    orderItem: { findMany: async () => orderItemRows() },
+    cartItem: {
+      createMany: async ({
+        data,
+        skipDuplicates,
+      }: {
+        data: unknown[];
+        skipDuplicates?: boolean;
+      }) => {
+        created.cartRestored.push(...data);
+        created.cartRestoreOptions.push({ skipDuplicates });
+        return { count: data.length };
+      },
+    },
+  } as never;
+}
+
+const input = (over: Partial<Parameters<typeof placeOrder>[2]> = {}) =>
+  ({
+    cartId: "cart-1",
+    userId: null,
+    guestEmail: "shopper@example.com",
+    address: {
+      recipientName: "Sam Shopper",
+      phone: "07700 900123",
+      line1: "1 High Street",
+      line2: null,
+      city: "Milton Keynes",
+      postcode: "MK9 1AA",
+      notes: null,
+    },
+    rules: {
+      deliveryFeePence: 349,
+      freeDeliveryThresholdPence: 3000,
+      minimumOrderPence: 1500,
+    },
+    vendorSlug: "aheed-food-centre",
+    returnOrigin: "https://staging.aheedfoodcentre.nocaped.com",
+    ...over,
+  }) as Parameters<typeof placeOrder>[2];
+
+beforeEach(() => {
+  for (const key of [
+    "address",
+    "order",
+    "orderItem",
+    "payment",
+    "statusEvent",
+    "cartCleared",
+    "paymentUpdate",
+    "loyaltyDebit",
+    "loyaltyEntry",
+    "inventoryUpdate",
+    "orderCancelled",
+    "paymentFailed",
+    "cartRestored",
+    "cartRestoreOptions",
+  ]) {
+    created[key] = [];
+  }
+  state = {
+    cart: { id: "cart-1", items: [{ productId: "p1", quantity: 2 }] },
+    products: [
+      { id: "p1", name: "Bananas", basePrice: 1000, isActive: true, inventory: { quantity: 10 } },
+    ],
+    decrementCount: 1,
+    priceTiers: [],
+    // Loyalty ON by default so the P5a cases below can simply supply an account;
+    // the pre-P5a cases all place guest orders, which return before it matters.
+    loyaltyConfig: {
+      loyaltyEnabled: true,
+      pointsPerPoundEarned: 1,
+      pencePerPointRedeemed: 1,
+      minRedeemPoints: 100,
+      tierWindowDays: 30,
+      pointsExpiryMonths: 12,
+    },
+    loyaltyAccount: null,
+    loyaltyDebitCount: 1,
+    releaseCount: 1,
+  };
+  // Every test starts with a provider that works; the #234 cases opt out.
+  paymentStub.createPayment = paymentStub.succeed;
+});
+
+describe("placeOrder — buyer identity (R5)", () => {
+  it("rejects both userId and guestEmail", async () => {
+    await expect(
+      placeOrder(fakePrisma(), VENDOR, input({ userId: "u1", guestEmail: "a@b.c" })),
+    ).rejects.toThrow(/exactly one/i);
+  });
+
+  it("rejects neither", async () => {
+    await expect(
+      placeOrder(fakePrisma(), VENDOR, input({ userId: null, guestEmail: null })),
+    ).rejects.toThrow(/exactly one/i);
+  });
+
+  it("accepts a guest", async () => {
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).resolves.toMatchObject({
+      totalPence: 2000 + 349,
+    });
+  });
+
+  it("accepts a member", async () => {
+    await expect(
+      placeOrder(fakePrisma(), VENDOR, input({ userId: "u1", guestEmail: null })),
+    ).resolves.toBeTruthy();
+  });
+});
+
+describe("placeOrder — refusals (R14)", () => {
+  it("refuses an empty cart", async () => {
+    state.cart = { id: "cart-1", items: [] };
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "CART_EMPTY",
+    });
+  });
+
+  it("refuses a missing cart", async () => {
+    state.cart = null;
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "CART_EMPTY",
+    });
+  });
+
+  it("refuses when a line's product went inactive", async () => {
+    state.products[0].isActive = false;
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "LINE_UNAVAILABLE",
+    });
+  });
+
+  it("refuses when a line's product has no stock", async () => {
+    state.products[0].inventory = { quantity: 0 };
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "LINE_UNAVAILABLE",
+    });
+  });
+
+  it("treats a missing Inventory row as unavailable, not unlimited", async () => {
+    state.products[0].inventory = null;
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "LINE_UNAVAILABLE",
+    });
+  });
+
+  it("refuses below the vendor's minimum order", async () => {
+    state.products[0].basePrice = 100; // 2 × £1.00 = £2.00, minimum is £15.00
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "BELOW_MINIMUM",
+    });
+  });
+});
+
+describe("placeOrder — stock guard (R11)", () => {
+  it("throws INSUFFICIENT_STOCK when the guarded decrement matches no row", async () => {
+    // count === 0 is how Postgres tells us someone else took the last one.
+    state.decrementCount = 0;
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "INSUFFICIENT_STOCK",
+    });
+  });
+
+  it("creates nothing when the decrement fails", async () => {
+    state.decrementCount = 0;
+    await placeOrder(fakePrisma(), VENDOR, input()).catch(() => {});
+    expect(created.order).toHaveLength(0);
+    expect(created.address).toHaveLength(0);
+    expect(created.payment).toHaveLength(0);
+    expect(created.cartCleared).toHaveLength(0);
+  });
+});
+
+describe("placeOrder — what it writes", () => {
+  it("snapshots product name and unit price onto the order item", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.orderItem[0]).toMatchObject({
+      productName: "Bananas",
+      unitPricePence: 1000,
+      quantity: 2,
+      lineTotalPence: 2000,
+    });
+  });
+
+  it("records money computed server-side, not supplied by the caller", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.order[0]).toMatchObject({
+      subtotalPence: 2000,
+      deliveryFeePence: 349,
+      totalPence: 2349,
+    });
+  });
+
+  /**
+   * P8.5d (#348) — a multi-buy tier reaches the money the order actually
+   * charges. The unit-level companion to the slice's live cart-vs-checkout
+   * check: this proves placeOrder's half, but only a live order can prove the
+   * cart's independent path agrees with it.
+   *
+   * Fixture: 2 x Bananas at £10.00, tier "2 for £16.50".
+   */
+  const TWO_FOR_1650 = {
+    productId: "p1",
+    groupQuantity: 2,
+    groupPricePence: 1650,
+    isActive: true,
+  };
+
+  it("charges the tiered line total, not unit price × quantity", async () => {
+    state.priceTiers = [TWO_FOR_1650];
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.orderItem[0]).toMatchObject({
+      // The BASE unit price is still snapshotted — the two columns together
+      // record what the product listed at and what the line actually charged.
+      unitPricePence: 1000,
+      quantity: 2,
+      lineTotalPence: 1650,
+    });
+  });
+
+  it("carries the tiered total into the order subtotal and payment", async () => {
+    state.priceTiers = [TWO_FOR_1650];
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.order[0]).toMatchObject({
+      subtotalPence: 1650,
+      deliveryFeePence: 349,
+      totalPence: 1999,
+    });
+    expect(created.payment[0]).toMatchObject({ amountPence: 1999 });
+  });
+
+  it("ignores an inactive tier", async () => {
+    state.priceTiers = [{ ...TWO_FOR_1650, isActive: false }];
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.order[0]).toMatchObject({ subtotalPence: 2000 });
+  });
+
+  it("opens the order PENDING_PAYMENT with a matching status event", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.statusEvent[0]).toMatchObject({ status: "PENDING_PAYMENT" });
+  });
+
+  it("records a PENDING payment for the order total", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    // Created inside the transaction with no provider reference — the external
+    // call happens after commit (P3c R6), so no HTTP round-trip holds the
+    // transaction open.
+    expect(created.payment[0]).toMatchObject({
+      amountPence: 2349,
+      provider: "pending",
+      providerReference: null,
+    });
+  });
+
+  it("fills in the provider reference only after the transaction commits", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.paymentUpdate).toHaveLength(1);
+  });
+
+  it("clears the cart last, which is what makes a double submit safe (R13)", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.cartCleared).toHaveLength(1);
+  });
+
+  it("stamps the vendor on every child row", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(created.address[0]).toMatchObject({ vendorId: VENDOR });
+    expect(created.order[0]).toMatchObject({ vendorId: VENDOR });
+    expect(created.orderItem[0]).toMatchObject({ vendorId: VENDOR });
+    expect(created.payment[0]).toMatchObject({ vendorId: VENDOR });
+    expect(created.statusEvent[0]).toMatchObject({ vendorId: VENDOR });
+  });
+});
+
+describe("toProvenance — what an order can prove about its money (P7.5b, #150/#138)", () => {
+  it("reports NO points as null, never as zero (R3)", () => {
+    // The distinction is the whole point: "not awarded yet" (unpaid, or a guest)
+    // and "awarded nothing" are different claims, and only the second one may be
+    // rendered as a figure. Collapsing them to 0 would put "You earned 0 points"
+    // on every unpaid order.
+    expect(toProvenance({ discountUse: null, loyaltyEntries: [] }).pointsEarned).toBeNull();
+  });
+
+  it("reports the awarded figure once an EARN row exists (R3)", () => {
+    expect(toProvenance({ discountUse: null, loyaltyEntries: [{ points: 34 }] }).pointsEarned).toBe(
+      34,
+    );
+  });
+
+  it("reports no discount code as null (R4)", () => {
+    expect(toProvenance({ discountUse: null, loyaltyEntries: [] }).discountCode).toBeNull();
+  });
+
+  it("carries the code's own stored share, not the order's whole discount (R4)", () => {
+    // amountPence is the snapshot written at redemption. splitDiscount subtracts
+    // it from discountPence to get loyalty's share, so passing anything else
+    // here silently misattributes both rows.
+    expect(
+      toProvenance({
+        discountUse: { amountPence: 500, code: { code: "WELCOME10" } },
+        loyaltyEntries: [],
+      }).discountCode,
+    ).toEqual({ code: "WELCOME10", amountPence: 500 });
+  });
+});
+
+describe("CheckoutError", () => {
+  it("carries a machine-readable code the UI can branch on", () => {
+    expect(new CheckoutError("CART_EMPTY", "empty").code).toBe("CART_EMPTY");
+  });
+});
+
+// ---- advanceOrderStatus (P4b, #125) ----------------------------------------
+
+const { advanceOrderStatus } = await import("@/lib/repositories/orders");
+
+const ACTOR = { userId: "user-staff" };
+const AHEED = "v-aheed";
+
+type AdvanceState = {
+  /** The order the vendor-scoped lookup finds, or null for "no such order". */
+  found: { id: string; status: string } | null;
+  /** Rows the guarded compare-and-set claims to have updated. */
+  updateCount: number;
+};
+
+/**
+ * Prisma double for the transition path only. Deliberately separate from
+ * fakePrisma(): that one models the checkout transaction, and folding both into
+ * one object would make each test harder to read than either is alone.
+ */
+function fakeAdvancePrisma(advance: AdvanceState) {
+  const writes = { updates: [] as unknown[], events: [] as unknown[] };
+  const tx = {
+    order: {
+      updateMany: async (args: unknown) => {
+        writes.updates.push(args);
+        return { count: advance.updateCount };
+      },
+    },
+    orderStatusEvent: {
+      create: async ({ data }: { data: unknown }) => {
+        writes.events.push(data);
+        return {};
+      },
+    },
+  };
+  const prisma = {
+    order: {
+      findFirst: async () => advance.found,
+      // findOrderForWebhook's post-commit re-read.
+      findUnique: async () => ({
+        id: "order-1",
+        vendorId: AHEED,
+        orderNumber: "AHD-ABC123",
+        status: "OUT_FOR_DELIVERY",
+        totalPence: 1250,
+        subtotalPence: 1000,
+        deliveryFeePence: 250,
+        guestEmail: "shopper@example.com",
+        userId: null,
+        user: null,
+        items: [],
+        // P7.5b (#150/#138): findOrderForWebhook now selects these two relations,
+        // so the fake returns them the way Prisma does — a selected to-many
+        // relation is always an array, never undefined. Modelled here rather than
+        // absorbed by a `?? []` in toProvenance, which would hide a real select
+        // that had been forgotten.
+        discountUse: null,
+        loyaltyEntries: [],
+      }),
+    },
+    $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+  } as never;
+  return { prisma, writes };
+}
+
+describe("advanceOrderStatus", () => {
+  it("advances a legal rung and records WHO moved it", async () => {
+    const { prisma, writes } = fakeAdvancePrisma({
+      found: { id: "order-1", status: "CONFIRMED" },
+      updateCount: 1,
+    });
+
+    const result = await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", "OUT_FOR_DELIVERY", ACTOR);
+
+    expect(result.ok).toBe(true);
+    expect(writes.events).toHaveLength(1);
+    expect(writes.events[0]).toMatchObject({
+      status: "OUT_FOR_DELIVERY",
+      createdByUserId: "user-staff",
+    });
+  });
+
+  it("compares and sets on the PERSISTED status, so a stale submit cannot double-advance", async () => {
+    const { prisma, writes } = fakeAdvancePrisma({
+      found: { id: "order-1", status: "CONFIRMED" },
+      updateCount: 1,
+    });
+    await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", "OUT_FOR_DELIVERY", ACTOR);
+
+    // The guard is in the WHERE, not a prior read: vendorId AND the status the
+    // caller observed. Anything that moved the row in between matches nothing.
+    expect(writes.updates[0]).toMatchObject({
+      where: { id: "order-1", vendorId: AHEED, status: "CONFIRMED" },
+    });
+  });
+
+  it("writes NOTHING when the guarded update matches no row (someone else got there first)", async () => {
+    const { prisma, writes } = fakeAdvancePrisma({
+      found: { id: "order-1", status: "CONFIRMED" },
+      updateCount: 0,
+    });
+
+    const result = await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", "OUT_FOR_DELIVERY", ACTOR);
+
+    expect(result).toEqual({ ok: false, reason: "illegal-transition" });
+    expect(writes.events).toHaveLength(0);
+  });
+
+  it("rejects an illegal rung without touching the database", async () => {
+    for (const [from, to] of [
+      ["PENDING_PAYMENT", "DELIVERED"],
+      ["CONFIRMED", "DELIVERED"],
+      ["DELIVERED", "OUT_FOR_DELIVERY"],
+      ["CANCELLED", "OUT_FOR_DELIVERY"],
+    ]) {
+      const { prisma, writes } = fakeAdvancePrisma({
+        found: { id: "order-1", status: from },
+        updateCount: 1,
+      });
+
+      const result = await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", to, ACTOR);
+
+      expect(result).toEqual({ ok: false, reason: "illegal-transition" });
+      expect(writes.updates).toHaveLength(0);
+      expect(writes.events).toHaveLength(0);
+    }
+  });
+
+  it("rejects a forged status the same way as a merely illegal one", async () => {
+    const { prisma, writes } = fakeAdvancePrisma({
+      found: { id: "order-1", status: "CONFIRMED" },
+      updateCount: 1,
+    });
+
+    const result = await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", "BANANA", ACTOR);
+
+    expect(result).toEqual({ ok: false, reason: "illegal-transition" });
+    expect(writes.updates).toHaveLength(0);
+    expect(writes.events).toHaveLength(0);
+  });
+
+  it("reports another vendor's order as not-found, indistinguishable from no order", async () => {
+    // The scoping is `where: { orderNumber, vendorId }` — a foreign order simply
+    // does not match, so the caller cannot probe for its existence.
+    const { prisma, writes } = fakeAdvancePrisma({ found: null, updateCount: 1 });
+
+    const result = await advanceOrderStatus(prisma, AHEED, "SRI-ZZZ999", "OUT_FOR_DELIVERY", ACTOR);
+
+    expect(result).toEqual({ ok: false, reason: "not-found" });
+    expect(writes.updates).toHaveLength(0);
+    expect(writes.events).toHaveLength(0);
+  });
+
+  it("returns data rather than throwing, for every rejection path", async () => {
+    const rejections = [
+      { found: null as AdvanceState["found"], to: "OUT_FOR_DELIVERY" },
+      { found: { id: "order-1", status: "DELIVERED" }, to: "OUT_FOR_DELIVERY" },
+      { found: { id: "order-1", status: "CONFIRMED" }, to: "NOT_A_STATUS" },
+    ];
+
+    for (const { found, to } of rejections) {
+      const { prisma } = fakeAdvancePrisma({ found, updateCount: 1 });
+      // No try/catch: a throw fails the test rather than being absorbed.
+      const result = await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", to, ACTOR);
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("sends no email itself — the caller does that after the commit", async () => {
+    // The 5s-Postgres-timeout lesson from P3c: no HTTP inside the transaction.
+    const { prisma } = fakeAdvancePrisma({
+      found: { id: "order-1", status: "CONFIRMED" },
+      updateCount: 1,
+    });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await advanceOrderStatus(prisma, AHEED, "AHD-ABC123", "OUT_FOR_DELIVERY", ACTOR);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
+// ---- P5a — loyalty redemption inside the checkout transaction (#135) --------
+
+/** A signed-in shopper holding `balancePoints`, active today. */
+function withBalance(balancePoints: number) {
+  state.loyaltyAccount = { balancePoints, lastActivityAt: new Date() };
+  return input({ userId: "u1", guestEmail: null });
+}
+
+const orderRow = () => created.order[0] as Record<string, number>;
+const ledgerRow = () => created.loyaltyEntry[0] as Record<string, unknown>;
+
+describe("placeOrder — loyalty redemption (R28-R35)", () => {
+  it("applies a discount recomputed from the DB balance, not the request (R28)", async () => {
+    // Asks for 5000 but holds 200 — the order must reflect what they have.
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(200), redeemPoints: 5000 });
+
+    expect(orderRow().discountPence).toBe(200);
+    expect(orderRow().subtotalPence).toBe(2000);
+    expect(orderRow().totalPence).toBe(2000 - 200 + 349);
+  });
+
+  it("keeps the money identity on the persisted row (R15)", async () => {
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(500), redeemPoints: 300 });
+    const o = orderRow();
+    expect(o.subtotalPence - o.discountPence + o.deliveryFeePence).toBe(o.totalPence);
+  });
+
+  it("writes exactly one negative REDEEM entry against the new order (R30)", async () => {
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(500), redeemPoints: 300 });
+
+    expect(created.loyaltyEntry).toHaveLength(1);
+    expect(ledgerRow()).toMatchObject({
+      kind: "REDEEM",
+      points: -300,
+      orderId: "order-1",
+      userId: "u1",
+      vendorId: VENDOR,
+    });
+  });
+
+  it("debits the balance behind a guarded updateMany carrying vendorId (R29)", async () => {
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(500), redeemPoints: 300 });
+
+    const debit = created.loyaltyDebit[0] as { where: Record<string, unknown> };
+    expect(debit.where).toMatchObject({ vendorId: VENDOR, userId: "u1" });
+    expect(debit.where.balancePoints).toEqual({ gte: 300 });
+    // The lapse bound is part of the WHERE, not a separate check a concurrent
+    // write could race past.
+    expect(debit.where.lastActivityAt).toBeDefined();
+  });
+
+  it("places the order with no discount when the debit loses the race (R29, R31)", async () => {
+    // count === 0 is exactly what a concurrent checkout spending the same
+    // points first looks like.
+    const order = withBalance(500);
+    state.loyaltyDebitCount = 0;
+    await placeOrder(fakePrisma(), VENDOR, { ...order, redeemPoints: 300 });
+
+    expect(orderRow().discountPence).toBe(0);
+    expect(orderRow().totalPence).toBe(2000 + 349);
+    expect(created.loyaltyEntry).toHaveLength(0);
+  });
+
+  it("ignores a redemption from a guest (R32)", async () => {
+    state.loyaltyAccount = { balancePoints: 5000, lastActivityAt: new Date() };
+    await placeOrder(fakePrisma(), VENDOR, input({ redeemPoints: 300 }));
+
+    expect(orderRow().discountPence).toBe(0);
+    expect(created.loyaltyEntry).toHaveLength(0);
+  });
+
+  it("ignores a redemption on a lapsed account (R34)", async () => {
+    const lapsed = new Date();
+    lapsed.setUTCMonth(lapsed.getUTCMonth() - 13);
+    state.loyaltyAccount = { balancePoints: 5000, lastActivityAt: lapsed };
+    await placeOrder(fakePrisma(), VENDOR, {
+      ...input({ userId: "u1", guestEmail: null }),
+      redeemPoints: 300,
+    });
+
+    expect(orderRow().discountPence).toBe(0);
+    expect(created.loyaltyEntry).toHaveLength(0);
+    expect(created.loyaltyDebit).toHaveLength(0);
+  });
+
+  it("ignores a redemption when the vendor runs no scheme (R35)", async () => {
+    const order = withBalance(500);
+    state.loyaltyConfig = { ...state.loyaltyConfig!, loyaltyEnabled: false };
+    await placeOrder(fakePrisma(), VENDOR, { ...order, redeemPoints: 300 });
+
+    expect(orderRow().discountPence).toBe(0);
+    expect(created.loyaltyEntry).toHaveLength(0);
+  });
+
+  it("judges the vendor minimum on the subtotal BEFORE the discount (R18)", async () => {
+    // Subtotal 2000 clears the 1500 minimum; redeeming 900 takes the goods
+    // value under it. The order must still be accepted.
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(900), redeemPoints: 900 });
+
+    expect(orderRow().discountPence).toBe(900);
+    expect(orderRow().totalPence).toBe(2000 - 900 + 349);
+  });
+
+  it("charges the payment provider the discounted total (R28)", async () => {
+    await placeOrder(fakePrisma(), VENDOR, { ...withBalance(500), redeemPoints: 300 });
+    // Payment.amountPence is what Stripe is eventually asked for.
+    expect((created.payment[0] as Record<string, number>).amountPence).toBe(2000 - 300 + 349);
+  });
+});
+
+/**
+ * P7.5a (#234) — the payment-provider failure path.
+ *
+ * placeOrder clears the cart INSIDE the order transaction (deliberately: it is
+ * what makes a double submit safe). When createPayment then fails, the order is
+ * cancelled and its stock returned — but until this slice the cart was left
+ * empty while the error told the shopper "please try again", which they could
+ * not do. Observed on staging with a 17-item basket.
+ */
+/**
+ * #1135 (R12, R13) — a basket line's note becomes the order line's snapshot only if the product
+ * takes notes at checkout; a note it no longer takes is dropped, never a CheckoutError; and a basket
+ * restored after a failed payment carries the note back.
+ */
+describe("placeOrder — custom item notes", () => {
+  const noted = (allowsCustomNote: boolean) => {
+    state.cart = {
+      id: "cart-1",
+      items: [{ productId: "p1", quantity: 2, customNote: "curry cut" }],
+    };
+    state.products[0].allowsCustomNote = allowsCustomNote;
+    state.products[0].category = { allowsCustomNote: false, parent: null };
+  };
+  const writtenNotes = () =>
+    (created.orderItem as { customNote: string | null }[]).map((row) => row.customNote);
+
+  it("copies a note the product accepts onto the order line", async () => {
+    noted(true);
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(writtenNotes()).toEqual(["curry cut"]);
+  });
+
+  it("accepts through the category's parent too", async () => {
+    noted(false);
+    state.products[0].category = { allowsCustomNote: false, parent: { allowsCustomNote: true } };
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(writtenNotes()).toEqual(["curry cut"]);
+  });
+
+  it("writes null for a note the product no longer accepts, and still places the order", async () => {
+    noted(false);
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).resolves.toBeTruthy();
+    expect(writtenNotes()).toEqual([null]);
+  });
+
+  it("writes null for a line with no note", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    expect(writtenNotes()).toEqual([null]);
+  });
+
+  it("carries the note back when a failed payment restores the basket", async () => {
+    noted(true);
+    paymentStub.createPayment = async () => {
+      throw new Error("stripe unreachable");
+    };
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toThrow();
+    expect(created.cartRestored).toEqual([
+      { cartId: "cart-1", vendorId: VENDOR, productId: "p1", quantity: 2, customNote: "curry cut" },
+    ]);
+  });
+});
+
+describe("placeOrder — Checkout Session lifetime (#1324 R19)", () => {
+  it("asks the provider to expire the session 35 minutes after the order's own createdAt", async () => {
+    await placeOrder(fakePrisma(), VENDOR, input());
+    const sent = paymentStub.lastInput as { expiresAt: Date };
+    expect(sent.expiresAt.toISOString()).toBe("2026-10-28T12:35:00.000Z");
+  });
+
+  it("sends the same expiresAt for the same order whenever it is called", async () => {
+    // Anchored on the stored createdAt, not on the call's clock, so a retried
+    // session creation carries identical parameters under its idempotency key.
+    await placeOrder(fakePrisma(), VENDOR, input());
+    const first = (paymentStub.lastInput as { expiresAt: Date }).expiresAt.getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T12:04:00.000Z"));
+    try {
+      await placeOrder(fakePrisma(), VENDOR, input());
+    } finally {
+      vi.useRealTimers();
+    }
+    expect((paymentStub.lastInput as { expiresAt: Date }).expiresAt.getTime()).toBe(first);
+  });
+});
+
+describe("placeOrder — payment provider unavailable", () => {
+  const failProvider = () => {
+    paymentStub.createPayment = async () => {
+      throw new Error("stripe unreachable");
+    };
+  };
+
+  it("throws PAYMENT_PROVIDER_FAILED", async () => {
+    failProvider();
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toMatchObject({
+      code: "PAYMENT_PROVIDER_FAILED",
+    });
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toBeInstanceOf(CheckoutError);
+  });
+
+  it("puts the cart back, matching the cancelled order's lines exactly", async () => {
+    failProvider();
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toThrow();
+
+    // The order captured 2x p1, so that is precisely what returns to the cart.
+    expect(created.cartRestored).toEqual([
+      { cartId: "cart-1", vendorId: VENDOR, productId: "p1", quantity: 2 },
+    ]);
+  });
+
+  it("restores into the ORIGINAL cart, not a new one", async () => {
+    failProvider();
+    await expect(placeOrder(fakePrisma(), VENDOR, input({ cartId: "cart-99" }))).rejects.toThrow();
+
+    for (const row of created.cartRestored as { cartId: string }[]) {
+      expect(row.cartId).toBe("cart-99");
+    }
+  });
+
+  it("still cancels the order, fails the payment and returns the stock", async () => {
+    failProvider();
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toThrow();
+
+    // P3c's R7 compensation must be untouched by the cart restore.
+    expect(created.orderCancelled).toHaveLength(1);
+    expect(created.paymentFailed).toHaveLength(1);
+    // One guarded decrement at creation, one increment on release.
+    const increments = (created.inventoryUpdate as { data?: { quantity?: unknown } }[]).filter(
+      (call) => JSON.stringify(call.data ?? {}).includes("increment"),
+    );
+    expect(increments).toHaveLength(1);
+  });
+
+  it("skips duplicates rather than colliding on the cart's unique constraint", async () => {
+    failProvider();
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toThrow();
+
+    // CartItem is unique on [cartId, productId]. If the shopper re-added the
+    // product in the meantime, their newer row wins and this must not throw.
+    expect(created.cartRestoreOptions).toEqual([{ skipDuplicates: true }]);
+  });
+
+  it("does NOT restore the cart when releaseOrder found nothing to cancel", async () => {
+    failProvider();
+    state.releaseCount = 0; // already CONFIRMED or already CANCELLED elsewhere
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).rejects.toThrow();
+
+    // `count === 0` means the order was not this call's to cancel. If it had
+    // been confirmed by a racing webhook, refilling the cart would hand the
+    // shopper a duplicate basket for an order they actually paid for — a worse
+    // failure than the empty cart #234 is about.
+    expect(created.cartRestored).toEqual([]);
+  });
+
+  it("leaves the cart alone when the provider succeeds", async () => {
+    await expect(placeOrder(fakePrisma(), VENDOR, input())).resolves.toMatchObject({
+      orderNumber: expect.any(String),
+    });
+    expect(created.cartRestored).toEqual([]);
+  });
+});
+
+/**
+ * P9.1 (#427) — who may read an order.
+ *
+ * The rule this locks down: a guest order is authorized by its capability token
+ * and nothing else, because the order number travels through emails, shared
+ * links, browser history and support threads. A member's order stays owner-only
+ * and the token is irrelevant to it.
+ *
+ * `findOrderForViewer` issues exactly one call, `prisma.order.findFirst`, so the
+ * double below is deliberately tiny and separate from placeOrder's harness. It
+ * honours the `where` clause rather than always returning its row — otherwise
+ * the cross-vendor case would pass without proving anything.
+ */
+describe("findOrderForViewer — guest capability token (#427)", () => {
+  const TOKEN = "6f1d1c2e-9b4a-4a7e-8f2b-0d3c5e7a9b11";
+
+  function orderRow(over: { userId?: string | null; confirmationToken?: string | null } = {}) {
+    return {
+      orderNumber: "AHE-20260829-K4M2XQ",
+      confirmationToken: TOKEN,
+      status: "CONFIRMED",
+      createdAt: new Date("2026-08-29T10:00:00Z"),
+      subtotalPence: 2000,
+      discountPence: 0,
+      deliveryFeePence: 346,
+      totalPence: 2346,
+      userId: null as string | null,
+      items: [
+        {
+          productId: "p-1",
+          productName: "Basmati Rice 5kg",
+          unitPricePence: 2000,
+          quantity: 1,
+          lineTotalPence: 2000,
+        },
+      ],
+      address: {
+        recipientName: "Test Recipient",
+        phone: "07700900000",
+        line1: "1 Test Street",
+        line2: null,
+        city: "Leicester",
+        postcode: "LE1 1AA",
+        notes: null,
+      },
+      discountUse: null,
+      loyaltyEntries: [] as { points: number }[],
+      ...over,
+    };
+  }
+
+  /** Honours `where` exactly as Postgres would, so vendor scoping is real. */
+  function fakeDb(row: ReturnType<typeof orderRow>, vendorId = VENDOR) {
+    return {
+      order: {
+        findFirst: async ({ where }: { where: { orderNumber: string; vendorId: string } }) =>
+          where.vendorId === vendorId && where.orderNumber === row.orderNumber ? row : null,
+      },
+    } as unknown as Parameters<typeof findOrderForViewer>[0];
+  }
+
+  const read = (row: ReturnType<typeof orderRow>, viewer: string | null, token: string | null) =>
+    findOrderForViewer(fakeDb(row), VENDOR, row.orderNumber, viewer, token);
+
+  it("returns a guest order to a caller holding the matching token", async () => {
+    await expect(read(orderRow(), null, TOKEN)).resolves.toMatchObject({
+      orderNumber: "AHE-20260829-K4M2XQ",
+      hasAccount: false,
+    });
+  });
+
+  it("refuses a guest order when no token is supplied — the order number is not a credential", async () => {
+    await expect(read(orderRow(), null, null)).resolves.toBeNull();
+  });
+
+  it("refuses a guest order when the token is wrong", async () => {
+    await expect(read(orderRow(), null, "not-the-token")).resolves.toBeNull();
+  });
+
+  it("refuses a guest order when the token is the empty string", async () => {
+    await expect(read(orderRow(), null, "")).resolves.toBeNull();
+  });
+
+  // Orders placed before this migration have a NULL token. Without the explicit
+  // null guard, `null === null` would hand every one of them to a caller passing
+  // nothing at all — the exact hole #427 closes.
+  it("refuses a pre-migration guest order whose stored token is null, even with no token passed", async () => {
+    await expect(read(orderRow({ confirmationToken: null }), null, null)).resolves.toBeNull();
+  });
+
+  it("returns a member's own order to its owner", async () => {
+    await expect(read(orderRow({ userId: "u-1" }), "u-1", null)).resolves.toMatchObject({
+      hasAccount: true,
+    });
+  });
+
+  // The token is irrelevant to an owned order: holding a correct one must not
+  // promote a stranger into the owner.
+  it("refuses a member's order to a non-owner even holding the correct token", async () => {
+    await expect(read(orderRow({ userId: "u-1" }), "u-2", TOKEN)).resolves.toBeNull();
+  });
+
+  it("refuses another vendor's order for every viewer and token combination", async () => {
+    const row = orderRow();
+    await expect(
+      findOrderForViewer(fakeDb(row), "v-other", row.orderNumber, null, TOKEN),
+    ).resolves.toBeNull();
+    await expect(
+      findOrderForViewer(fakeDb(row), "v-other", row.orderNumber, "u-1", null),
+    ).resolves.toBeNull();
+  });
+
+  // OrderSummary is what every order page renders from, so the credential must
+  // not survive into it — same reason userId doesn't.
+  it("never returns the token itself", async () => {
+    const result = await read(orderRow(), null, TOKEN);
+    expect(result).not.toBeNull();
+    expect("confirmationToken" in (result as object)).toBe(false);
+    expect("userId" in (result as object)).toBe(false);
+  });
+});
+
+// ---- Payment binding (P9.1, #429) ------------------------------------------
+
+const { confirmPayment, failPayment } = await import("@/lib/repositories/orders");
+type PaymentBinding = import("@/lib/repositories/orders").PaymentBinding;
+
+/**
+ * P9.1 (#429) — which Stripe event may move an order's payment state.
+ *
+ * The rule: a verified signature proves an event came from Stripe, not that it is
+ * about the payment THIS order is waiting on. So the stored
+ * `Payment.providerReference` is folded into the `where` of the same
+ * compare-and-set that already guards the status transition.
+ *
+ * THE DOUBLE BELOW HONOURS `where`, INCLUDING THE NESTED `payment.is` FILTER.
+ * That is the whole point of it. A double returning a count of 1 unconditionally
+ * would pass every case here while proving nothing — the mismatch cases would
+ * "pass" precisely because the guard had been ignored.
+ */
+describe("confirmPayment / failPayment — payment binding (#429)", () => {
+  const ORDER_ID = "order-bind-1";
+  const ORDER_NUMBER = "AHE-20260829-BIND01";
+  const SESSION = "cs_test_the_real_one";
+
+  type PaymentRow = {
+    provider: string;
+    providerReference: string | null;
+    amountPence: number;
+  } | null;
+  type Row = { status: string; currency: string; payment: PaymentRow };
+
+  function binding(over: Partial<PaymentBinding> = {}): PaymentBinding {
+    return {
+      provider: "stripe",
+      providerReference: SESSION,
+      amountPence: 2346,
+      currency: "gbp",
+      ...over,
+    };
+  }
+
+  /**
+   * Evaluates a `where` the way Postgres would — false as soon as any condition
+   * fails, and a null `payment` relation is unmatchable, which is exactly how an
+   * order whose session write never landed has to behave.
+   */
+  function matches(where: Record<string, unknown>, row: Row): boolean {
+    if (where.id !== undefined && where.id !== ORDER_ID) return false;
+    if (where.status !== undefined && where.status !== row.status) return false;
+    if (where.currency !== undefined && where.currency !== row.currency) return false;
+    const payment = where.payment as { is?: Record<string, unknown> } | undefined;
+    if (payment?.is) {
+      if (!row.payment) return false;
+      const stored = row.payment as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(payment.is)) {
+        if (stored[key] !== value) return false;
+      }
+    }
+    return true;
+  }
+
+  function fakeDb(row: Row) {
+    const writes: string[] = [];
+    const inventoryIncrements: unknown[] = [];
+
+    // findOrderForWebhook's wide select and classifyNoMatch's `{ status: true }`
+    // are both served by this one object: the first destructures it, the second
+    // reads `.status`. Keeping it as one row is what makes the status the
+    // classifier sees the same status the guarded write just left behind.
+    const orderRow = () => ({
+      id: ORDER_ID,
+      vendorId: VENDOR,
+      orderNumber: ORDER_NUMBER,
+      status: row.status,
+      totalPence: 2346,
+      subtotalPence: 2000,
+      discountPence: 0,
+      deliveryFeePence: 346,
+      guestEmail: "shopper@example.com",
+      userId: null,
+      user: null,
+      items: [
+        {
+          productName: "Basmati Rice 5kg",
+          unitPricePence: 2000,
+          quantity: 1,
+          lineTotalPence: 2000,
+        },
+      ],
+      discountUse: null,
+      loyaltyEntries: [] as { points: number }[],
+    });
+
+    const tx = {
+      order: {
+        updateMany: async (args: { where: Record<string, unknown>; data: { status: string } }) => {
+          if (!matches(args.where, row)) return { count: 0 };
+          row.status = args.data.status;
+          writes.push(`order:${args.data.status}`);
+          return { count: 1 };
+        },
+        findUnique: async () => orderRow(),
+      },
+      payment: {
+        updateMany: async () => {
+          writes.push("payment");
+          return { count: 1 };
+        },
+      },
+      orderStatusEvent: {
+        create: async () => {
+          writes.push("statusEvent");
+          return {};
+        },
+      },
+      orderItem: { findMany: async () => [{ productId: "p-1", quantity: 1 }] },
+      inventory: {
+        updateMany: async (args: unknown) => {
+          inventoryIncrements.push(args);
+          writes.push("inventory");
+          return { count: 1 };
+        },
+      },
+      // reverseRedemption and releaseCodeRedemption both exit on a null lookup.
+      loyaltyLedgerEntry: { findUnique: async () => null },
+      discountRedemption: { findFirst: async () => null, findUnique: async () => null },
+    };
+
+    const prisma = {
+      order: { findUnique: async () => orderRow() },
+      vendorConfig: { findUnique: async () => null },
+      $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+    } as never;
+
+    return { prisma, writes, inventoryIncrements, row };
+  }
+
+  const paid = (): Row => ({
+    status: "PENDING_PAYMENT",
+    currency: "GBP",
+    payment: { provider: "stripe", providerReference: SESSION, amountPence: 2346 },
+  });
+
+  describe("confirmPayment", () => {
+    it("confirms when the event corresponds to the stored payment", async () => {
+      const db = fakeDb(paid());
+      await expect(confirmPayment(db.prisma, ORDER_NUMBER, binding())).resolves.toEqual({
+        ok: true,
+      });
+      expect(db.row.status).toBe("CONFIRMED");
+    });
+
+    // Stripe sends `gbp`; Order.currency is `GBP`. The binding upper-cases its
+    // input so the where can use exact equality rather than collation semantics.
+    it("accepts a currency that differs only in case", async () => {
+      const db = fakeDb(paid());
+      await expect(
+        confirmPayment(db.prisma, ORDER_NUMBER, binding({ currency: "gbp" })),
+      ).resolves.toEqual({ ok: true });
+    });
+
+    it("refuses an event whose session id is not this order's", async () => {
+      const db = fakeDb(paid());
+      await expect(
+        confirmPayment(db.prisma, ORDER_NUMBER, binding({ providerReference: "cs_test_other" })),
+      ).resolves.toEqual({ ok: false, reason: "binding-mismatch" });
+      expect(db.row.status).toBe("PENDING_PAYMENT");
+      expect(db.writes).toEqual([]);
+    });
+
+    // The window between order creation and the post-commit session write, and
+    // any order whose provider call never completed. A stored null cannot equal a
+    // non-null session id, so this is refused by the same predicate with no
+    // separate branch — the property #427 established for capability tokens.
+    it("refuses an order whose stored provider reference is still null", async () => {
+      const db = fakeDb({
+        status: "PENDING_PAYMENT",
+        currency: "GBP",
+        payment: { provider: "stripe", providerReference: null, amountPence: 2346 },
+      });
+      await expect(confirmPayment(db.prisma, ORDER_NUMBER, binding())).resolves.toEqual({
+        ok: false,
+        reason: "binding-mismatch",
+      });
+      expect(db.writes).toEqual([]);
+    });
+
+    it("refuses an event whose amount is not this order's", async () => {
+      const db = fakeDb(paid());
+      await expect(
+        confirmPayment(db.prisma, ORDER_NUMBER, binding({ amountPence: 1 })),
+      ).resolves.toEqual({ ok: false, reason: "binding-mismatch" });
+      expect(db.writes).toEqual([]);
+    });
+
+    it("refuses an event missing any binding field, writing nothing", async () => {
+      const db = fakeDb(paid());
+      const incomplete: Partial<PaymentBinding>[] = [
+        { providerReference: null },
+        { amountPence: null },
+        { currency: null },
+      ];
+      for (const missing of incomplete) {
+        await expect(confirmPayment(db.prisma, ORDER_NUMBER, binding(missing))).resolves.toEqual({
+          ok: false,
+          reason: "unbindable",
+        });
+      }
+      expect(db.writes).toEqual([]);
+      expect(db.row.status).toBe("PENDING_PAYMENT");
+    });
+
+    // A duplicate delivery is Stripe working as designed and must stay SILENT.
+    // Reporting it as a mismatch would bury the real mismatches in noise.
+    it("reports a duplicate delivery as already-processed, not as a mismatch", async () => {
+      const db = fakeDb({
+        status: "CONFIRMED",
+        currency: "GBP",
+        payment: { provider: "stripe", providerReference: SESSION, amountPence: 2346 },
+      });
+      await expect(confirmPayment(db.prisma, ORDER_NUMBER, binding())).resolves.toEqual({
+        ok: false,
+        reason: "already-processed",
+      });
+      expect(db.writes).toEqual([]);
+    });
+
+    // Asserted on the recorded `where` itself, so the guard cannot be quietly
+    // moved out of the query and into application code while every behavioural
+    // case above carries on passing.
+    it("puts the binding in the WHERE clause, not in application code", async () => {
+      let seen: Record<string, unknown> | null = null;
+      const db = fakeDb(paid());
+      const spy = {
+        ...(db.prisma as unknown as Record<string, unknown>),
+        $transaction: async (fn: (t: unknown) => Promise<unknown>) =>
+          fn({
+            order: {
+              updateMany: async (args: { where: Record<string, unknown> }) => {
+                seen = args.where;
+                return { count: 0 };
+              },
+              findUnique: async () => ({ status: "PENDING_PAYMENT" }),
+            },
+          }),
+      } as never;
+
+      await confirmPayment(spy, ORDER_NUMBER, binding());
+
+      expect(seen).toMatchObject({
+        id: ORDER_ID,
+        status: "PENDING_PAYMENT",
+        currency: "GBP",
+        payment: { is: { provider: "stripe", providerReference: SESSION, amountPence: 2346 } },
+      });
+    });
+  });
+
+  describe("failPayment", () => {
+    it("cancels and releases stock when the event corresponds to the stored payment", async () => {
+      const db = fakeDb(paid());
+      await expect(failPayment(db.prisma, ORDER_NUMBER, binding(), "expired")).resolves.toEqual({
+        ok: true,
+      });
+      expect(db.row.status).toBe("CANCELLED");
+      expect(db.inventoryIncrements).toHaveLength(1);
+    });
+
+    it("refuses an event whose session id is not this order's, and releases no stock", async () => {
+      const db = fakeDb(paid());
+      await expect(
+        failPayment(
+          db.prisma,
+          ORDER_NUMBER,
+          binding({ providerReference: "cs_test_other" }),
+          "expired",
+        ),
+      ).resolves.toEqual({ ok: false, reason: "binding-mismatch" });
+      expect(db.row.status).toBe("PENDING_PAYMENT");
+      expect(db.inventoryIncrements).toEqual([]);
+    });
+
+    // The deliberate asymmetry with confirmPayment. An expired session asserts no
+    // money, so amount and currency are not what authorize releasing stock — and
+    // refusing over a missing amount_total would strand inventory indefinitely.
+    it("still cancels when amount and currency are absent — it binds on session identity alone", async () => {
+      const db = fakeDb(paid());
+      await expect(
+        failPayment(
+          db.prisma,
+          ORDER_NUMBER,
+          binding({ amountPence: null, currency: null }),
+          "expired",
+        ),
+      ).resolves.toEqual({ ok: true });
+      expect(db.row.status).toBe("CANCELLED");
+    });
+  });
+});
+
+/* ---- Stranded payment sweep candidate query (P9.2, #618) ----------------- */
+
+const { listStalePendingOrders } = await import("@/lib/repositories/orders");
+
+describe("listStalePendingOrders", () => {
+  const findMany = vi.fn();
+  // Passed in as an argument, like tests/vendor-profile.test.ts — the function
+  // takes its client explicitly, so no module mock is needed to substitute one.
+  const stub = { order: { findMany } } as unknown as Parameters<typeof listStalePendingOrders>[0];
+
+  beforeEach(() => findMany.mockReset());
+
+  it("R10: scopes to the vendor, PENDING_PAYMENT, the cutoff, and only DUE orders", async () => {
+    findMany.mockResolvedValue([]);
+    const cutoff = new Date("2026-09-06T11:30:00.000Z");
+    const now = new Date("2026-09-06T12:00:00.000Z");
+
+    await listStalePendingOrders(stub, "v-aheed", cutoff, now, 50);
+
+    const args = findMany.mock.calls[0][0];
+    expect(args.where).toMatchObject({
+      vendorId: "v-aheed",
+      status: "PENDING_PAYMENT",
+      createdAt: { lt: cutoff },
+    });
+    // #945: never swept, or swept and due — an exhausted or backed-off order
+    // must not come back to the head of the queue on every tick.
+    expect(args.where.OR).toEqual([
+      { reconciliation: { is: null } },
+      { reconciliation: { is: { exhaustedAt: null, nextAttemptAt: { lte: now } } } },
+    ]);
+    // Matches @@index([vendorId, status, createdAt]) — the reason this slice
+    // needed no migration.
+    expect(args.take).toBe(50);
+    // Oldest first, so a backlog larger than the cap drains deterministically
+    // instead of the oldest rows starving behind newer ones.
+    expect(args.orderBy).toEqual({ createdAt: "asc" });
+  });
+
+  it("R10: flattens the provider reference and failure count, defaulting both when absent", async () => {
+    const createdAt = new Date("2026-09-01T00:00:00.000Z");
+    findMany.mockResolvedValue([
+      {
+        id: "o1",
+        orderNumber: "AH-1",
+        createdAt,
+        payment: { providerReference: "cs_live_1" },
+        reconciliation: { consecutiveFailures: 3 },
+      },
+      {
+        id: "o2",
+        orderNumber: "AH-2",
+        createdAt,
+        payment: { providerReference: null },
+        reconciliation: null,
+      },
+      // No Payment row at all — Order.payment is optional in the schema.
+      { id: "o3", orderNumber: "AH-3", createdAt, payment: null, reconciliation: null },
+    ]);
+
+    const rows = await listStalePendingOrders(stub, "v-aheed", new Date(), new Date(), 50);
+
+    expect(rows).toEqual([
+      {
+        orderId: "o1",
+        orderNumber: "AH-1",
+        createdAt,
+        providerReference: "cs_live_1",
+        consecutiveFailures: 3,
+      },
+      {
+        orderId: "o2",
+        orderNumber: "AH-2",
+        createdAt,
+        providerReference: null,
+        consecutiveFailures: 0,
+      },
+      {
+        orderId: "o3",
+        orderNumber: "AH-3",
+        createdAt,
+        providerReference: null,
+        consecutiveFailures: 0,
+      },
+    ]);
+  });
+});
+
+/**
+ * P9.2 (#696) — cancelConfirmedOrder, the paid cancel path.
+ *
+ * A SIBLING of releaseOrder, not a parameterisation of it: releaseOrder's status
+ * guard could have been widened, but its `payment.updateMany(... FAILED)` could
+ * not. On this path the money arrived and stays (no refund — #606 owns money
+ * movement), so writing FAILED would be false the moment it was written.
+ *
+ * Its own fake rather than the module-level one above, which is shaped for
+ * placeOrder's much larger transaction.
+ */
+describe("cancelConfirmedOrder (#696)", () => {
+  const ORDER_ID = "o-1";
+
+  function fakeCancelDb(opts: {
+    updatedCount: number;
+    items?: { productId: string; quantity: number }[];
+  }) {
+    const calls = {
+      orderUpdates: [] as { where: Record<string, unknown>; data: Record<string, unknown> }[],
+      inventoryUpdates: [] as { where: Record<string, unknown>; data: Record<string, unknown> }[],
+      events: [] as Record<string, unknown>[],
+      paymentUpdates: [] as unknown[],
+      ledgerReads: [] as string[],
+    };
+
+    const tx = {
+      order: {
+        updateMany: async (args: {
+          where: Record<string, unknown>;
+          data: Record<string, unknown>;
+        }) => {
+          calls.orderUpdates.push(args);
+          return { count: opts.updatedCount };
+        },
+      },
+      orderItem: {
+        findMany: async () => opts.items ?? [],
+      },
+      inventory: {
+        updateMany: async (args: {
+          where: Record<string, unknown>;
+          data: Record<string, unknown>;
+        }) => {
+          calls.inventoryUpdates.push(args);
+          return { count: 1 };
+        },
+      },
+      orderStatusEvent: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          calls.events.push(data);
+          return data;
+        },
+      },
+      // Present so a stray write would be RECORDED rather than throwing — an
+      // assertion that it was never called is only meaningful if calling it
+      // would have succeeded.
+      payment: {
+        updateMany: async (args: unknown) => {
+          calls.paymentUpdates.push(args);
+          return { count: 1 };
+        },
+      },
+      // The three reversals run against the real functions; give them nothing
+      // to find so they no-op, which is the behaviour their own suites cover.
+      loyaltyLedgerEntry: {
+        findUnique: async ({ where }: { where: { orderId_kind: { kind: string } } }) => {
+          calls.ledgerReads.push(where.orderId_kind.kind);
+          return null;
+        },
+        create: async () => ({}),
+      },
+      loyaltyAccount: { updateMany: async () => ({ count: 0 }) },
+      discountRedemption: {
+        findFirst: async () => null,
+        updateMany: async () => ({ count: 0 }),
+      },
+      discountCode: { updateMany: async () => ({ count: 0 }) },
+    };
+
+    const db = {
+      $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+    };
+
+    return { db: db as unknown as Parameters<typeof cancelConfirmedOrder>[0], calls };
+  }
+
+  it("guards on the two cancellable statuses and the vendor", async () => {
+    const { db, calls } = fakeCancelDb({ updatedCount: 1 });
+
+    await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "customer called", "staff-1");
+
+    expect(calls.orderUpdates[0].where).toMatchObject({
+      id: ORDER_ID,
+      vendorId: VENDOR,
+      status: { in: ["CONFIRMED", "READY_FOR_COLLECTION"] },
+    });
+    expect(calls.orderUpdates[0].data).toMatchObject({ status: "CANCELLED" });
+  });
+
+  it("returns false and writes NOTHING else when the guard matches no row", async () => {
+    // count 0 means the order was not cancellable, or another request got there
+    // first. Either way nothing after the compare-and-set may run — this is what
+    // makes a double-submitted cancel safe rather than a second stock increment.
+    const { db, calls } = fakeCancelDb({
+      updatedCount: 0,
+      items: [{ productId: "p-1", quantity: 3 }],
+    });
+
+    expect(await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "reason", "staff-1")).toBe(false);
+
+    expect(calls.inventoryUpdates).toHaveLength(0);
+    expect(calls.events).toHaveLength(0);
+    expect(calls.ledgerReads).toHaveLength(0);
+  });
+
+  it("restores stock for every order line", async () => {
+    const { db, calls } = fakeCancelDb({
+      updatedCount: 1,
+      items: [
+        { productId: "p-1", quantity: 3 },
+        { productId: "p-2", quantity: 1 },
+      ],
+    });
+
+    expect(await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "reason", "staff-1")).toBe(true);
+
+    expect(calls.inventoryUpdates).toHaveLength(2);
+    expect(calls.inventoryUpdates[0]).toMatchObject({
+      where: { vendorId: VENDOR, productId: "p-1" },
+      data: { quantity: { increment: 3 } },
+    });
+    expect(calls.inventoryUpdates[1].data).toMatchObject({ quantity: { increment: 1 } });
+  });
+
+  it("NEVER touches the Payment row — the money arrived and stays", async () => {
+    // The single most important assertion in this file. releaseOrder writes
+    // FAILED here, correctly, because no money ever arrived on that path. Doing
+    // the same on a paid order would be false at the moment it was written and
+    // would collide with the real REFUNDED writer #606 eventually adds.
+    const { db, calls } = fakeCancelDb({
+      updatedCount: 1,
+      items: [{ productId: "p-1", quantity: 1 }],
+    });
+
+    await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "reason", "staff-1");
+
+    expect(calls.paymentUpdates).toHaveLength(0);
+  });
+
+  it("records the reason and the acting staff user on the status event", async () => {
+    const { db, calls } = fakeCancelDb({ updatedCount: 1 });
+
+    await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "van broke down", "staff-7");
+
+    expect(calls.events).toHaveLength(1);
+    expect(calls.events[0]).toMatchObject({
+      orderId: ORDER_ID,
+      vendorId: VENDOR,
+      status: "CANCELLED",
+      note: "van broke down",
+      createdByUserId: "staff-7",
+    });
+  });
+
+  it("attempts BOTH ledger reversals, since a paid order may carry both", async () => {
+    const { db, calls } = fakeCancelDb({ updatedCount: 1 });
+
+    await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "reason", "staff-1");
+
+    // reverseRedemption reads REDEEM; reverseEarn reads EARN. Each no-ops when
+    // its source row is absent, but both must be attempted.
+    expect(calls.ledgerReads).toContain("REDEEM");
+    expect(calls.ledgerReads).toContain("EARN");
+  });
+
+  it("accepts a null actor, for a future unattended caller", async () => {
+    const { db, calls } = fakeCancelDb({ updatedCount: 1 });
+
+    await cancelConfirmedOrder(db, VENDOR, ORDER_ID, "reason", null);
+
+    expect(calls.events[0]).toMatchObject({ createdByUserId: null });
+  });
+});
+
+/**
+ * #1324 R15 — when the sweep next has work. The fake answers the two `take: 1`
+ * reads the way Postgres would: the oldest never-swept order, and the earliest
+ * non-exhausted reconciliation on a still-pending order. Each fake asserts the
+ * `where` it was given, so a dropped vendor or status filter fails here.
+ */
+describe("findNextPaymentSweepDueAt (#1324 R15)", () => {
+  const CUTOFF = 30 * 60 * 1000;
+  type Row = { createdAt: Date } | null;
+  type Recon = { nextAttemptAt: Date } | null;
+
+  function duePrisma(neverSwept: Row, scheduled: Recon) {
+    return {
+      order: {
+        findFirst: vi.fn(async (args: { where: Record<string, unknown> }) => {
+          expect(args.where).toMatchObject({
+            vendorId: VENDOR,
+            status: "PENDING_PAYMENT",
+            reconciliation: { is: null },
+          });
+          return neverSwept;
+        }),
+      },
+      paymentReconciliation: {
+        findFirst: vi.fn(async (args: { where: Record<string, unknown> }) => {
+          expect(args.where).toMatchObject({
+            vendorId: VENDOR,
+            exhaustedAt: null,
+            order: { status: "PENDING_PAYMENT" },
+          });
+          return scheduled;
+        }),
+      },
+    } as unknown as Parameters<typeof findNextPaymentSweepDueAt>[0];
+  }
+
+  const T = (iso: string) => new Date(iso);
+
+  it("returns null when nothing is pending", async () => {
+    await expect(findNextPaymentSweepDueAt(duePrisma(null, null), VENDOR, CUTOFF)).resolves.toBe(
+      null,
+    );
+  });
+
+  it("a never-swept order is due at createdAt + the candidate cutoff", async () => {
+    const due = await findNextPaymentSweepDueAt(
+      duePrisma({ createdAt: T("2026-10-28T12:00:00Z") }, null),
+      VENDOR,
+      CUTOFF,
+    );
+    expect(due?.toISOString()).toBe("2026-10-28T12:30:00.000Z");
+  });
+
+  it("a scheduled retry is due at its nextAttemptAt", async () => {
+    const due = await findNextPaymentSweepDueAt(
+      duePrisma(null, { nextAttemptAt: T("2026-10-29T04:00:00Z") }),
+      VENDOR,
+      CUTOFF,
+    );
+    expect(due?.toISOString()).toBe("2026-10-29T04:00:00.000Z");
+  });
+
+  it("returns the earlier of the two", async () => {
+    const due = await findNextPaymentSweepDueAt(
+      duePrisma(
+        { createdAt: T("2026-10-28T12:00:00Z") },
+        { nextAttemptAt: T("2026-10-28T12:10:00Z") },
+      ),
+      VENDOR,
+      CUTOFF,
+    );
+    expect(due?.toISOString()).toBe("2026-10-28T12:10:00.000Z");
+  });
+
+  it("ignores an exhausted reconciliation: its query filters exhaustedAt null", async () => {
+    // The filter itself is asserted inside the fake; an exhausted row is never
+    // returned by that query, so with no other pending order the answer is null.
+    await expect(findNextPaymentSweepDueAt(duePrisma(null, null), VENDOR, CUTOFF)).resolves.toBe(
+      null,
+    );
+  });
+});

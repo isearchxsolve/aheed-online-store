@@ -1,0 +1,596 @@
+---
+id: app-conventions
+title: "Application Conventions — per-layer invariants and the tests that enforce them"
+audience: [dev]
+type: doc
+status: approved
+version: "1.20.0"
+updated: 2026-10-21
+visibility: internal
+summary: What makes a file correct in each layer of this app — "use server" modules, lib/repositories, staff pages under app/(admin), vendor-neutral copy, fulfilment-method preference, autocomplete tokens, shared-source copy rules and React hooks — with the tests that enforce each invariant mechanically.
+tags: [conventions, repositories, server-actions, staff-panel]
+---
+
+# Application Conventions
+
+A reader arrives here because they are **writing or changing a file in one of these layers**. Each
+section states the invariant, then names the test that enforces it — several of these rules were
+enforced only by prose for months and drifted, so the test name matters as much as the rule.
+
+Runtime failures that survive a green build are in `runtime-pitfalls.md`. Folder layout is in
+`repo-structure.md`. Design tokens and per-vendor branding are in `specs/design-system.md`.
+
+## Server Actions (`"use server"` files)
+
+- **A `"use server"` file may export ONLY async functions — nothing else, not even a plain constant
+  used purely to seed `useActionState`.** The restriction is enforced at *runtime*, not build time:
+  `next build`, `tsc --noEmit`, and `npm test` all stay green with a violating file, because none of
+  them load the module through the flight-loader's action-dispatch path. The compiled bundle calls
+  `ensureServerEntryExports([...allExportsOfTheFile])` unconditionally the moment *any* action from
+  that file is dispatched — so a same-file value export (e.g. `export const initialFormState = {...}`
+  living next to the real actions "for convenience") makes **every** action in that file 500 for
+  **every** caller, real browser included, with `Error: A "use server" file can only export async
+  functions, found object`. First hit in P6b1 (#159) — `features/admin/catalogue.ts` exported
+  `initialCatalogueState` alongside `saveProduct`/`saveCategory`; nothing caught it until
+  `npm run preview`'s live write rows at Validate. Keep any such state constant in a plain module
+  (e.g. `lib/<feature>-form.ts`) and import it from the client component directly — never from the
+  `"use server"` file itself.
+- **A page needing both a per-row action and a bulk action over the same rows cannot nest one
+  `<form>` inside another** — HTML forbids it outright. Bind a row's control to a form it isn't a
+  DOM descendant of via the standard `form="<id>"` attribute on that `<input>`/`<button>`, pointing
+  at a separate top-level `<form id="...">` elsewhere on the page; both stay real progressive-
+  enhancement forms, no client JS. First used in the P7a fix (#162) for `/staff/orders`: each row
+  keeps its own untouched single-order `<form action={advanceStatus}>`, and a row's bulk-select
+  checkbox sits in the same `<li>` but carries `form="bulk-advance"` to bind to a separate
+  `<form id="bulk-advance" action={advanceStatusBulk}>` rendered once above the list.
+- **A `<form action={serverAction}>` reloads the page only when JavaScript is off.** With
+  JavaScript on, React submits the action and re-renders without navigating, so DOM state the
+  browser owns (a `<details>` left `open`, focus, scroll) survives the post. UI that is meant to close
+  "because the post reloads" stays open for every hydrated shopper. Close it in the form's
+  `onSubmit`, without `preventDefault` so the action still runs; the no-JS reload covers the
+  other case. First hit in `#1142`: the header's method menu stayed open after every choice. The
+  plan had assumed a reload, and jsdom tests could not show it. Pinned by
+  `tests/location-control.test.tsx` ("closes when the … method item is submitted").
+
+
+## Repository layer (`lib/repositories/*`)
+
+- **A request-scoped facade (resolving a live Prisma client and/or the current vendor from request
+  context) does not belong in the same file as the pure functions it wraps.** Every function
+  exported from a `lib/repositories/<name>.ts` file is expected to take its Prisma client and
+  `vendorId`/`userId` as **explicit parameters** and read no request context — that is what lets a
+  plain `tsx` script (a validation harness, a seed script) import the module in real Node and
+  exercise it directly, without a live Workers request. Adding a `getCurrentVendorId()`-calling
+  factory to the same file — even one that only wraps the pure functions "for convenience" — breaks
+  that property for the whole module, not just for itself: the file's own contract becomes true of
+  *some* of its exports and not others, and a validator running the file's own literal check (grep
+  for `getCurrentVendorId(`, `headers(`, `getAuth(`) will find it. Put the facade in a sibling
+  `lib/<name>-service.ts` instead, matching `lib/auth-rbac.ts`'s existing pattern — a request-context
+  wrapper living *beside*, not inside, `lib/repositories/`. First hit in P7b (#216, PR #223):
+  `getDataRightsRepository()` was added to `lib/repositories/data-rights.ts` at Build for exactly
+  this "convenience" reason, `build-notes.md` disclosed two smaller deviations from spec but not this
+  one, and `/validate` caught it by running `validation.md`'s own R2 probe rather than re-deriving
+  it. Fixed at `/fix` by moving it to `lib/data-rights-service.ts`; the facade also became a plain
+  sync factory once it no longer needed a dynamic `import()` to stay loadable by the same file a
+  `tsx` script has to import.
+- **The rule has TWO halves, and they are enforced by two different tests. Both must pass.**
+  - **Request context** — `tests/repository-purity.test.ts` (#252, CLOSED at P8.1b) fails if any file
+    in `lib/repositories/*.ts` contains a *value* import of `next/headers`, `@/lib/tenant`,
+    `@/lib/auth` or `@/lib/auth-rbac`. Type-only imports stay legal and are the documented pattern
+    (`import type { getPrisma } from "@/lib/db"`). Whole-file, import-level, **no allowlist** — put
+    the facade in `lib/<name>-service.ts` and it passes.
+  - **Client injection** — `tests/repository-client-injection.test.ts` (#409) fails on a
+    `getPrisma()`/`getPrismaWs()` **call expression** inside a repository file. AST-based, not a
+    grep, because these files legitimately name both functions in prose and in
+    `ReturnType<typeof getPrisma>` type positions. **Unscoped as of #411/#412 (2026-08-27): it walks
+    every `.ts` file in `lib/repositories/` discovered from the filesystem**, so a newly added
+    repository file is covered the moment it exists. It shipped in #410 scoped to an explicit
+    four-file list because the other four files were still non-compliant; that list is gone and must
+    not come back.
+  Every repository module has a sibling service where one is needed: `cart`, `categories`,
+  `customers`, `discounts`, `loyalty`, `order-lookup-rate-limit`, `orders`, `products`, `reports`,
+  `reviews`, `roles`, `vendor`, `data-rights`, `promotions`.
+- **When you convert an export, the client moves to the sibling service and the call sites keep the
+  function's NAME.** #411/#412 imported each repository function into its service under a `…Repo`
+  alias and re-exported a same-named wrapper, so 29 call sites changed only their import path. That
+  is deliberate: across 26 conversions a rename is the mistake most likely to go unnoticed, and a
+  type-only import (`import type { AdminProductRow }`) must keep pointing at the repository while
+  the value import moves. **Sweep by symbol, not by name** — `features/admin/storefront.ts` imported
+  `updateVendorStorefrontConfig as updateConfigRepo` and called it under the alias, so a grep for the
+  function name reported zero call sites and made it look like dead code.
+- **A repository export that resolves its own Prisma client cannot be run from a plain `tsx` script
+  AT ALL — this is structural, not a matter of inconvenience, and it is why the client must be a
+  parameter.** `lib/db.ts` imports `PrismaClient` from `@prisma/client/wasm`, which is mandatory on
+  Workers (see the Database section). **Node cannot load that build's WASM query compiler**, so any
+  call routed through `lib/db` dies with `PrismaClientKnownRequestError (ERR_UNKNOWN_FILE_EXTENSION):
+  Unknown file extension ".wasm" for node_modules/.prisma/client/query_compiler_bg.wasm`. Measured
+  2026-08-27 against the dev Neon branch: `getAvailableSpecialities(prisma, vendorId)` **passed** with
+  a client the script built from the bare `@prisma/client` specifier (as `prisma/seed.ts` does);
+  `getVendorConfig(vendorId)`, which resolved its own, **failed**; the identical query through the
+  script's own client **passed**. Same query, same database — the only variable was where the client
+  came from. `scripts/verify-repository-injection.ts` is the committed harness that demonstrates this.
+- **This rule has now claimed a false enforcement THREE times, and the third is the most instructive.**
+  The first two pointed at `tests/repository-vendor-scoping.test.ts` (a test about *scoping*, not
+  *location*). The third was subtler: `tests/repository-purity.test.ts` genuinely enforces what it
+  claims — but its docstring also asserted that "several **compliant** repository functions call
+  `getPrisma()` internally while still taking `vendorId` explicitly," which quietly blessed the other
+  half of the rule as optional. **32 of 109 exports across 8 files** had done exactly that, including
+  every catalogue write, every product-image mutation, loyalty tier CRUD, discount create/deactivate,
+  and the guest order-lookup **rate limiter** — a security control that could not be exercised outside
+  a live request. Three separate repository docstrings (`customers.ts`, `reports.ts`, and
+  `discounts-service.ts`'s "every export there takes `prisma`") asserted the property while the file
+  violated it. **The transferable lesson beyond the earlier two: a test that correctly enforces its
+  own invariant can still launder a second, unenforced invariant if its comments opine on one.**
+  Scope a test's prose to what it checks; if it must mention a neighbouring rule, name the test that
+  enforces that one, or say plainly that nothing does.
+  **A FOURTH docstring turned up while finishing the conversion** — `lib/products-service.ts` said
+  the repository's "admin write path takes `vendorId` explicitly for the same reason these reads now
+  do, so a plain `tsx` script can exercise either without a live Workers request," false for all 14
+  of those exports. Four files asserting the same untrue sentence is what a property nobody ever
+  executed looks like; the fix is `scripts/verify-repository-injection.ts`, which now *runs* all four
+  files' exports against a real database instead of asserting anything.
+- **The conversion found three dead Prisma clients, and the reason nothing caught them matters more
+  than the waste.** `updateProductForVendor`, `setPrimaryProductImage` and `quickUpdateInventory` each
+  opened with `const prisma = getPrisma();` and then **never read it** — every statement ran on the
+  transaction client. So each admin product update, image set and stock tweak constructed an
+  HTTP-adapter `PrismaClient` and discarded it. They had also been recorded in #409's own plan as
+  functions "needing both clients," a claim that survived into two issues and a spec before anyone
+  checked the bodies. **`eslint.config.mjs` enables no `no-unused-vars` rule of any kind** (verified
+  empirically — a file with an unused local lints clean), so nothing in `lint`/`typecheck`/`test`
+  reports an assigned-and-never-read variable. Tracked as **#416**. Until that lands, an unused
+  binding is invisible here: do not assume a variable is used because CI is green.
+- **The reason it took three attempts is worth more than the fix.** This rule twice claimed an
+  enforcement that did not exist: it said `tests/repository-vendor-scoping.test.ts` "allowlists all
+  nine by name … so the list cannot quietly grow." Both halves were false. That test asks whether an
+  exported function **queries a vendor-scoped model without taking a vendor id** — a question about
+  *scoping*, not about *location*. It held six of the nine plus two functions that were never on the
+  list, and was structurally blind to `getDiscountRepository`, `getWebhookOrderService` and
+  `getGuestOrderLookupService`, because a facade that *delegates* to pure functions issues no Prisma
+  call of its own for it to see. An earlier version of this rule also pointed at `getCartRepository`
+  as the example to copy while `getCartRepository` was itself the defect, so a reader following it
+  literally reproduced the problem. **The transferable lesson: a rule that names its own enforcement
+  must be checked against that enforcement, or it becomes a rule that documents a guarantee nobody
+  provides.**
+- **`lib/repositories/roles.ts` was the hardest case and shows what a real fix looks like.** It was
+  never on #252's list, and it had **no pure functions at all** — both exports resolved the vendor
+  themselves and one ran its own `requireVendorRole("ADMIN")`. So it needed a *split written*, not a
+  move: `listVendorTeam(prisma, vendorId)` / `applyVendorRole(prisma, prismaWs, vendorId, actor, …)`
+  stayed, and `lib/roles-service.ts` performs the session check and passes the resulting actor in as
+  **data**. That is what made the hierarchy rules (who may grant ADMIN, who may touch a platform
+  admin, the last-admin self-demotion guard) testable at all — which authorization logic needs most.
+
+
+## Page containers (every page, `#1180`)
+
+- **A page's top-level container is `components/layout/PageContainer.tsx`**, not a hand-written
+  `mx-auto … max-w-… px-4`. `width` is required (`wide` / `standard` / `narrow`) and has no
+  default, because a default is how a page silently inherits a width nobody chose — which is the
+  drift this replaced. Pick `wide` for tables, lists, dashboards and browse (it matches the chrome
+  exactly), `standard` for settings and record detail, `narrow` for forms, auth and reading copy.
+- **All three share `mx-auto w-full px-4`; that gutter is what makes pages line up**, not the
+  `max-width`. A `narrow` page still shares its left edge with the header.
+- **`className` appends and cannot override.** There is no `clsx` and no `tailwind-merge` here, so
+  a competing `max-w-*` would resolve by stylesheet source order rather than intent.
+  `tests/page-container.test.ts` rejects `max-w-`, `mx-auto` and `px-` in that prop, and fails on
+  any page that hand-rolls a top-level container. One nested width is deliberate: the four auth
+  pages keep a `max-w-sm` card inside a `narrow` container.
+- **`PageContainer` renders the page's `<main>` landmark.** Neither route-group layout renders one
+  (`app/(admin)/layout.tsx` and `components/layout/StorefrontChrome.tsx` both render a plain
+  `div`), so exactly one `<main>` per rendered page comes from here. Scale and rationale:
+  `specs/design-system.md`.
+
+## Staff panel pages (`app/(admin)/staff/*`)
+
+- **Every page's `requireVendorRole(...)` refusal branch must render `<PanelRefusal>` — never
+  `return null` or fall through silently.** **`app/(admin)/layout.tsx`** renders the portal shell
+  (header, tier badge, "View store" link) around whatever the page returns, so a page that returns
+  `null` on refusal still serves `200` with that shell and a blank content area — no "Staff only"
+  message, easy to mistake for a loading state rather than a real refusal. (This line said
+  `app/(admin)/staff/layout.tsx` until P7.5d+e; **no such file has ever existed** — the shell is one
+  segment up, at the route group. The rule's substance was unaffected, but the path a reader would
+  open to check it was wrong, which is the same failure mode as a ruling nobody can find.)
+  **`tests/panel-refusal-coverage.test.ts` (#350, 2026-09-08) now enforces this mechanically**, so
+  the paragraph below is history rather than the enforcement. It walks `app/(admin)/` on the
+  filesystem, has **no allowlist**, and fails a page that calls `requireVendorRole(` without
+  rendering `<PanelRefusal>` — or that returns `null` from an `auth`-conditioned branch. It matches
+  **JSX element names on the parsed TypeScript AST, not text**, because several of these pages carry
+  a comment saying the refusal branch renders `<PanelRefusal>` and never returns `null`, which
+  satisfies any substring check on its own. Do not reintroduce a hand-maintained list.
+  **The history is the reason the test exists.** This rule was enforced by the prose list that used
+  to sit here — naming `categories`, `inventory`, `orders`, `products`, `reports`, `team`,
+  `customers` and `staff/page.tsx` as compliant, plus `runbook` and `loyalty` as fixed — and by the
+  time anyone checked it against the filesystem it was wrong in **two directions at once**. It never
+  mentioned `storefront` (**#350**, the live `return null` instance, found while scoping P8.5b and
+  fixed incidentally in `e3c9642` by a slice editing that page for something else) and never
+  mentioned `discounts` (**the fourth instance**, hand-rolled markup, found only by walking all 25
+  pages at #350's own `/propose` on 2026-09-08); meanwhile `components/staff/PanelRefusal.tsx`'s
+  docstring still claimed `loyalty` kept a private copy three phases after **#136** converted it.
+  Four instances (`runbook` #231, `loyalty` #136, `storefront` #350, `discounts` #350) across five
+  phases, two of them invisible to the list that existed to prevent them. **#231's was the only one
+  a user could have hit** — it fired at `/validate` on the exact signed-in-non-staff case that
+  slice's own `validation.md` had flagged as never exercised.
+  **`storefront` and `discounts` now both render `<PanelRefusal>` on refusal, same as every other
+  page in this section** — that is what closed #350, and `tests/panel-refusal-coverage.test.ts` is
+  what keeps it true from here, not a prose list. When adding a new `/staff/*` page, copy an
+  existing one's refusal branch; the test will tell you if you forgot.
+- **Register a new page ONCE, in `components/staff/nav-items.ts`** (#1177). That module holds every
+  `/staff/*` destination — route, label, description, icon, tier and which of the six groups it
+  belongs to — and **both** app surfaces render from it: `components/staff/PanelNav.tsx` (the
+  persistent nav, as grouped dropdowns) and `app/(admin)/staff/page.tsx` (the hub, as headed card
+  sections). **Do not add a link to either file by hand** — `tests/staff-nav-parity.test.ts` fails
+  if either carries a `/staff/*` href of its own, because that is how the grouping would start to
+  drift between them.
+  **`tier` must match the page's own `requireVendorRole` arguments**, and the test reads that gate
+  rather than trusting the module; the page's gate is the access decision, and hiding a link is
+  courtesy. Two routes are outside the module **by name, each for a stated reason**: `/staff` (the
+  hub cannot link to itself, so only the nav carries it, as "Overview") and `/staff/errors`
+  (platform-admin only — `PanelNav`'s `currentTier` prop cannot express that, so the hub carries it
+  alone behind its own `auth.via === "platform-admin"` check).
+  **The history this replaced is worth keeping.** Until P9.2 (#612) the two surfaces were
+  hand-maintained lists and neither was a superset of the other: the nav omitted `brands`,
+  `customers` and `payments` while the hub omitted `bundles`, `promotions` and `storefront`, so
+  three pages vanished from the chrome the moment a user navigated off the hub and three more were
+  unreachable from it. **Nothing detected that for months because each file is individually
+  correct** — the defect existed only in the *relationship* between them, which is the class of
+  thing a per-file review structurally cannot catch. A parity test closed it; #1177 removed the
+  relationship instead, after #626 showed the test itself could be blind (its tier branches were
+  never compared) and after a third thing to keep in sync — the group — would have had nothing
+  checking it at all. One more mismatch surfaced at that rewrite: the hub had `/staff/feedback`
+  behind its `isAdmin` block although the page admits STAFF, so a staff member saw the link and no
+  card.
+- **A new `/staff/*` page must also be DOCUMENTED (#633), and
+  `tests/operator-doc-coverage.test.ts` fails until it is.** With the module above that makes two
+  places to edit — the module, which feeds both app surfaces, and one operator guide. That test enumerates route directories
+  from the filesystem — no hardcoded list — and requires each to carry exactly one section in one of
+  the three operator guides (`docs/staff-playbook/staff-tabs-guide.md`,
+  `docs/store-admin-guide/admin-tabs-guide.md`, `docs/platform-admin-guide/platform-admin-guide.md`),
+  with seven labelled parts and a `Who can access` line that **matches the page's own
+  `requireVendorRole` arguments** (an `auth.via !== "platform-admin"` refusal counts as
+  platform-admin-only). Two consequences worth knowing before you hit them: the section lives in the
+  guide matching the page's gate, not wherever is convenient; and a `####` heading *inside* a section
+  terminates it as far as the parser is concerned, so keep sub-structure to bold labels and lists.
+  Note also that this test's own test COUNT grows by four per staff page added, which moves the
+  vitest baseline recorded above on a change that touches no test file at all.
+- **The parity and coverage tests pin structure and permissions; NOTHING mechanically checks whether
+  a documented capability exists.** `docs/store-admin-guide/admin-tabs-guide.md` shipped `approved`
+  for weeks telling store admins they could issue Stripe refunds, invite staff members, and grant the
+  Store Admin role. All three were false (**#629**), and a **fourth** — that the delivery fee, free
+  delivery threshold and minimum order are editable — was found only at `#633`'s Build by tracing
+  each claim to a real control, and filed as **#634** (those three `VendorConfig` fields are written
+  by `prisma/seed.ts` and by nothing else in the panel). **When you add or edit an operator-guide
+  section, trace every capability sentence to a form, link or action import on that page** — a
+  capability that reads plausibly and matches a schema field is not evidence of a control, and this
+  is the one class of documentation error no test in this repo can catch.
+- **`isAdmin` in the hub is NOT the same question as "may this person open the page".** It is true
+  for a vendor `ADMIN` as well as a platform admin, and it is additionally downgraded by the
+  `admin-tier` cookie's "view as staff" simulation. `/staff/errors` refuses anyone whose
+  `auth.via !== "platform-admin"` (#508 — a stack trace can reveal internal paths a vendor-scoped
+  account has no reason to see), so gating its card on `isAdmin` would render a link every store
+  admin can see and none of them can open. Gate a platform-admin-only card on `auth.via` directly.
+
+## User-facing copy (storefront and staff panel)
+
+The platform is multi-tenant (ADR-004) and its vendors do not sell the same things: Aheed sells
+groceries, SriMart sells electronics, and more vendors are planned. Every string a shopper or a
+store's staff reads must be right for **any** vendor.
+
+- **Copy comes from the vendor, or it is neutral.** Take the vendor's name from
+  `getCurrentVendorProfile()` (or `profile.name` passed down as a prop into a client component —
+  no middleware can carry it). Take examples from the vendor's own data (e.g. `/shop-your-list`
+  builds its placeholder from the vendor's in-stock product names, `lib/shopping-list-examples.ts`).
+  Otherwise write neutral wording that names no product category ("order", not "grocery order";
+  `product-name`, not `basmati-rice-5kg`).
+- **Never write a vendor's name into a component or a default parameter.** A default is worse than
+  a literal: every caller that forgets the argument silently advertises that vendor on every other
+  storefront (`buildShareLinks`' old `storeName = "Aheed Food Centre"`, `#729`). Make the prop or
+  parameter required instead.
+- **Marketing claims are the vendor's, never the platform's.** A vendor copy setting that is unset
+  **hides** its element rather than falling back to platform filler (`#239`; the `VendorConfig`
+  model comment). Platform-written marketing is still a claim made on a vendor's behalf.
+- The one sanctioned fallback is the no-vendor case (`profile?.name ?? "Aheed Food Centre"` in
+  page metadata), which only a vendorless host reaches, and those are redirected to
+  `/coming-soon`. The platform has no name of its own yet (KMS strategy U1).
+- **Enforced by `tests/vendor-neutral-copy.test.ts`**: a denylist of the literals `#729` removed,
+  scanned across `app/**/*.tsx`, `components/**/*.tsx` and `lib/referrals.ts` with comments
+  stripped. It catches those strings returning, **not** new vendor-specific copy — that is still a
+  review question. Check a new string against a second vendor (SriMart) before shipping it.
+- **A value the code *derives* must never be hardcoded as an example (`#1043`).** `/orders/lookup`
+  showed every store `e.g. AHE-20260813-K4M2XQ`, but `vendorOrderPrefix()`
+  (`lib/order-totals.ts:158`) builds that prefix from the vendor's slug, so the example could only
+  ever be right for one vendor. Derive the example from the same function the real value comes
+  from. Cost is rarely the objection it looks like: `getCurrentVendorProfile()` is `cache()`-wrapped
+  and the `(storefront)` layout has already called it, so a storefront page can read `profile.slug`
+  for free.
+- **Copy that states a system rule comes from one helper, shared by every surface that states it
+  (`#1045`).** `/help` and the help assistant both said points expire a fixed number of months after
+  each point is earned, while `lib/loyalty.ts`'s `isLapsed()` lapses the whole balance on
+  **inactivity**. The assistant was wrong because it had copied `/help`'s wording (`#1015`) — two
+  literals, one of them already false. Both now render `pointsExpirySentence()` from
+  `lib/help-facts.ts`, the module they already shared, so they cannot diverge. Same shape as
+  `lib/data-retention.ts` for retention figures and `lib/storage-keys.ts` for storage names: **one
+  source per fact, not one per surface.**
+- **One concept, one label — and a link's label is its destination's own heading (`#1145`,
+  `#1187`).** `#1145` existed because the paste-a-list feature had three names at once ("Shopping
+  List" in the header, "Shop your list" on the page, "Match my list" on the button) and collapsed
+  them to one. `#1187` then split that name deliberately, now a hub exists: "Quick Shop" is the hub,
+  "Smart Lists" is the page. Two rules came out of doing it twice in a fortnight:
+  - **Before renaming a surface, check whether the "other" thing is actually the same data.**
+    `#1187` was filed describing `/shop-your-list`'s "Your saved lists" block and `/account/lists`
+    as two different list concepts. They are **the same rows from the same
+    `getShoppingListService().list()` call** — the block is a truncated preview linking into that
+    page. Renaming only the page would have left one concept wearing three labels, re-creating
+    `#1145` next door. The fix was renaming that `<h2>` to match, and it was one string. A rename
+    that looks like it needs a decision often needs a `grep` for the service call first.
+  - **A tile or link must carry the name of the page it opens**, not a shorter synonym. `#1187`'s
+    body named its four tiles as single words; two would not have matched their destination's
+    `<h1>`, so `/quick-shop` uses "Your favourites", "Your regulars", "Smart Lists" and "Value
+    Bundles". A shopper tapping one name and landing on another is the `#1145` failure in miniature,
+    and no test catches it — `tests/quick-shop-hub.test.tsx` pins the four labels, but nothing
+    compares them to the destination headings automatically.
+- **A check that finds a UI element by its URL breaks silently when the URL moves (`#1187`).**
+  `scripts/verify-mobile-layout.ts` located the header's Quick Shop link with
+  `header a[href="/shop-your-list"]`. When `#1187` repointed that link at the new hub, the selector
+  matched nothing and the script reported `"shoppingList": null` — and `null` is indistinguishable
+  from "this page has no such link", so it would have gone on reporting a plausible nothing for
+  every later run. **Prefer the accessible name**: the destination has now moved twice (`#1142`,
+  `#1187`) while the name has been "Quick Shop" since `#1145`, and two tests pin it
+  (`tests/header-shopping-list.test.tsx`, and `tests/quick-shop-hub.test.tsx`, which also asserts
+  it equals the visible text per WCAG 2.5.3). The same reasoning applies to a test: a route literal
+  is the most volatile handle on an element, and the accessible name is the one the product is
+  contractually obliged to keep.
+  - **Enumerate call sites across `tests/` and `scripts/`, not just `app/` and `components/`.**
+    `#1187`'s spec promised to "name every call site rather than relying on grep alone" and still
+    missed two, both outside the app tree: a test pinning the old `href` (caught by the suite) and
+    the instrument above (caught only by running it).
+- **Assert copy with string equality, not a pattern.** `tests/help-vendor-facts.test.tsx` asserted
+  `/expire 12 months/i`, which the **incorrect** sentence satisfied too, so that defect shipped and
+  survived three slices under a green test. A regex also admits a longer sentence that re-introduces
+  the error. Pin the sentence with `toBe`/`toContain` on the full string. A copy test that cannot
+  fail on wrong copy is worse than none, because it reads as coverage.
+- **What a vendor sells is vendor data (`#905`).** Six `VendorConfig` label settings
+  (`showHalalLabel` … `showHmcCertification`, edited on `/staff/storefront`) decide which label
+  controls the staff product form renders; HMC needs Halal. They gate the staff form only — the
+  storefront stays data-driven. A disabled label is **stripped server-side in `saveProduct`**
+  (`lib/product-label-settings.ts`), so a save leaves its stored value alone instead of reading the
+  unrendered checkbox as `false`. `VendorConfig.storeDescription` is the one place an AI prompt
+  learns what the shop sells: every prompt builder takes it as a **required** `string | null` and
+  inserts it through `storeDescriptionPromptLine` (quoted, one line, capped); `null` means neutral
+  wording, never a grocery default.
+- **Browser storage names are vendor-neutral too (`#1080`).** Every cookie and `localStorage` key
+  the storefront owns is defined once in `lib/storage-keys.ts`, and the privacy page renders the
+  names from those constants. A vendor-prefixed name (`aheed_cart`) put one vendor's name on every
+  vendor's privacy page. A storage item that is **not strictly necessary** is written only after the
+  shopper chooses **Accept All** (`#1065`, the referral cookie), and the privacy page names it as
+  optional. Renaming an existing key needs a compatibility window, because the name is the lookup
+  key: see that module's comment.
+- **Example values come from the vendor's own data**, not one vendor's geography: the delivery-area
+  admin's examples are built from the store postcode or its first delivery area
+  (`lib/delivery-area-examples.ts`), and `/help` names the vendor's `localityName`. With no data,
+  state the rule without an example rather than borrowing another town's.
+- **Never restate as prose a fact the database already holds (`#1013`).** `/help` described the
+  delivery fee, minimum order, free-delivery threshold and loyalty scheme in hedged platform
+  wording ("Some stores have a minimum order amount") while `VendorConfig` held each one exactly.
+  Hedging is the mild failure; the real one is asserting the hedge away — that page also stated
+  "A minimum order value **is required**" (`minimumOrderPence` is `@default(0)`) and "Every purchase
+  earns you points automatically" (`loyaltyEnabled` is `@default(false)`), the second of which was
+  live on a store with loyalty switched off. Compute it, or say nothing.
+  - **A flag that hides a feature must hide its documentation too.** Every loyalty *feature* surface
+    gated on `loyaltyEnabled`; the page *describing* the feature did not, so the one surface a
+    shopper reads before buying was the one that lied. When adding a vendor feature flag, grep for
+    prose about the feature, not just for its controls.
+  - **A flag that hides a feature must also stop its side effects (`#1101`).** `#1023` hid the
+    Rewards launcher and `/account/loyalty` when `loyaltyEnabled` was false, and the referral scheme
+    kept running underneath: every signed-in render created a redeemable referral code, checkout
+    accepted those codes, and `confirmPayment` paid the referral bonus. A UI gate proves nothing
+    about the server. Find every place the feature **writes** (rows created on read, codes accepted,
+    rewards paid) and gate each on the same flag. Put the gate in the service or repository that
+    acts, not in the component that renders.
+  - **"Hidden" means absent, and navigation is a surface (`#1134`).** `/account` showed a greyed
+    "not enabled for this store" card and `AccountNav` linked to `/account/loyalty`'s 404 with
+    loyalty off. Remove the element instead of disabling it, and pass the flag into a client
+    component as a **required** prop so no caller can drop it. Policy and data-rights pages that
+    list what is kept or erased name the feature only when its flag is on, while the export and
+    erasure themselves keep handling any rows that exist.
+  - **A consent flag never removes withdrawal (`#1134`).** Switching `marketingConsentEnabled` off
+    hides the opt-in, but a shopper whose newest choice is a grant still sees "Withdraw" on
+    `/account/data`. Gate the *offer* on the flag; gate *withdrawal* on the shopper's own state.
+  - **Money with per-area overrides is resolved, never read.** Go through
+    `resolveDeliveryRules` (`lib/delivery-pricing.ts`); a `VendorDeliveryArea` row may override the
+    fee, minimum and threshold independently and a district row beats an area row (`#890`), so a
+    surface with no postcode must show the variation rather than pick one figure. `0` and `null`
+    both mean free delivery **not offered** — `lib/help-facts.ts` is the worked example.
+- **A new user-owned table reaches data rights in three places (`#116`, `#818`, `#1134`):**
+  `exportPersonalData`, `eraseVendorData` (inside its transaction) and `countOtherVendorData` in
+  `lib/repositories/data-rights.ts`. Omitting it from the count is the dangerous one: a `User`
+  relation with `onDelete: Cascade` means erasing at one vendor would delete the identity and,
+  with it, the rows another vendor holds. Nothing in `lint`, `typecheck` or `build` notices.
+- **Data a sign-up form collects beside the account rides Better Auth's body to a hook, never a
+  `User` column (`#1134`).** Better Auth 1.6's `/sign-up/email` schema accepts extra keys and
+  `parseUserInput` ignores unknown ones, and `databaseHooks.user.create.after` receives the endpoint
+  context with the body. The hook must re-check every server-side condition (the vendor's switch,
+  `context.path`), rebuild any wording from the database rather than trust client text, and never
+  throw — a failed side write must not fail the sign-up (`lib/marketing-consent-signup.ts`). A
+  sign-up for an existing email creates no user, so the hook does not run for someone else's
+  account.
+- **A shopper-facing render of KMS documentation filters on `visibility`, not just `audience`
+  (`#1022`).** `/help` filtered `DOC_ARTICLES` for an audience containing `shopper` and rendered
+  `shopperDocs[0]`. Two internal documents list `shopper` among several audiences for KMS routing,
+  one of them sorts first, and the public Help Centre of every vendor served an internal operations
+  document — `PENDING_PAYMENT`, slot-capacity rules and a "Known Trap" note — while the guide
+  written for shoppers never rendered at all. `audience` says *who it is relevant to*;
+  **`visibility: public` is the only field that says it may leave the building.** Require both, and
+  select the document you mean by id rather than by array position. **`lib/public-docs.ts` is the
+  only route from a non-staff surface to the generated docs module** (`getPublicShopperGuide()` is
+  the worked example; a new public surface adds a sibling function there), and
+  `tests/public-docs-boundary.test.ts` fails if any file outside `app/(admin)/` other than that
+  helper imports it.
+
+## Form fields that collect the user's own data
+
+- **Every input that collects the user's own name, contact details, address or credentials
+  carries the matching HTML `autocomplete` token** (`name`, `email`, `tel`, `address-line1`,
+  `address-line2`, `address-level2` for the post town, `address-level1` for the county,
+  `postal-code`, `current-password`, `new-password`). WCAG 2.2 SC 1.3.5 (Identify Input Purpose,
+  AA) requires it, and on a phone it is what lets the browser fill a guest's details in one tap
+  instead of eight fields on a small keyboard (`#958`).
+- **A field that is not the user's own data gets `autoComplete="off"` or nothing** — a discount
+  code, a search box, a staff product form. Don't invent a token for it.
+- A missing token fails nothing: the form still submits and every build stays green. **Enforced by
+  `tests/autocomplete-tokens.test.ts`**, which reads the checkout form and the four auth forms
+  (`features/auth/components/`) and asserts each field's token. Add a new form that collects the
+  user's own data to that test.
+
+## Add-to-cart feedback (`#956`)
+
+- **An add-to-cart control reports its outcome through the shared cart-feedback region
+  (`data-cart-feedback`), never only inside the button.** `components/cart/CartFeedback.tsx`
+  mounts the region once, from `StorefrontChrome`, outside every product card; a control calls
+  `useCartFeedback()` and announces one message per click. The reason is a re-render, not style:
+  `addToCart` revalidates the layout, and in that same re-render `ProductCard` swaps a successful
+  card's `AddToCartButton` for `CartQuantityStepper` (and a sold-out card's for the disabled
+  "Out of stock" button). Anything the button rendered, a live region included, is unmounted
+  before it can be seen or heard, and a freshly mounted live region does not reliably announce.
+- **Say what the server did.** `addToCart` resolves to an `AddOutcome` (`lib/cart-rules.ts`):
+  `added`, `partial` (clamped to stock) or `none` with a reason. The strings live in
+  `components/cart/add-feedback-copy.ts`. Never show "Added" for anything but `added`.
+- **The region sits inside the `brandStyle()` div** in `StorefrontChrome`, because it is painted
+  with `bg-primary`: outside that div the token falls back to `:root`, and SriMart would get
+  Aheed's colour.
+- Enforced by `tests/add-to-cart-feedback.test.tsx` (messages, names, the rejected-call path) and
+  `tests/cart-add-outcome.test.ts` (outcomes, and no write for any `none`).
+- **The bulk add says what it did too (`#957`).** `addCartItems` (behind bundles, Shop your list,
+  reorder and unpaid-order cancel) returns one `BulkAddLine` per merged line (`added`, `partial`,
+  `unavailable`, `at_limit`), classified by `classifyBulkAdd` inside its transaction. Like the
+  single add, it **never writes a line at or below its current quantity**. A caller that puts a
+  past basket back must tell the shopper about the short lines: reorder and cancel redirect through
+  `lib/restore-notice.ts`, and `/cart` renders `RestoreNotice`. Enforced by
+  `tests/cart-bulk-add-report.test.ts` and `tests/restore-notice.test.tsx`.
+
+## Fulfilment method and the postcode control (`#748`, `#1087`)
+
+- **The fulfilment method is a stored preference, not a derived value.** It lives in the
+  `fulfilment-method` cookie and is resolved once by `getFulfilmentMethod`
+  (`lib/fulfilment-service.ts`): a vendor that does not offer collection is `DELIVERY` whatever the
+  cookie says, checked **before** the cookie so a crafted value cannot select a method the vendor
+  does not operate; otherwise the stored choice wins; and only with no stored choice does
+  `defaultFulfilmentMethod` apply, which returns `DELIVERY` as soon as the postcode is deliverable.
+- **A postcode submission sets the method only when the submission carried delivery intent.**
+  `setDeliveryPostcode` reads the `intent` field (`POSTCODE_INTENT_FIELD`,
+  `parsePostcodeIntent` in `lib/delivery-cookie.ts`) and writes `DELIVERY` only for `"delivery"`
+  **and** a deliverable postcode. Anything else — `"edit"`, an absent field, an unrecognised value,
+  an undeliverable postcode — leaves the stored method exactly as it was.
+- **The edit path must never change the method.** This is `#748`: changing where you live is
+  not changing how you receive the order, and silently switching a Click & Collect shopper back to
+  Delivery because they corrected a typo is the defect that rule exists to prevent. Since `#1142`
+  the edit path is the **Change postcode** item in the header's method menu (it was a pencil
+  button); it still submits `"edit"`.
+- **Do not restate that rule as "a postcode submission never sets the method".** It was written
+  that way in code comments only, and the wider form caused `#1087`: with a `COLLECTION` cookie
+  stored, a shopper who clicked **Delivery**, was asked for a postcode and gave a deliverable one
+  stayed on Click & Collect. Intent is what distinguishes the two cases; the absolute does not.
+- **The control shows a stored deliverable postcode under either method.** Gating the label on
+  `method === "DELIVERY"` left the shopper's own postcode readable only by reopening the modal and
+  cancelling out of it.
+- Enforced by `tests/delivery-postcode-intent.test.ts` (the parser, and which submissions write the
+  method cookie) and `tests/location-control.test.tsx` (which affordance submits which intent, and
+  the label).
+
+## Responsive labels that switch text by viewport (`#1091`)
+
+- **A control whose label text changes by breakpoint must have one accessible name that does not
+  depend on the stylesheet.** Two sibling spans (`hidden sm:inline` and `sm:hidden`) are correct in
+  a browser, where one is `display: none` at any width, but anywhere CSS is not applied — jsdom,
+  reader modes — both count and the name doubles (`DeliveryDelivery`,
+  `Click & CollectCollect`). Put an `aria-label` on the control and `aria-hidden` on both spans.
+- **The `aria-label` must contain the narrow span's visible text** (WCAG 2.5.3, Label in Name), so a
+  speech user saying what they see still hits it: `Click & Collect` contains `Collect`,
+  `Delivery · <postcode>` contains the postcode.
+- **If both spans render the same text, collapse them to one span** rather than labelling the pair.
+- A **single** `hidden sm:inline` span beside an icon (the header's Shop, account and Sign In links)
+  does not double; at narrow widths its name falls back to the link's `title`. That is out of this
+  rule's scope. The Quick Shop link beside the search bar carries an `aria-label="Quick Shop"`
+  identical to its visible text, so its name does not fall back.
+- Enforced for `components/layout/LocationControl.tsx` by `tests/location-control.test.tsx`, which
+  addresses every button by `getByRole("button", { name })` with the exact name.
+
+## Shop-list review fields (`#1088`, `#1090`)
+
+- **Every line `components/cart/ListReview.tsx` renders emits all four positional fields** —
+  `productId`, `quantity`, `lineLabel`, `lineStatus` — whatever its resolution.
+  `features/cart/add-list-to-cart.ts` reads them by index, so a branch that drops one misaligns every
+  line after it. Before `#1090` the out-of-stock and unmatched rows emitted none, which kept the
+  arrays aligned but left `/cart` silent about them.
+- **`lineStatus` is read only for an empty `productId`**, and only picks the notice wording
+  (`unavailable` → `u`, `unmatched` → `m`, anything else or absent → `s`). A line carrying a product
+  goes to the bulk add whatever its status says, which is what makes a client-supplied status safe.
+- Enforced by `tests/shop-list-review-copy.test.tsx` (four of each field for all four line kinds)
+  and `tests/add-list-to-cart.test.ts`.
+
+## Checkout pricing (`#973`)
+
+- **Every money figure on `/checkout` renders from `CheckoutPricingProvider`**
+  (`components/checkout/CheckoutPricing.tsx`). `CheckoutForm`'s total row and `CheckoutSummary`
+  both read it, and both throw without it, so the two totals cannot disagree. Nothing in it decides
+  money: a code's discount is the server's answer, and points use `clampRedemption`, the function
+  `spendPoints` applies on submit.
+- **A code is previewed in one place, `previewCheckoutCode` (`lib/checkout-preview-service.ts`),**
+  for both the page's cookie code and the Apply action (`features/checkout/preview-code.ts`). It
+  takes only the code string and resolves the cart, method, delivery rules and shopper itself. Do not
+  add a second preview path, and do not let a client send a subtotal or fee.
+- Enforced by `tests/checkout-code-apply.test.tsx` and `tests/checkout-prefilled-code.test.tsx`.
+
+## Crawlability: links, sitemap, robots and page metadata (`#955`, `#996`)
+
+- **A product card's title is a real `<a href="/products/[slug]">`, with Quick View layered on top
+  as a JavaScript enhancement.** `components/product/ProductCard.tsx`'s handler calls
+  `preventDefault()` and then `openQuickView()`, so a left-click opens the drawer and every path
+  that does not run the handler — a crawler, a visitor with JavaScript off, a middle-click, a
+  ⌘/Ctrl-click — follows the `href`. **Do not replace it with a `<button>` again:** `#830` did, and
+  for the next six weeks a listing page contained zero `href="/products/…"`, so the product route
+  existed with nothing on the site pointing at it. The anchor covers the **title text only**, with
+  no `after:inset-0` overlay; `tests/product-card-anchor.test.tsx` asserts both halves.
+- **`app/robots.ts` decides indexability from the environment, never from the request host.**
+  `isIndexable()` reads `SEO_INDEXABLE` (`lib/config.ts`); the request's own host only decides
+  which `Sitemap:` URL to publish. Comparing the host to a hardcoded production hostname makes "is
+  this production?" and "is this the first vendor?" one question, which de-indexed every other
+  vendor in production. See `docs/developer-portal/env-setup.md` for where the variable lives.
+- **`app/sitemap.ts` and `app/robots.ts` must keep reading request headers.** Next treats these as
+  Route Handlers that are **cached by default** unless they use a request-time API, so dropping the
+  header read makes them static: one vendor's URL list served to every host, with nothing failing
+  locally. `npm run build` labelling them `ƒ (Dynamic) server-rendered on demand` is the check.
+  Do not add a `revalidate` to either.
+- **`app/robots.ts` and `app/sitemap.ts` are named explicitly in
+  `tests/vendor-neutral-copy.test.ts`'s file list.** That guard walks `app/**/*.tsx`, and these are
+  `.ts` — which is precisely how `app/robots.ts` carried a hardcoded vendor hostname for months
+  with the guard green. **Do not widen the glob to all `.ts` under `app/`**: the generated
+  `app/(admin)/staff/runbook/docs.ts` is deliberately outside it because it quotes spec prose. Add
+  a new `.ts` file under `app/` to that list by hand if it emits user-visible strings or URLs.
+- **A sitemap entry carries no `lastModified`.** `Product` has `createdAt` and no `updatedAt`, and
+  `Category` has neither, so there is no truthful value; `createdAt` would assert a false date
+  after any edit. Publishing a trustworthy one needs a schema change, not a guess.
+- **A detail route's `generateMetadata` builds its canonical URL as an ABSOLUTE URL on the
+  requesting host.** No `metadataBase` is configured anywhere in this app, and in this version of
+  Next a relative value in a URL-based metadata field without `metadataBase` is a **build error**.
+  Both builders live in `lib/page-metadata.ts`, are pure, and take `vendorName` as a **required**
+  parameter — never defaulted, per the copy rule above.
+- **A `generateMetadata` that cannot read its record or the vendor returns `{}`**, letting the
+  layout's metadata stand, rather than throwing or naming a vendor. It runs on the request path, so
+  an uncaught rejection turns a product page from 200 into 500 because its `<head>` could not be
+  built.
+
+## Records that store a hashed network address (`#1041`, `#1107`)
+
+- **A table that stores a hashed IP takes its retention from `lib/data-retention.ts` and is
+  disclosed on `/privacy`, which renders the figure from the same constant.** Seven tables do so
+  today (the search log, the help-assistant log and five rate-limit attempt tables), and before
+  `#1041` the privacy page disclosed one. A new one adds its constant there, imports it in its
+  repository's `RETENTION_MS`, and gets a sentence in `/privacy` section 5.
+  `tests/data-retention.test.ts` and `tests/privacy-retention-section.test.tsx` enforce the
+  existing seven; a new table is on its author to add.
+- **Say "due for deletion", never "deleted after".** Every sweep runs on a small random fraction
+  of writes, so a row on a quiet shop can outlive its figure.
+
+## React and Next.js hooks
+
+- **A `useEffect` that listens for `pathname` changes to auto-close a UI element (e.g. a drawer/modal) must NOT include its `open` state in its dependencies.** If `open` is included, the act of opening the drawer changes `open` to true, which triggers the effect immediately and closes the drawer right back. Hit in P8: a cart drawer instantly closed on open because the builder passed `open` and `close()` into the dependency array to satisfy the lint rule. The correct pattern is to call the closure function unconditionally (e.g., `close()`) inside the effect, leaving `open` out of the dependency array, and if needed, explicitly silencing the specific lint rule (e.g., `react-hooks/set-state-in-effect`) for that line rather than changing the dependency semantics.
+

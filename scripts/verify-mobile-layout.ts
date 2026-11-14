@@ -1,0 +1,1003 @@
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * Measure the storefront at real phone and tablet widths:
+ * `npx tsx scripts/verify-mobile-layout.ts --base <url> --path <path> --widths 360,390,768 [--add-first [--then <path>]] [--open-location] [--open-location-menu] [--open-filters] [--open-cart] [--open-quick-view] [--open-help-assistant] [--block-urls <pattern>] [--sign-in <email>:<password>] [--desktop] [--measure <selector>] [--map-host <ip>] [--collapse-filters] [--header <name:value>]`.
+ *
+ * ## Why this exists (#960, #961, #962)
+ *
+ * Desktop Chrome cannot be narrower than 501px, so every "mobile" measurement before this was taken
+ * at 501px and anything at 320–430px was inferred. A same-origin iframe of a set width does not
+ * work either: `next.config.mjs` sends `X-Frame-Options` and `frame-ancestors 'none'`. This drives
+ * the locally installed Chrome headless over the DevTools protocol and sets the viewport with
+ * `Emulation.setDeviceMetricsOverride`, which is a real layout at that width with `mobile: true`.
+ * It uses Node's built-in `WebSocket` (Node 22+) and adds no dependency.
+ *
+ * ## Desktop widths and arbitrary boxes (#1180)
+ *
+ * `--desktop` sets `mobile: false` and `deviceScaleFactor: 1`. Without it this script always
+ * emulated a touch device, which is right for the phone widths it was written for and wrong above
+ * them — a 1280px measurement taken with `mobile: true` is a tablet-emulated layout, not the one a
+ * desktop visitor sees.
+ *
+ * `--map-host <ip>` resolves `--base`'s hostname to `<ip>` inside this Chrome only, via Chrome's
+ * own `--host-resolver-rules`. That is how a vendor selected BY HOSTNAME is measured against a
+ * local server: `--base http://srimart-staging.nocaped.com:8787 --map-host 127.0.0.1`. A `Host`
+ * header injected through CDP does NOT reliably override the real one, and the server would go on
+ * resolving the wrong vendor while every measurement still looked plausible.
+ *
+ * `--collapse-filters` clicks "Hide filters" (#1173) so the collapsed browse sidebar, and the extra
+ * product column it pays for, can be measured. That state lives in `sessionStorage` and this script
+ * uses a throwaway profile, so it is otherwise unreachable.
+ *
+ * `--measure <selector>` (repeatable, or comma-separated) adds `measured` to each printed object:
+ * one `{ top, left, width, height }` per selector, or `null` where nothing matched. It is how
+ * `#1180` proves the admin nav and the page body share a left edge. **When no `--measure` is
+ * passed the key is omitted entirely**, so the default output stays byte-identical for the slices
+ * whose validation already reads this JSON.
+ *
+ * ## It measures; it does not judge
+ *
+ * It prints one JSON object per width and exits 0 when every page loaded. It has no thresholds and
+ * prints no PASS/FAIL. The thresholds live in the slice's `requirements.md`, so a validator compares
+ * numbers instead of trusting a script's own verdict.
+ *
+ * Each run uses a fresh, throwaway browser profile, so it starts with an empty guest cart.
+ * `--add-first` clicks the first card's Add button once (at the first width), waits for the cart
+ * stepper, reloads, and keeps that cart for the remaining widths.
+ *
+ * `--then <path>` (#958, #959) needs `--add-first`. Once the item is in the cart, every width (the
+ * first included) is measured at `<path>` instead of `--path`. That is how it reaches `/checkout`,
+ * which redirects an empty cart to `/cart`.
+ *
+ * ## What it reads
+ *
+ * Stable hooks added for it: `[data-header-banner]`, `[data-header-location]` and
+ * `[data-product-grid]`; for checkout, `[data-checkout-form]`, `[data-checkout-total]`,
+ * `[data-checkout-summary]` and `[data-checkout-summary-total]`. Every printed object also lists
+ * each visible form input's `autocomplete` attribute (`formInputs`). The sticky header is the page's `header` element. It is not a
+ * replacement for `#440`'s Playwright harness.
+ *
+ * #1131 adds `headerSearch`: the displayed `[data-header-search]` form's box and the boxes of its
+ * `select`, `input[name=q]` and `button[type=submit]`, each as `{ top, left, width, height }` read
+ * at scroll 0, or `null` on a page with no search bar (the landing page). Compare it with
+ * `viewportWidth` and `documentScrollWidth` for horizontal overflow.
+ *
+ * #956 adds `documentScrollWidth` (`document.documentElement.scrollWidth`) to every object, and,
+ * with `--add-first`, `cartFeedback` to the first width's: the `[data-cart-feedback]` region's text
+ * and its message's `left`/`right`, read as soon as the region fills after the click (it empties
+ * 4 s later), or `null` if it never filled within 10 s.
+ *
+ * #964 adds three things:
+ * - `tapTargets`: every `a`, `button`, `summary` and visible `input` that carries
+ *   `data-tap-surface` or sits inside an element that does, as `{ surface, name, width, height,
+ *   displayed }`. `surface` is the nearest `data-tap-surface` value, the element's own included.
+ *   `name` is the `aria-label`, else the trimmed text, else the `name` attribute.
+ * - `firstCardTop`: the first `[data-product-grid]` child's top in document coordinates, read at
+ *   scroll 0, or `null` with no grid.
+ * - `--open-location`: before measuring each width, calls `showModal()` on the first
+ *   `dialog[data-location-dialog]` whose parent is displayed (the header mounts `LocationControl`
+ *   twice, one per breakpoint), then waits 300 ms.
+ *
+ * #979 and #655 add:
+ * - `tapTargets` also covers `select`. A checkbox or radio inside a `label` is reported with the
+ *   label's box and name, plus `hitArea: "label"`, because the label is what a finger hits.
+ * - `scrollerArrows`: per displayed `[data-tap-surface="scroller-arrow"]`, `{ name,
+ *   circleCentreOffset }`, the distance from the top of the arrow's parent (the row) to the centre
+ *   of its visible circle (the button's first element child).
+ * - `--open-filters`: before measuring, sets `open` on every `details` that holds the mobile filter
+ *   `<summary>` (`[data-tap-surface="filter-panel"]`), then waits 300 ms.
+ * - `--open-cart`: clicks the floating cart button (`aria-haspopup="dialog"`, label starting
+ *   `Cart,`) and waits up to 5 s for `[data-tap-surface="cart-drawer-close"]` to show. Combines with
+ *   `--add-first`.
+ * - `--open-quick-view`: clicks the first card's `Quick view …` button and waits up to 10 s for
+ *   `[data-tap-surface="quick-view-close"]` to show, then 1 s more for its content.
+ * - `--open-help-assistant` (#1015): opens the floating contact disclosure, clicks `Open help
+ *   assistant`, and waits up to 10 s for the panel (`[data-help-assistant]`) to show, then 1 s more
+ *   for its content to load. The assistant must be switched on for the vendor, with a WhatsApp number.
+ * - `--block-urls <pattern>`: blocks matching requests with `Network.setBlockedURLs` before the first
+ *   navigation (pass `<cdnBase>/*` to make every stored image fail). Before measuring each width it
+ *   sets `loading="eager"` on every `img` and waits 2 s, so lazy images are requested too.
+ * - `displayed` (and every other "shown" check in the measurement) is now also false when
+ *   `checkVisibility()` says so: a closed `<details>` keeps laying out its content, so before this
+ *   the filter form inside the closed mobile panel read as displayed.
+ * - `cardsWithoutImage`: how many `[data-product-grid]` children contain no `img`. With nothing
+ *   blocked it must not rise against a baseline, or a fallback is hiding images that load.
+ * - `brokenImages`, always printed: `{ alt, src }` for each `img` with a non-empty `src` that is
+ *   `complete` with `naturalWidth` 0, which is how a browser shows a broken-image icon.
+ *
+ * #981 adds:
+ * - `--sign-in <email>:<password>`: signs in before the first measured load, so a page gated on
+ *   `session?.user` renders its signed-in branch. Until this existed the script was always a
+ *   guest on a fresh throwaway profile, which made the review forms (Quick View's and the product
+ *   page's) and `/feedback` unmeasurable — they only render their controls to a signed-in shopper,
+ *   and desktop Chrome cannot go below 501px, so no other tool could reach them at phone widths.
+ *   It POSTs to `/api/auth/sign-in/email` from inside the page, so Better Auth's `Set-Cookie`
+ *   lands in the profile Chrome is already using. It throws with the HTTP status if sign-in fails,
+ *   rather than measuring a signed-out page and reporting an empty surface.
+ *   **The password is passed on the command line, so this is for local `npm run preview` only** —
+ *   never a deployed host, and never a real customer's credentials. The dev demo shopper is
+ *   `demo-customer@merqify.com` with `DEMO_ACCOUNT_PASSWORD` from `.dev.vars`. The split is on the
+ *   FIRST colon, so a password containing `:` still works.
+ *
+ * #1142 adds:
+ * - `--open-location-menu`: before measuring each width, sets `open` on the first displayed
+ *   `[data-location-menu]` (the header mounts `LocationControl` twice, one per breakpoint), then
+ *   waits 300 ms.
+ * - `locationMenu`, always printed: for the first displayed `[data-location-menu]`, whether it is
+ *   `open`, its `summary` box and its panel box (`{ top, left, right, bottom, width, height }`), and
+ *   per item `{ name, width, height, atCentre }`, where `atCentre` is whether the element at the
+ *   item's centre (`elementFromPoint`) is that item or inside it — false means something covers or
+ *   clips it. Read at scroll 0. `null` on a page with no menu (a vendor without collection).
+ * - `shoppingList`: the displayed `a[aria-label="Quick Shop"]` inside `header`, as `{ top, left,
+ *   width, height }` at scroll 0, or `null`. Compare its `top` with `headerSearch.button.top`.
+ *   Matched on the accessible name because the destination has moved twice (#1142, #1187) while the
+ *   name has not; the output key keeps its original spelling so `#1142`'s and `#1180`'s recorded
+ *   comparisons still read against the same field.
+ */
+
+const HEIGHT = 844;
+const SCROLL_Y = 600;
+
+interface Args {
+  base: string;
+  path: string;
+  widths: number[];
+  addFirst: boolean;
+  then: string | null;
+  openLocation: boolean;
+  openLocationMenu: boolean;
+  openFilters: boolean;
+  openCart: boolean;
+  openQuickView: boolean;
+  openHelpAssistant: boolean;
+  blockUrls: string | null;
+  signIn: { email: string; password: string } | null;
+  desktop: boolean;
+  measure: string[];
+  mapHost: string | null;
+  collapseFilters: boolean;
+  headers: Array<[string, string]>;
+}
+
+function parseArgs(argv: string[]): Args {
+  const value = (flag: string) => {
+    const i = argv.indexOf(flag);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const base = value("--base");
+  const path = value("--path");
+  const then = value("--then") ?? null;
+  const addFirst = argv.includes("--add-first");
+  const openLocation = argv.includes("--open-location");
+  const openLocationMenu = argv.includes("--open-location-menu");
+  const openFilters = argv.includes("--open-filters");
+  const openCart = argv.includes("--open-cart");
+  const openQuickView = argv.includes("--open-quick-view");
+  const openHelpAssistant = argv.includes("--open-help-assistant");
+  const blockUrls = value("--block-urls") ?? null;
+  const desktop = argv.includes("--desktop");
+  const mapHost = value("--map-host") ?? null;
+  const collapseFilters = argv.includes("--collapse-filters");
+  // Repeatable `--header name:value`. The value may itself contain ":" (a URL), so split on the
+  // FIRST one only — the same reason `--sign-in` uses `indexOf` rather than `split` (#981).
+  const headers = argv
+    .flatMap((a, i) => (a === "--header" ? [argv[i + 1] ?? ""] : []))
+    .flatMap((raw): Array<[string, string]> => {
+      const at = raw.indexOf(":");
+      return at > 0 ? [[raw.slice(0, at).trim(), raw.slice(at + 1).trim()]] : [];
+    });
+  // Repeatable and/or comma-separated: --measure main --measure 'nav > div,header'
+  const measure = argv
+    .flatMap((a, i) => (a === "--measure" ? [argv[i + 1] ?? ""] : []))
+    .flatMap((v) => v.split(","))
+    .map((v) => v.trim())
+    .filter(Boolean);
+  // #981 — `--sign-in <email>:<password>`. The password may itself contain `:`, so split on the
+  // FIRST colon only.
+  const signInRaw = value("--sign-in") ?? null;
+  const signInSplit = signInRaw === null ? -1 : signInRaw.indexOf(":");
+  const signIn =
+    signInRaw === null || signInSplit <= 0
+      ? null
+      : {
+          email: signInRaw.slice(0, signInSplit),
+          password: signInRaw.slice(signInSplit + 1),
+        };
+  const widths = (value("--widths") ?? "")
+    .split(",")
+    .map((w) => Number(w.trim()))
+    .filter((w) => Number.isInteger(w) && w > 0);
+  if (
+    !base ||
+    !path ||
+    widths.length === 0 ||
+    (then !== null && !addFirst) ||
+    (argv.includes("--block-urls") && !blockUrls) ||
+    (argv.includes("--sign-in") && signIn === null)
+  ) {
+    console.error(
+      "Usage: npx tsx scripts/verify-mobile-layout.ts --base <url> --path <path> --widths 360,390 [--add-first [--then <path>]] [--open-location] [--open-location-menu] [--open-filters] [--open-cart] [--open-quick-view] [--open-help-assistant] [--block-urls <pattern>] [--sign-in <email>:<password>] [--desktop] [--measure <selector>] [--map-host <ip>] [--collapse-filters] [--header <name:value>]",
+    );
+    process.exit(2);
+  }
+  // Git Bash (MSYS) rewrites a bare `/categories/x` argument into `C:/Program Files/Git/categories/x`
+  // before Node sees it, which turns the URL into a DNS failure that looks like a layout result
+  // with every value null. Refuse it loudly; a path without the leading slash is never rewritten.
+  for (const [flag, given] of [
+    ["--path", path],
+    ["--then", then],
+  ] as const) {
+    if (given !== null && /^[A-Za-z]:[\\/]/.test(given)) {
+      console.error(
+        `${flag} looks like a Windows path (${given}): Git Bash rewrote it. Pass it without the leading slash (categories/x) or set MSYS_NO_PATHCONV=1.`,
+      );
+      process.exit(2);
+    }
+  }
+  const absolute = (p: string) => (p.startsWith("/") ? p : `/${p}`);
+  return {
+    base: base.replace(/\/$/, ""),
+    path: absolute(path),
+    widths,
+    addFirst,
+    then: then === null ? null : absolute(then),
+    openLocation,
+    openLocationMenu,
+    openFilters,
+    openCart,
+    openQuickView,
+    openHelpAssistant,
+    blockUrls,
+    signIn,
+    desktop,
+    measure,
+    mapHost,
+    collapseFilters,
+    headers,
+  };
+}
+
+function findChrome(): string {
+  const candidates = [
+    process.env.CHROME_PATH,
+    "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter((p): p is string => Boolean(p));
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
+    console.error("No Chrome found. Set CHROME_PATH to a Chrome or Chromium executable.");
+    process.exit(2);
+  }
+  return found;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type CdpMessage = { id?: number; method?: string; result?: unknown; error?: { message: string } };
+
+class Cdp {
+  private nextId = 0;
+  private pending = new Map<number, (message: CdpMessage) => void>();
+  private listeners = new Map<string, () => void>();
+
+  constructor(private socket: WebSocket) {
+    socket.onmessage = (event) => {
+      const message = JSON.parse(String(event.data)) as CdpMessage;
+      if (message.id !== undefined) {
+        this.pending.get(message.id)?.(message);
+        this.pending.delete(message.id);
+      } else if (message.method) {
+        this.listeners.get(message.method)?.();
+      }
+    };
+  }
+
+  /** Rejects after 30s: a call that never answers (e.g. evaluating mid-navigation) must fail loudly. */
+  send(method: string, params: Record<string, unknown> = {}): Promise<CdpMessage> {
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`DevTools call ${method} got no answer within 30s`));
+      }, 30_000);
+      this.pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
+      this.socket.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  once(method: string, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.listeners.delete(method);
+        resolve(false);
+      }, timeoutMs);
+      this.listeners.set(method, () => {
+        clearTimeout(timer);
+        this.listeners.delete(method);
+        resolve(true);
+      });
+    });
+  }
+
+  async evaluate<T>(expression: string): Promise<T> {
+    const response = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    const result = response.result as {
+      result: { value: T };
+      exceptionDetails?: { text: string };
+    };
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+    return result.result.value;
+  }
+}
+
+/** Runs inside the page. Everything it returns is a raw number, string, boolean or null. */
+const MEASURE = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const shown = (el) => {
+    if (!el) return false;
+    // #979 — a closed <details> lays its content out (content-visibility: hidden) without showing
+    // it, so a non-zero box is not enough; checkVisibility() also refuses that case.
+    if (el.checkVisibility && !el.checkVisibility()) return false;
+    const r = el.getBoundingClientRect();
+    return getComputedStyle(el).display !== "none" && r.width > 0 && r.height > 0;
+  };
+  const header = document.querySelector("header");
+  const banner = document.querySelector("[data-header-banner]");
+  const location = document.querySelector("[data-header-location]");
+  const grid = document.querySelector("[data-product-grid]");
+
+  window.scrollTo(0, 0);
+  await sleep(300);
+  const headerBottomAtTop = header ? header.getBoundingClientRect().bottom : null;
+  const locationTopAtTop = shown(location) ? location.getBoundingClientRect().top : null;
+  const firstChild = grid ? grid.children[0] : null;
+  const firstCardTop = firstChild
+    ? Math.round(firstChild.getBoundingClientRect().top + window.scrollY)
+    : null;
+
+  const cards = grid ? [...grid.children] : [];
+  let gridColumns = 0;
+  if (cards.length > 0) {
+    const firstTop = Math.round(cards[0].getBoundingClientRect().top);
+    const lefts = new Set(
+      cards
+        .filter((c) => Math.round(c.getBoundingClientRect().top) === firstTop)
+        .map((c) => Math.round(c.getBoundingClientRect().left)),
+    );
+    gridColumns = lefts.size;
+  }
+
+  const size = (el, name) => {
+    const r = el.getBoundingClientRect();
+    return { name, width: Math.round(r.width), height: Math.round(r.height), displayed: shown(el) };
+  };
+  const firstCard = cards[0] ?? null;
+  const controls = [
+    ...(firstCard ? [...firstCard.querySelectorAll("button")] : []).map((b) =>
+      size(b, b.getAttribute("aria-label") || b.textContent.trim()),
+    ),
+    ...(header ? [...header.querySelectorAll("nav a")] : []).map((a) =>
+      size(a, a.getAttribute("href")),
+    ),
+  ];
+  // #964 — every tappable element in a marked surface. #979 adds select, and measures a checkbox
+  // or radio by its wrapping label, which is the box a finger actually hits.
+  const tapTargets = [
+    ...document.querySelectorAll(
+      ["a", "button", "summary", "select", "input:not([type=hidden])"]
+        .flatMap((tag) => [tag + "[data-tap-surface]", "[data-tap-surface] " + tag])
+        .join(", "),
+    ),
+  ].map((el) => {
+    const surface = el.closest("[data-tap-surface]").getAttribute("data-tap-surface");
+    const label =
+      el.tagName === "INPUT" && (el.type === "checkbox" || el.type === "radio")
+        ? el.closest("label")
+        : null;
+    if (label) {
+      const r = label.getBoundingClientRect();
+      return {
+        surface,
+        name: label.textContent.trim(),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        displayed: shown(label),
+        hitArea: "label",
+      };
+    }
+    const r = el.getBoundingClientRect();
+    return {
+      surface,
+      name: el.getAttribute("aria-label") || el.textContent.trim() || el.getAttribute("name"),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      displayed: shown(el),
+    };
+  });
+  // #979 — where each arrow's visible circle sits within its row.
+  const scrollerArrows = [...document.querySelectorAll('[data-tap-surface="scroller-arrow"]')]
+    .filter((el) => shown(el))
+    .map((el) => {
+      const circle = el.firstElementChild ?? el;
+      const c = circle.getBoundingClientRect();
+      const row = el.parentElement.getBoundingClientRect();
+      return {
+        name: el.getAttribute("aria-label"),
+        circleCentreOffset: Math.round(c.top + c.height / 2 - row.top),
+      };
+    });
+  // #655 — an image the browser gave up on: loaded (complete) with no pixels.
+  const brokenImages = [...document.querySelectorAll("img")]
+    .filter((img) => img.getAttribute("src") && img.complete && img.naturalWidth === 0)
+    .map((img) => ({ alt: img.getAttribute("alt"), src: img.getAttribute("src") }));
+  // #655 — the other direction: a card that shows no image at all. With nothing blocked, this
+  // must not rise, or a fallback is replacing images that load fine.
+  const cardsWithoutImage = cards.filter((card) => !card.querySelector("img")).length;
+  const readout = firstCard
+    ? [...firstCard.querySelectorAll("[aria-label]")].find((el) =>
+        el.getAttribute("aria-label").endsWith("in cart"),
+      )
+    : null;
+
+  // #958 — every visible field's autocomplete token, exactly as written (null when absent).
+  const formInputs = [...document.querySelectorAll("form input")]
+    .filter((input) => input.type !== "hidden")
+    .map((input) => ({
+      id: input.id || null,
+      name: input.getAttribute("name"),
+      type: input.type,
+      autocomplete: input.getAttribute("autocomplete"),
+    }));
+
+  // #959 — checkout headings, and where the total sits relative to the button. Document
+  // coordinates (viewport box plus scrollY), so values compare regardless of scroll.
+  const docBox = (el) => {
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top + window.scrollY), bottom: Math.round(r.bottom + window.scrollY) };
+  };
+  const checkoutForm = document.querySelector("[data-checkout-form]");
+  let checkout = null;
+  if (checkoutForm) {
+    const totalRow = checkoutForm.querySelector("[data-checkout-total]");
+    const submit = checkoutForm.querySelector("button[type=submit]");
+    const summary = document.querySelector("[data-checkout-summary]");
+    const summaryTotal = document.querySelector("[data-checkout-summary-total]");
+    checkout = {
+      headings: [...checkoutForm.querySelectorAll("h2")].map((h) => h.textContent.trim()),
+      totalRow: totalRow
+        ? { displayed: shown(totalRow), ...docBox(totalRow), text: totalRow.textContent.trim() }
+        : null,
+      submit: submit ? { ...docBox(submit), text: submit.textContent.trim() } : null,
+      summaryTop: summary ? docBox(summary).top : null,
+      summaryTotal: summaryTotal ? summaryTotal.textContent.trim() : null,
+    };
+  }
+
+  // #1069 — the header brand: which image is showing, at what size, and which brand images the
+  // page's <img> elements requested. \`requested\` counts only initiatorType "img", so the favicon
+  // and manifest icon fetches are excluded. A memory-cache hit may not produce an entry, so measure
+  // each width in its own run when comparing \`requested\` across widths.
+  const brandLink = document.querySelector("[data-header-brand]");
+  let brand = null;
+  if (brandLink) {
+    const lastSegment = (url) => (url ? new URL(url, location.href).pathname.split("/").pop() : null);
+    const visible = [...brandLink.querySelectorAll("img")].find((img) => shown(img));
+    const fallback = visible ? null : brandLink.querySelector('[role="img"]');
+    const box = visible || fallback;
+    const rect = box ? box.getBoundingClientRect() : null;
+    const brandUrls = new Set(
+      [...brandLink.querySelectorAll("img, source")].flatMap((el) =>
+        [el.getAttribute("src"), el.getAttribute("srcset")].filter(Boolean).map((u) => new URL(u, location.href).href),
+      ),
+    );
+    brand = {
+      file: visible ? lastSegment(visible.currentSrc || visible.src) : null,
+      fallback: Boolean(fallback),
+      width: rect ? Math.round(rect.width) : null,
+      height: rect ? Math.round(rect.height) : null,
+      requested: performance
+        .getEntriesByType("resource")
+        .filter((e) => e.initiatorType === "img" && brandUrls.has(e.name))
+        .map((e) => lastSegment(e.name)),
+    };
+  }
+
+  // #1131 — the header search bar: the displayed \`[data-header-search]\` form (the header mounts one
+  // per breakpoint) and its select, input and submit button, each with its top so a reader can tell
+  // whether the three share one row. Read at scroll 0, like everything above.
+  const searchForm = [...document.querySelectorAll("[data-header-search]")].find((el) => shown(el));
+  let headerSearch = null;
+  if (searchForm) {
+    const box = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        top: Math.round(r.top),
+        left: Math.round(r.left),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      };
+    };
+    headerSearch = {
+      form: box(searchForm),
+      select: box(searchForm.querySelector("select")),
+      input: box(searchForm.querySelector("input[name=q]")),
+      button: box(searchForm.querySelector("button[type=submit]")),
+    };
+  }
+
+  // #1142 — the displayed location menu and its items, and whether each item is actually hit at its
+  // centre (an ancestor's overflow or a later element covering it makes this false). Scroll 0.
+  const edges = (el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      top: Math.round(r.top),
+      left: Math.round(r.left),
+      right: Math.round(r.right),
+      bottom: Math.round(r.bottom),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  };
+  const menu = [...document.querySelectorAll("[data-location-menu]")].find((el) => shown(el));
+  let locationMenu = null;
+  if (menu) {
+    const summary = menu.querySelector("summary");
+    const panel = summary ? summary.nextElementSibling : null;
+    const items = panel ? [...panel.querySelectorAll("button")] : [];
+    locationMenu = {
+      open: menu.open,
+      summary: summary ? edges(summary) : null,
+      panel: panel && menu.open ? edges(panel) : null,
+      items: menu.open
+        ? items.map((el) => {
+            const r = el.getBoundingClientRect();
+            const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+            return {
+              name: el.textContent.trim(),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+              atCentre: Boolean(hit && (hit === el || el.contains(hit))),
+            };
+          })
+        : [],
+    };
+  }
+  // #1187 — selected by ACCESSIBLE NAME, not by href. This read \`a[href="/shop-your-list"]\` until
+  // the header's link was repointed at /quick-shop, and then matched nothing: \`shoppingList\` went
+  // permanently \`null\`, which reads as "this page has no such link" rather than "this selector is
+  // stale". The destination has now moved twice (#1142, #1187) while the accessible name has been
+  // "Quick Shop" since #1145 and is pinned by two tests — tests/header-shopping-list.test.tsx and
+  // tests/quick-shop-hub.test.tsx both assert it, the latter also asserting it equals the visible
+  // text (WCAG 2.5.3). So the name is the stable handle here and the URL is not.
+  const listLink = [...document.querySelectorAll('header a[aria-label="Quick Shop"]')].find((el) =>
+    shown(el),
+  );
+  const shoppingList = listLink
+    ? (({ top, left, width, height }) => ({ top, left, width, height }))(edges(listLink))
+    : null;
+
+  window.scrollTo(0, ${SCROLL_Y});
+  await sleep(400);
+  const headerAfter = header ? header.getBoundingClientRect() : null;
+  const bannerAfter = banner ? banner.getBoundingClientRect() : null;
+
+  // #1180 — \`--measure <selector>\`. Omitted entirely when none was passed, so the default output
+  // stays byte-identical for the slices whose validation already reads this JSON.
+  const measureSelectors = window.__measureSelectors || [];
+  const measured = {};
+  for (const selector of measureSelectors) {
+    const el = document.querySelector(selector);
+    measured[selector] = el
+      ? (({ top, left, width, height }) => ({
+          top: Math.round(top),
+          left: Math.round(left),
+          width: Math.round(width),
+          height: Math.round(height),
+        }))(el.getBoundingClientRect())
+      : null;
+  }
+
+  return {
+    ...(measureSelectors.length ? { measured } : {}),
+    viewportWidth: window.innerWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+    scrollYAfterScroll: Math.round(window.scrollY),
+    headerTopAfterScroll: headerAfter ? Math.round(headerAfter.top) : null,
+    headerHeightAfterScroll: headerAfter ? Math.round(headerAfter.height) : null,
+    bannerBottomAfterScroll: bannerAfter ? Math.round(bannerAfter.bottom) : null,
+    headerBottomAtTop: headerBottomAtTop === null ? null : Math.round(headerBottomAtTop),
+    locationTopAtTop: locationTopAtTop === null ? null : Math.round(locationTopAtTop),
+    gridColumns,
+    firstCardTop,
+    controls,
+    tapTargets,
+    scrollerArrows,
+    brokenImages,
+    cardsWithoutImage,
+    firstCardStepperLabel: readout ? readout.getAttribute("aria-label") : null,
+    formInputs,
+    checkout,
+    brand,
+    headerSearch,
+    locationMenu,
+    shoppingList,
+  };
+})()`;
+
+/** #1142 — opens the displayed LocationControl method menu; false when there is none. */
+const OPEN_LOCATION_MENU = `(() => {
+  const menu = [...document.querySelectorAll("[data-location-menu]")].find((d) => {
+    const r = d.getBoundingClientRect();
+    return getComputedStyle(d).display !== "none" && r.width > 0 && r.height > 0;
+  });
+  if (!menu) return false;
+  menu.open = true;
+  return true;
+})()`;
+
+/**
+ * Clicks the first card's Add button, found by its visible text ("Add"). Since #956 its accessible
+ * name is "Add <product> to cart", but its text content is still "Add".
+ */
+const CLICK_FIRST_ADD = `(() => {
+  const card = document.querySelector("[data-product-grid]")?.children[0];
+  const button = card
+    ? [...card.querySelectorAll("button")].find((b) => b.textContent.trim() === "Add")
+    : null;
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+
+/** #956 — the shared cart-feedback region, once it has text: its text and horizontal extent. */
+const READ_CART_FEEDBACK = `(() => {
+  const region = document.querySelector("[data-cart-feedback]");
+  const text = region ? region.textContent.trim() : "";
+  if (!text) return null;
+  const pill = region.firstElementChild ?? region;
+  const box = pill.getBoundingClientRect();
+  return { text, left: Math.round(box.left), right: Math.round(box.right) };
+})()`;
+
+/** #964 — opens the displayed LocationControl's dialog; false when there is none. */
+const OPEN_LOCATION = `(() => {
+  const dialog = [...document.querySelectorAll("dialog[data-location-dialog]")].find((d) => {
+    const parent = d.parentElement;
+    const r = parent.getBoundingClientRect();
+    return getComputedStyle(parent).display !== "none" && r.width > 0 && r.height > 0;
+  });
+  if (!dialog) return false;
+  if (!dialog.open) dialog.showModal();
+  return true;
+})()`;
+
+/** #979 — opens the mobile filter disclosure(s); false when the page has none. */
+const OPEN_FILTERS = `(() => {
+  const panels = [...document.querySelectorAll("details")].filter((d) =>
+    d.querySelector('[data-tap-surface="filter-panel"]'),
+  );
+  panels.forEach((d) => { d.open = true; });
+  return panels.length > 0;
+})()`;
+
+/**
+ * #1180 — clicks `CollapsibleSidebar`'s "Hide filters" button (#1173), putting the browse sidebar
+ * into its collapsed state so the extra product column can be measured. The state normally lives in
+ * `sessionStorage`, and this script uses a throwaway profile per run, so without this the page is
+ * always measured expanded. Returns false when the button is absent — it renders only after
+ * hydration and only from `md` up, so a narrow width or an un-hydrated page has none.
+ */
+const COLLAPSE_FILTERS = `(() => {
+  const button = document.querySelector(".filters-sidebar-hide");
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+
+/** #979 — clicks the floating cart button; false when there is none. */
+const OPEN_CART = `(() => {
+  const button = [...document.querySelectorAll('button[aria-haspopup="dialog"]')].find((b) =>
+    (b.getAttribute("aria-label") || "").startsWith("Cart,"),
+  );
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+
+/**
+ * #1015 — opens the floating contact disclosure, then the help assistant from inside it; false when
+ * the page has no help-assistant control (the assistant is off, or the vendor has no WhatsApp).
+ */
+const OPEN_HELP_ASSISTANT = `(() => {
+  const trigger = [...document.querySelectorAll("button[aria-controls]")].find((b) =>
+    (b.getAttribute("aria-label") || "").startsWith("Contact and follow"),
+  );
+  if (trigger && trigger.getAttribute("aria-expanded") !== "true") trigger.click();
+  const button = document.querySelector('button[aria-label="Open help assistant"]');
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+
+/** #979 — clicks the first card's Quick View button; false when there is none. */
+const OPEN_QUICK_VIEW = `(() => {
+  const card = document.querySelector("[data-product-grid]")?.children[0];
+  const button = card
+    ? [...card.querySelectorAll("button")].find((b) =>
+        (b.getAttribute("aria-label") || "").startsWith("Quick view "),
+      )
+    : null;
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+
+/** Whether an element matching the selector is displayed. */
+const isDisplayed = (selector: string) => `(() => {
+  const el = document.querySelector(${JSON.stringify(selector)});
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return getComputedStyle(el).display !== "none" && r.width > 0 && r.height > 0;
+})()`;
+
+/** #655 — asks every lazy image to load now, so a blocked one fails before measuring. */
+const EAGER_IMAGES = `(() => {
+  document.querySelectorAll("img").forEach((img) => img.setAttribute("loading", "eager"));
+  return true;
+})()`;
+
+const HAS_STEPPER = `(() => {
+  const card = document.querySelector("[data-product-grid]")?.children[0];
+  return Boolean(card && [...card.querySelectorAll("[aria-label]")].some((el) =>
+    el.getAttribute("aria-label").endsWith("in cart")));
+})()`;
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const profile = mkdtempSync(join(tmpdir(), "verify-mobile-layout-"));
+  const port = 9300 + Math.floor(Math.random() * 500);
+  // #1180 — `--map-host <ip>` resolves --base's hostname to <ip> inside this Chrome only, so a
+  // vendor whose profile is selected BY HOSTNAME can be measured against a local server. Chrome's
+  // own resolver rule is used rather than an injected `Host` header: a header set through
+  // `Network.setExtraHTTPHeaders` does not reliably override the real `Host`, and the server would
+  // keep resolving the wrong vendor while every measurement looked plausible.
+  const mapHost = args.mapHost
+    ? [`--host-resolver-rules=MAP ${new URL(args.base).hostname} ${args.mapHost}`]
+    : [];
+
+  const chrome = spawn(
+    findChrome(),
+    [
+      "--headless=new",
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${profile}`,
+      "--no-first-run",
+      ...mapHost,
+      "about:blank",
+    ],
+    { stdio: "ignore" },
+  );
+
+  // Belt and braces: whatever stalls, the run ends with exit 1 and a reason, never a silent hang
+  // holding Chrome (an orphaned run was seen to block a concurrent `npm run preview` build).
+  const watchdog = setTimeout(
+    () => {
+      console.error("verify-mobile-layout: timed out; killing Chrome.");
+      chrome.kill();
+      process.exit(1);
+    },
+    60_000 + 60_000 * args.widths.length,
+  );
+
+  let exitCode = 0;
+  try {
+    let targets: { type: string; webSocketDebuggerUrl: string }[] = [];
+    for (let i = 0; i < 60 && targets.length === 0; i++) {
+      try {
+        targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+      } catch {
+        await sleep(250);
+      }
+    }
+    const page = targets.find((t) => t.type === "page");
+    if (!page) throw new Error("Chrome started but exposed no page target.");
+
+    const socket = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.onopen = resolve;
+      socket.onerror = reject;
+    });
+    const cdp = new Cdp(socket);
+    await cdp.send("Page.enable");
+    if (args.blockUrls) {
+      await cdp.send("Network.enable");
+      await cdp.send("Network.setBlockedURLs", { urls: [args.blockUrls] });
+    }
+
+    // #1180 — `--header name:value`. Needed above all for `x-forwarded-proto: http` against a local
+    // `npm run preview`: Better Auth derives its origin from the forwarded proto, so over plain http
+    // it computes an `https://` origin, the origin check fails and every sign-in returns 403 (the
+    // same trap as #1177). NOTE `Host` cannot be set this way — Chrome ignores it; use `--map-host`.
+    if (args.headers.length > 0) {
+      await cdp.send("Network.enable");
+      await cdp.send("Network.setExtraHTTPHeaders", {
+        headers: Object.fromEntries(args.headers.map(([name, v]) => [name, v])),
+      });
+    }
+
+    /** Polls until the selector is displayed; throws naming the flag if it never is. */
+    const waitDisplayed = async (selector: string, timeoutMs: number, flag: string) => {
+      for (let waited = 0; waited <= timeoutMs; waited += 250) {
+        if (await cdp.evaluate<boolean>(isDisplayed(selector))) return;
+        await sleep(250);
+      }
+      throw new Error(`${flag}: ${selector} was not displayed within ${timeoutMs / 1000}s`);
+    };
+
+    const load = async (path: string) => {
+      const loaded = cdp.once("Page.loadEventFired", 30_000);
+      await cdp.send("Page.navigate", { url: `${args.base}${path}` });
+      if (!(await loaded)) throw new Error(`Timed out loading ${args.base}${path}`);
+      await sleep(1500); // let client islands hydrate
+      const landed = await cdp.evaluate<string>("location.href");
+      if (landed.startsWith("chrome-error:")) {
+        throw new Error(`Could not load ${args.base}${path} (Chrome error page).`);
+      }
+    };
+
+    // #981 — sign in BEFORE the first measured load, so a page gated on `session?.user` renders
+    // its signed-in branch. Both review forms and /feedback are gated, and their controls are what
+    // this slice measures. The fetch runs in the page so Better Auth's Set-Cookie lands in the
+    // profile Chrome is already using; there is no cookie plumbing to get wrong.
+    if (args.signIn) {
+      await load("/");
+      const result = await cdp.evaluate<string>(`
+        fetch(${JSON.stringify("/api/auth/sign-in/email")}, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify(${JSON.stringify(args.signIn)}),
+        })
+          .then((r) => r.ok ? "ok" : r.status + " " + r.statusText)
+          .catch((e) => "threw: " + e.message)
+      `);
+      if (result !== "ok") {
+        throw new Error(
+          `--sign-in: ${args.signIn.email} could not sign in (${result}). Check the account exists (npx tsx scripts/demo-accounts.ts add) and the password matches DEMO_ACCOUNT_PASSWORD.`,
+        );
+      }
+    }
+
+    let added = false;
+    let cartFeedback: unknown = null;
+    let printedFeedback = false;
+    for (const width of args.widths) {
+      // #1180 — `mobile` was hardcoded `true`, which is right for the phone widths this script was
+      // written for and wrong above them: a 1280px measurement taken with `mobile: true` is a
+      // tablet-emulated layout, not the one a desktop visitor gets. `--desktop` measures the real
+      // desktop layout; without it nothing changes.
+      await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: HEIGHT,
+        deviceScaleFactor: args.desktop ? 1 : 2,
+        mobile: !args.desktop,
+      });
+      await load(added && args.then ? args.then : args.path);
+      // Read by MEASURE. Set per load because a navigation clears it.
+      await cdp.evaluate(`window.__measureSelectors = ${JSON.stringify(args.measure)}; true`);
+
+      if (args.addFirst && !added) {
+        if (!(await cdp.evaluate<boolean>(CLICK_FIRST_ADD))) {
+          throw new Error("--add-first: no Add button in the first card");
+        }
+        // #956 — the region fills only once the server action returns, and empties 4 s later, so
+        // it is read the moment it has text.
+        for (let i = 0; i < 100 && cartFeedback === null; i++) {
+          cartFeedback = await cdp.evaluate(READ_CART_FEEDBACK);
+          if (cartFeedback === null) await sleep(100);
+        }
+        for (let i = 0; i < 40 && !(await cdp.evaluate<boolean>(HAS_STEPPER)); i++) {
+          await sleep(250);
+        }
+        added = true;
+        await load(args.then ?? args.path);
+      }
+
+      if (args.openLocation) {
+        if (!(await cdp.evaluate<boolean>(OPEN_LOCATION))) {
+          throw new Error("--open-location: no displayed LocationControl dialog");
+        }
+        await sleep(300);
+      }
+
+      if (args.openLocationMenu) {
+        if (!(await cdp.evaluate<boolean>(OPEN_LOCATION_MENU))) {
+          throw new Error("--open-location-menu: no displayed LocationControl menu");
+        }
+        await sleep(300);
+      }
+
+      if (args.openFilters) {
+        if (!(await cdp.evaluate<boolean>(OPEN_FILTERS))) {
+          throw new Error("--open-filters: no filter disclosure on the page");
+        }
+        await sleep(300);
+      }
+
+      if (args.collapseFilters) {
+        if (!(await cdp.evaluate<boolean>(COLLAPSE_FILTERS))) {
+          throw new Error(
+            "--collapse-filters: no displayed 'Hide filters' button (it renders after hydration, from md up)",
+          );
+        }
+        // The attribute is set on <html> and the grid restyles from it; let that settle.
+        await sleep(500);
+      }
+
+      if (args.openCart) {
+        if (!(await cdp.evaluate<boolean>(OPEN_CART))) {
+          throw new Error("--open-cart: no floating cart button on the page");
+        }
+        await waitDisplayed('[data-tap-surface="cart-drawer-close"]', 5_000, "--open-cart");
+      }
+
+      if (args.openQuickView) {
+        if (!(await cdp.evaluate<boolean>(OPEN_QUICK_VIEW))) {
+          throw new Error("--open-quick-view: no Quick view button in the first card");
+        }
+        await waitDisplayed('[data-tap-surface="quick-view-close"]', 10_000, "--open-quick-view");
+        await sleep(1000);
+      }
+
+      if (args.openHelpAssistant) {
+        if (!(await cdp.evaluate<boolean>(OPEN_HELP_ASSISTANT))) {
+          throw new Error("--open-help-assistant: no help-assistant control on the page");
+        }
+        await waitDisplayed("[data-help-assistant]", 10_000, "--open-help-assistant");
+        await sleep(1000);
+      }
+
+      if (args.blockUrls) {
+        await cdp.evaluate<boolean>(EAGER_IMAGES);
+        await sleep(2000);
+      }
+
+      const measured = await cdp.evaluate<Record<string, unknown>>(MEASURE);
+      // Printed on the width whose click produced it; every other width has none to report.
+      const feedbackHere = args.addFirst && !printedFeedback;
+      if (feedbackHere) printedFeedback = true;
+      console.log(JSON.stringify(feedbackHere ? { ...measured, cartFeedback } : measured));
+    }
+    socket.close();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    exitCode = 1;
+  } finally {
+    clearTimeout(watchdog);
+    chrome.kill();
+    await sleep(500);
+    try {
+      rmSync(profile, { recursive: true, force: true });
+    } catch {
+      // Chrome can hold the profile briefly after exit on Windows; a stale temp dir is harmless.
+    }
+  }
+  process.exit(exitCode);
+}
+
+void main();

@@ -1,0 +1,100 @@
+name: deploy-production
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # P9.2 (#435) — the production path runs the SAME checks a pull request runs.
+  # `gates` triggers on pull_request only, so before this job nothing quality-related
+  # ran on a push to main.
+  quality:
+    uses: ./.github/workflows/quality.yml
+    # The KMS checks run here but do not block the deploy (#537, resolving #473). On a push
+    # to main the content has already merged: failing the deploy cannot un-merge a stale
+    # generated artefact or a bad front-matter block, it only withholds whatever fix this
+    # push carries. The failure still surfaces as a red `kms` job and `::error::`
+    # annotations. Everything in the `quality` job itself stays blocking.
+    with:
+      kms_blocking: false
+
+  deploy:
+    needs: quality
+    runs-on: ubuntu-latest
+    # NOTE: no approval gate is enforced on this environment. GitHub's reviewer-protection
+    # feature needs a paid plan for private repos and was rejected with a 422 on this repo's
+    # current plan, so `environment: production` here selects the production secret set and
+    # nothing more. PR review discipline is the real gate. (This comment previously asserted
+    # an approval gate that was never actually configured; corrected in P9.2.)
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+
+      # P9.2 (#434) — build BEFORE migrating. The build touches no database (the Prisma
+      # client is generated from prisma/schema.prisma, not from Postgres), and it is the
+      # step most likely to fail: a root proxy.ts once passed next build, lint, typecheck
+      # and every test, and failed only here. Migrating first meant such a failure left
+      # production on a newly migrated schema still serving the previous bundle.
+      # BOTH Prisma clients, before the build. @prisma/client's postinstall generates
+      # only the default schema during `npm ci`; it has never known about
+      # prisma/reference/schema.prisma, whose client is generated into node_modules
+      # (see that schema's generator block for why it must live there). Without this
+      # step the OpenNext build below fails to resolve @aheed/reference-client.
+      #
+      # No database is contacted — a Prisma client is generated from the schema file.
+      # The URLs are supplied only because the datasource block requires the variables
+      # to exist for the schema to parse.
+      - name: Generate Prisma clients
+        env:
+          UK_LOCATION_REF_DATABASE_URL: ${{ secrets.UK_LOCATION_REF_DATABASE_URL }}
+          UK_LOCATION_REF_DIRECT_URL: ${{ secrets.UK_LOCATION_REF_DIRECT_URL }}
+        run: npm run db:generate
+
+      - name: Build (OpenNext)
+        run: npx opennextjs-cloudflare build
+
+      - name: Apply migrations (direct connection)
+        run: npx prisma migrate deploy
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+          DATABASE_URL: ${{ secrets.DIRECT_URL }}
+
+      # #1198 — refuse to deploy a wrangler.toml that does not route a vendor currently trading in
+      # THIS environment. A wrangler deploy that omits a host which already has a custom domain
+      # tears that domain down, and nothing compared the file against VendorDomain before this.
+
+      # needs this environment's DIRECT_URL, which a PR runner does not have, so there it could only
+      # skip — and a skip line is not a pass. It must stay AFTER migrate (so VendorDomain is current)
+      # and BEFORE the deploy below (the step that can destroy a domain).
+      - name: Verify Worker routes cover every trading vendor
+        run: npx tsx scripts/verify-worker-routes.ts --env production
+        env:
+          DIRECT_URL: ${{ secrets.DIRECT_URL }}
+          DATABASE_URL: ${{ secrets.DIRECT_URL }}
+
+      - name: Deploy to Workers
+        run: |
+          echo "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" | npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env production
+          echo "${{ secrets.CLOUDFLARE_API_TOKEN }}" | npx wrangler secret put CLOUDFLARE_API_TOKEN --env production
+          npx wrangler deploy --env production --var "GIT_COMMIT_SHA:$(git rev-parse --short HEAD)"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # P9.2 (#618) — the job scheduler is a SECOND Worker with its own config and
+      # its own Cron Trigger. It exists because the OpenNext-generated application
+      # entry exports only `fetch`, so a Cron Trigger has nothing to attach to.
+      #
+      # Ordered AFTER the application deploy deliberately: the scheduler's only
+      # job is to call routes on the app, so deploying it first would schedule
+      # calls against a bundle that does not serve them yet.
+      #
+      # JOB_INVOCATION_TOKEN is NOT set here — it is a runtime secret held on both
+      # Workers and rotated with `wrangler secret put`, never through CI.
+      - name: Deploy job scheduler
+        run: npx wrangler deploy --config workers/scheduler/wrangler.toml --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

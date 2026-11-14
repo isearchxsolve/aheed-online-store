@@ -1,0 +1,274 @@
+import Link from "next/link";
+import { formatPrice } from "@/components/product/format-price";
+import { ImageWithFallback } from "@/components/ui/ImageWithFallback";
+import { composePublicUrl } from "@/lib/storage";
+import { fulfilmentProgress } from "@/lib/cart-rules";
+import type { FulfilmentMethodChoice } from "@/lib/fulfilment-cookie";
+import type { CartSummary } from "@/lib/repositories/cart";
+import { removeFromCart } from "@/features/cart/remove-item";
+import { updateQuantity } from "@/features/cart/update-quantity";
+import { CheckoutLink } from "./CheckoutLink";
+import { CartLineNote } from "./CartLineNote";
+import { Icon } from "@/components/icons/Icon";
+import { IconMedallion } from "@/components/icons/IconMedallion";
+
+/**
+ * Server-rendered cart body (P3a, #93) — shared by the drawer and /cart so both
+ * show the same data from one code path.
+ *
+ * Quantity and remove controls are plain <form> posts to server actions, so they
+ * work without client JS; only the drawer's open/close is a client island.
+ *
+ * Everything vendor-specific comes from data: the minimum order, the free-delivery
+ * threshold and the locality name are VendorConfig values, never constants (the
+ * reference mockup hardcoded £30 and "Aheed"). Colours are semantic tokens.
+ *
+ * #748 — the progress banner is derived entirely by `fulfilmentProgress`, which
+ * is also what `/checkout` renders from. This component does no arithmetic over
+ * the minimum or the threshold itself: when it did, the drawer advertised free
+ * delivery to shoppers who had chosen Click & Collect, and never mentioned the
+ * vendor minimum at all.
+ */
+export function CartContents({
+  summary,
+  method,
+  minimumOrderPence,
+  freeDeliveryThresholdPence,
+  localityName,
+  cdnBaseUrl,
+  showViewCartLink = false,
+  continueShoppingHref,
+}: {
+  summary: CartSummary;
+  method: FulfilmentMethodChoice;
+  minimumOrderPence: number;
+  freeDeliveryThresholdPence: number | null;
+  localityName: string;
+  cdnBaseUrl: string;
+  showViewCartLink?: boolean;
+  /** #1305 — when set, a Continue shopping link sits beside Proceed to checkout. The drawer omits it. */
+  continueShoppingHref?: string;
+}) {
+  const progress = fulfilmentProgress(summary.subtotalPence, {
+    method,
+    minimumOrderPence,
+    freeDeliveryThresholdPence,
+  });
+
+  return (
+    <>
+      {/* Progress banner — omitted entirely when there is nothing to report. */}
+      {progress.kind !== "none" && (
+        <div className="border-b border-black/5 bg-action-tint p-3 text-xs text-primary">
+          {progress.kind === "below-minimum" && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-1 font-medium">
+                {method === "COLLECTION" ? (
+                  <Icon name="store" className="h-4 w-4 text-primary" />
+                ) : (
+                  <Icon name="truck" className="h-4 w-4 text-primary" />
+                )}
+                Add {formatPrice(progress.remainingPence)} to reach the{" "}
+                {formatPrice(minimumOrderPence)} minimum order
+              </span>
+              <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-black/10">
+                <div className="h-full bg-primary" style={{ width: `${progress.percent}%` }} />
+              </div>
+            </div>
+          )}
+
+          {progress.kind === "delivery-remaining" && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-1 font-medium">
+                <Icon name="truck" className="h-4 w-4 text-primary" />
+                Add {formatPrice(progress.remainingPence)} for FREE Local Delivery
+              </span>
+              <div className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-black/10">
+                <div className="h-full bg-primary" style={{ width: `${progress.percent}%` }} />
+              </div>
+            </div>
+          )}
+
+          {progress.kind === "delivery-unlocked" && (
+            <div className="flex items-center gap-1 font-bold text-primary">
+              <Icon name="sparkles" className="h-4 w-4 text-amber-500" />
+              You unlocked FREE Local Delivery
+              {localityName ? ` to ${localityName}` : ""}!
+            </div>
+          )}
+
+          {progress.kind === "collection-ready" && (
+            <div className="flex items-center gap-1 font-bold text-primary">
+              <Icon name="store" className="h-4 w-4 text-primary" />
+              Ready for Click &amp; Collect
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        {summary.lines.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center p-6 text-center">
+            <IconMedallion icon3d="cart-add" size={72} className="mb-3" decorative />
+            <h3 className="text-sm font-bold text-primary">Your cart is empty</h3>
+            <p className="mt-1 max-w-xs text-xs text-primary-muted">
+              Browse the aisles and add something you fancy.
+            </p>
+            <Link
+              href="/categories"
+              className="mt-4 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-white"
+            >
+              Start shopping
+            </Link>
+          </div>
+        ) : (
+          summary.lines.map((line) => (
+            <div
+              key={line.productId}
+              className="flex items-center gap-3 rounded-2xl border border-black/10 bg-white p-3"
+            >
+              {line.imageKey && cdnBaseUrl ? (
+                // Plain <img> by decision, not omission — #46 settled at P7d (#218):
+                // Image Transformations aren't enabled on this zone, so a next/image
+                // loader would ship identical bytes. Rule is off in eslint.config.mjs.
+                // #655: a missing object shows the same grey box as a line with no image.
+                <ImageWithFallback
+                  src={composePublicUrl(cdnBaseUrl, line.imageKey)}
+                  alt=""
+                  className="h-16 w-16 shrink-0 rounded-xl border border-black/5 bg-surface-muted object-cover"
+                  fallback={<div className="h-16 w-16 shrink-0 rounded-xl bg-surface-muted" />}
+                />
+              ) : (
+                <div className="h-16 w-16 shrink-0 rounded-xl bg-surface-muted" />
+              )}
+
+              <div className="min-w-0 flex-1">
+                <Link
+                  href={`/products/${line.slug}`}
+                  className="block truncate text-xs font-semibold text-primary hover:underline"
+                >
+                  {line.name}
+                </Link>
+                <p className="mt-0.5 text-[11px] text-primary-muted">
+                  {formatPrice(line.unitPricePence)} · {line.unitLabel}
+                </p>
+
+                {!line.available && (
+                  <p className="mt-1 text-[11px] font-semibold text-danger">
+                    Unavailable — not included in the subtotal
+                  </p>
+                )}
+
+                <div data-tap-surface="cart-line-controls" className="mt-2 flex items-center gap-2">
+                  <div className="flex items-center rounded-lg border border-black/10 bg-surface-muted">
+                    <form
+                      action={async () => {
+                        "use server";
+                        await updateQuantity(line.productId, line.quantity - 1);
+                      }}
+                    >
+                      <button
+                        type="submit"
+                        aria-label={`Decrease quantity of ${line.name}`}
+                        className="flex size-tap items-center justify-center p-1 text-primary-muted hover:text-primary lg:size-auto"
+                      >
+                        <Icon name="minus" className="h-3 w-3" />
+                      </button>
+                    </form>
+                    <span className="px-2 text-xs font-bold text-primary">{line.quantity}</span>
+                    <form
+                      action={async () => {
+                        "use server";
+                        await updateQuantity(line.productId, line.quantity + 1);
+                      }}
+                    >
+                      <button
+                        type="submit"
+                        disabled={!line.available || line.quantity >= line.stock}
+                        aria-label={`Increase quantity of ${line.name}`}
+                        className="flex size-tap items-center justify-center p-1 text-primary-muted hover:text-primary disabled:opacity-30 lg:size-auto"
+                      >
+                        <Icon name="plus" className="h-3 w-3" />
+                      </button>
+                    </form>
+                  </div>
+
+                  <form
+                    action={async () => {
+                      "use server";
+                      await removeFromCart(line.productId);
+                    }}
+                  >
+                    <button
+                      type="submit"
+                      aria-label={`Remove ${line.name}`}
+                      className="flex size-tap items-center justify-center p-1 text-primary-subtle transition-colors hover:text-danger lg:size-auto"
+                    >
+                      <Icon name="trash" className="h-3.5 w-3.5" />
+                    </button>
+                  </form>
+                </div>
+
+                <CartLineNote line={line} />
+              </div>
+
+              <div className="flex flex-col items-end">
+                <span
+                  className={`text-sm font-extrabold ${line.available ? "text-primary" : "text-primary-muted line-through"}`}
+                >
+                  {formatPrice(line.lineTotalPence)}
+                </span>
+                {/* P8.5d (#348) — the multi-buy saving this line actually earned.
+                    Only shown when it is non-zero and the line is still payable:
+                    an unavailable line contributes nothing to the subtotal, so
+                    advertising a saving on it would be a claim about money the
+                    shopper is not being charged. */}
+                {line.available && line.tierSavingPence > 0 && (
+                  <span className="text-[11px] font-semibold text-action">
+                    Saving {formatPrice(line.tierSavingPence)}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {summary.lines.length > 0 && (
+        <div className="space-y-3 border-t border-black/10 bg-surface-muted p-4">
+          <div className="flex justify-between text-sm">
+            <span className="text-primary-muted">Subtotal</span>
+            <span className="font-bold text-primary">{formatPrice(summary.subtotalPence)}</span>
+          </div>
+          {/* The cart deliberately stops at a subtotal — delivery fee and total are
+              computed at checkout (P3b) so the two can never disagree. */}
+          {continueShoppingHref ? (
+            // #1305 — /cart only. Stacked with checkout on top below `sm`, side by side from `sm`.
+            <div className="flex flex-col-reverse gap-2 sm:flex-row">
+              <Link
+                href={continueShoppingHref}
+                className="flex items-center justify-center rounded-2xl border border-primary px-4 py-3 text-sm font-bold text-primary transition-colors hover:bg-primary hover:text-white sm:flex-1"
+              >
+                Continue shopping
+              </Link>
+              <div className="sm:flex-1">
+                <CheckoutLink />
+              </div>
+            </div>
+          ) : (
+            <CheckoutLink />
+          )}
+
+          {showViewCartLink && (
+            <Link
+              href="/cart"
+              className="flex w-full items-center justify-center rounded-2xl border border-primary/20 px-4 py-2.5 text-sm font-bold text-primary"
+            >
+              View full cart
+            </Link>
+          )}
+        </div>
+      )}
+    </>
+  );
+}

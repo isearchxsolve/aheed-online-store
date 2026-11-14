@@ -1,0 +1,488 @@
+import type { getPrisma } from "@/lib/db";
+import { isUniqueViolation } from "@/lib/repositories/prisma-errors";
+import {
+  evaluateCode,
+  normaliseCode,
+  type CodeRefusalReason,
+  type DiscountKind,
+} from "@/lib/discounts";
+import { isSelfReferral } from "@/lib/referrals";
+import { getLoyaltyConfig } from "@/lib/repositories/loyalty";
+
+/**
+ * Discount-code read/write path (P5b, #145) — the ONLY DB access for codes.
+ * Pages, components and feature actions go through here (ADR-004 slice-2
+ * no-direct-Prisma guard).
+ *
+ * Every function that writes takes `prisma` (or a transaction client) and
+ * `vendorId` as EXPLICIT arguments and reads no request context, matching
+ * `placeOrder(prisma, vendorId, input)` and `spendPoints(tx, vendorId, …)`.
+ * That is a testability requirement, not a style choice: this slice's
+ * most important properties are its two concurrency guarantees, and neither can
+ * be proven at all if the only entry point needs a live Workers request.
+ */
+
+type Db = ReturnType<typeof getPrisma>;
+type Tx = Parameters<Parameters<Db["$transaction"]>[0]>[0];
+type AnyDb = Db | Tx;
+
+/**
+ * Thrown when the database refuses a claim that passed every pre-check — today,
+ * only the per-customer race losing at `@@unique([codeId, userId, seq])`.
+ *
+ * It exists so `lib/repositories/orders.ts` can translate a Prisma unique
+ * violation into a shopper-facing `CheckoutError` without this module importing
+ * `CheckoutError` and creating an import cycle.
+ */
+export class DiscountClaimError extends Error {
+  constructor(readonly reason: CodeRefusalReason) {
+    super(`Discount code claim refused: ${reason}`);
+    this.name = "DiscountClaimError";
+  }
+}
+
+export interface ClaimedCode {
+  codeId: string;
+  discountPence: number;
+  /** This shopper's zero-based use index — becomes DiscountRedemption.seq. */
+  seq: number;
+}
+
+export type ClaimResult =
+  { ok: true; claim: ClaimedCode } | { ok: false; reason: CodeRefusalReason };
+
+/**
+ * #967 — what `previewCode` concludes: the same answer `claimCode` would reach,
+ * without reserving anything.
+ */
+export type PreviewResult = ({ ok: true } & ClaimedCode) | { ok: false; reason: CodeRefusalReason };
+
+export interface ClaimCodeInput {
+  code: string;
+  userId: string | null;
+  /** PRE-discount subtotal — see lib/discounts.ts on why. */
+  subtotalPence: number;
+  deliveryFeePence: number;
+  now?: Date;
+}
+
+/**
+ * #967 — whether a code applies to this checkout and for how much, WITHOUT
+ * reserving a use. Reads only: the code row and, for a signed-in shopper, their
+ * redemption rows. The checkout page calls it for a code pre-filled from the
+ * referral cookie, so the total it shows is the total `claimCode` will reach.
+ *
+ * `claimCode` calls this for its own decision, so the two share one lookup and
+ * one evaluation. A preview is a snapshot, not a hold: another checkout can
+ * still take the last use before this one submits, and `claimCode`'s
+ * compare-and-set below is what decides that.
+ */
+export async function previewCode(
+  db: AnyDb,
+  vendorId: string,
+  input: ClaimCodeInput,
+): Promise<PreviewResult> {
+  const code = normaliseCode(input.code);
+  if (code === "") return { ok: false, reason: "UNKNOWN" };
+
+  const row = await db.discountCode.findUnique({
+    where: { vendorId_code: { vendorId, code } },
+    select: {
+      id: true,
+      kind: true,
+      value: true,
+      minSubtotalPence: true,
+      startsAt: true,
+      endsAt: true,
+      remainingRedemptions: true,
+      maxPerCustomer: true,
+      isActive: true,
+      referrerUserId: true,
+    },
+  });
+  // A code belonging to another vendor is indistinguishable from one that does
+  // not exist — the vendor is in the lookup key, not checked afterwards.
+  if (!row) return { ok: false, reason: "UNKNOWN" };
+
+  // #1101 — a referral code on a vendor whose loyalty scheme is off. The referral scheme is part of
+  // loyalty, so with it off nothing the shopper can do makes the code usable — including it being
+  // their own — and this outranks `OWN_REFERRAL_CODE` below. Read only for a referral code, so a
+  // staff code costs no extra query; a vendor with no config row falls back to loyalty off.
+  if (row.referrerUserId && !(await getLoyaltyConfig(db, vendorId)).loyaltyEnabled) {
+    return { ok: false, reason: "REFERRALS_UNAVAILABLE" };
+  }
+
+  // #972 — a shopper's own referral code. Checked before `evaluateCode` because nothing the
+  // shopper can do fixes it, so it outranks every other reason. #987 — the owner is the row's
+  // `referrerUserId` foreign key, set only on referral codes, so no `REF-` shape check is needed and
+  // the free-text `description` (where the owner used to be parsed from) is no longer read: a staff
+  // code whose description happens to name a user is untouched.
+  if (isSelfReferral(row.referrerUserId, input.userId)) {
+    return { ok: false, reason: "OWN_REFERRAL_CODE" };
+  }
+
+  // Two DIFFERENT numbers, split apart by #696. They were one `count` until a
+  // reversed-but-retained redemption row existed, at which point one value could
+  // not serve both jobs:
+  //
+  //   seq   — the slot this row will occupy in @@unique([codeId, userId, seq]).
+  //           That index is the real per-customer concurrency control (see
+  //           recordCodeRedemption below), so seq must never be handed out
+  //           twice. It is allocated over ALL rows including reversed ones,
+  //           because a reversed row keeps its slot.
+  //   uses  — how many times this customer has actually USED the code, which is
+  //           what the cap is about. A reversed use was given back, so it does
+  //           not count here.
+  //
+  // With no rows at all both are 0, exactly as the single count was, so nothing
+  // changes for a first-time claim. Only counted when there is an identity to
+  // count against — a guest with a capped code is refused by evaluateCode before
+  // either number could matter.
+  const { seq, uses } =
+    input.userId === null
+      ? { seq: 0, uses: 0 }
+      : await (async () => {
+          const [highest, used] = await Promise.all([
+            db.discountRedemption.findFirst({
+              where: { vendorId, codeId: row.id, userId: input.userId },
+              orderBy: { seq: "desc" },
+              select: { seq: true },
+            }),
+            db.discountRedemption.count({
+              where: { vendorId, codeId: row.id, userId: input.userId, reversedAt: null },
+            }),
+          ]);
+          return { seq: (highest?.seq ?? -1) + 1, uses: used };
+        })();
+
+  const evaluation = evaluateCode({
+    kind: row.kind as DiscountKind,
+    value: row.value,
+    minSubtotalPence: row.minSubtotalPence,
+    startsAt: row.startsAt,
+    endsAt: row.endsAt,
+    remainingRedemptions: row.remainingRedemptions,
+    maxPerCustomer: row.maxPerCustomer,
+    isActive: row.isActive,
+    subtotalPence: input.subtotalPence,
+    deliveryFeePence: input.deliveryFeePence,
+    userId: input.userId,
+    customerUseCount: uses,
+    now: input.now ?? new Date(),
+  });
+  if (!evaluation.ok) return { ok: false, reason: evaluation.reason };
+
+  return { ok: true, codeId: row.id, discountPence: evaluation.discountPence, seq };
+}
+
+/**
+ * Reserve one use of a code for this checkout. Call INSIDE `placeOrder`'s
+ * transaction, before the Order row is written, so an order can never carry a
+ * discount whose use was not actually reserved.
+ *
+ * The reservation is a compare-and-set on a counter that runs DOWN — the same
+ * technique as P3b's `quantity: { gte: qty }` stock decrement and P5a's
+ * `balancePoints: { gte: n }`. `remainingRedemptions` counts down rather than up
+ * because `usedCount < maxRedemptions` is a column-to-column comparison Prisma
+ * cannot express in a `where`, and raw SQL is forbidden in application code.
+ *
+ * `null` means unlimited: the OR admits it, and `decrement` leaves it null,
+ * because Postgres arithmetic on NULL is NULL.
+ */
+export async function claimCode(
+  tx: AnyDb,
+  vendorId: string,
+  input: ClaimCodeInput,
+): Promise<ClaimResult> {
+  // #967 — the lookup, the per-customer counts and the evaluation are
+  // `previewCode`'s, shared verbatim, so what checkout shows before submit and
+  // what this claim decides cannot drift apart. Only the reservation is here.
+  const preview = await previewCode(tx, vendorId, input);
+  if (!preview.ok) return preview;
+
+  const { count } = await tx.discountCode.updateMany({
+    where: {
+      id: preview.codeId,
+      vendorId,
+      isActive: true,
+      OR: [{ remainingRedemptions: null }, { remainingRedemptions: { gt: 0 } }],
+    },
+    data: { remainingRedemptions: { decrement: 1 } },
+  });
+  // Someone else took the last use between the read and here. The evaluation
+  // above saw stock; this is the check that is actually authoritative.
+  if (count === 0) return { ok: false, reason: "USAGE_LIMIT_REACHED" };
+
+  return {
+    ok: true,
+    claim: { codeId: preview.codeId, discountPence: preview.discountPence, seq: preview.seq },
+  };
+}
+
+/**
+ * The second half of `claimCode` — the record, once the order has an id.
+ *
+ * This is where the PER-CUSTOMER cap is actually enforced. Two concurrent
+ * checkouts by the same shopper both read `seq = 0` above, and
+ * `@@unique([codeId, userId, seq])` refuses the second here, rolling back its
+ * whole transaction (including its `remainingRedemptions` decrement). A
+ * count-then-write would have let both through.
+ *
+ * #696 changed how `seq` is CHOSEN (max+1 rather than count, so a reversed row
+ * keeps its slot) and deliberately did not change anything about this guarantee:
+ * two concurrent claims still resolve to the same `seq` and the index still
+ * refuses the loser. `tests/discounts-repository.test.ts` pins that, since
+ * before #696 it was asserted only by this comment.
+ */
+export async function recordCodeRedemption(
+  tx: AnyDb,
+  vendorId: string,
+  input: {
+    codeId: string;
+    orderId: string;
+    userId: string | null;
+    seq: number;
+    amountPence: number;
+  },
+): Promise<void> {
+  try {
+    await tx.discountRedemption.create({
+      data: {
+        vendorId,
+        codeId: input.codeId,
+        orderId: input.orderId,
+        userId: input.userId,
+        seq: input.seq,
+        amountPence: input.amountPence,
+      },
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new DiscountClaimError("CUSTOMER_LIMIT_REACHED");
+    throw error;
+  }
+}
+
+/**
+ * Give back the code use held by an order that is being cancelled. Call INSIDE
+ * `releaseOrder`'s transaction, beside `reverseRedemption`.
+ *
+ * Without this, every abandoned checkout permanently burns a use and a 100-use
+ * launch code dies quietly without a single paid order.
+ *
+ * This DELETES the redemption row rather than writing a reversal beside it, and
+ * the asymmetry with the loyalty ledger is deliberate. That ledger is append-only
+ * because it is a financial audit trail of a balance persisting between orders; a
+ * discount on a never-paid order is not a financial event, and the CANCELLED
+ * Order row is itself the record of what happened. Deleting also frees the
+ * shopper's `seq` slot, so an abandoned checkout does not consume one of their
+ * per-customer uses — which a retained reversal row would, unless the count
+ * learned to skip reversed rows, at which point `seq` would collide with the very
+ * row it was told to ignore.
+ *
+ * Idempotent: the row is gone after the first call, so a second finds nothing and
+ * increments nothing.
+ */
+export async function releaseCodeRedemption(
+  tx: AnyDb,
+  vendorId: string,
+  orderId: string,
+): Promise<number> {
+  // findFirst rather than findUnique so `vendorId` is in the WHERE — orderId
+  // alone is unique, but a vendor-less read has no place in this layer.
+  const redemption = await tx.discountRedemption.findFirst({
+    where: { orderId, vendorId },
+    select: { id: true, codeId: true },
+  });
+  if (!redemption) return 0;
+
+  const { count } = await tx.discountRedemption.deleteMany({
+    where: { id: redemption.id, vendorId },
+  });
+  if (count === 0) return 0;
+
+  // increment on a NULL column leaves it NULL, so an unlimited code stays
+  // unlimited without a branch.
+  await tx.discountCode.updateMany({
+    where: { id: redemption.codeId, vendorId },
+    data: { remainingRedemptions: { increment: 1 } },
+  });
+
+  return count;
+}
+
+/**
+ * Give back the code use held by a PAID order that staff are cancelling (P9.2,
+ * #696 — the reversal half of #151). Call INSIDE `cancelConfirmedOrder`'s
+ * transaction, beside `reverseEarn` and `reverseRedemption`.
+ *
+ * The difference from `releaseCodeRedemption` above is one line of behaviour and
+ * the whole of the reasoning: this STAMPS the row, that one DELETES it.
+ *
+ * `releaseCodeRedemption`'s argument for deleting is that "a discount on a
+ * never-paid order is not a financial event, and the CANCELLED Order row is
+ * itself the record of what happened". Both halves of that stop holding once the
+ * order was actually paid for. `Order.discountPence` survives on the cancelled
+ * order and is money that genuinely came off a real payment — and since no
+ * refund is issued (#606 owns money movement), the customer really was charged
+ * the discounted amount. Deleting the redemption would leave that number with
+ * nothing in the database explaining where it came from, which is the precise
+ * argument `LoyaltyLedgerEntry` makes for being append-only.
+ *
+ * The code's `remainingRedemptions` is still given back, and the customer's
+ * per-customer cap still stops counting this use — `claimCode` above counts only
+ * rows with `reversedAt: null` for that. What the retained row keeps is its
+ * `seq`, which is why allocation there had to stop being a count.
+ *
+ * Idempotent on `reversedAt`: a second call finds it already set, returns 0 and
+ * does not increment the code a second time. The guarded `updateMany` is what
+ * makes that race-safe rather than the read above it — `count === 0` means
+ * another transaction got there first, the same technique `releaseOrder` uses.
+ */
+export async function reverseCodeRedemptionForPaidOrder(
+  tx: AnyDb,
+  vendorId: string,
+  orderId: string,
+  now: Date = new Date(),
+): Promise<number> {
+  // findFirst rather than findUnique so `vendorId` is in the WHERE — orderId
+  // alone is unique, but a vendor-less read has no place in this layer.
+  const redemption = await tx.discountRedemption.findFirst({
+    where: { orderId, vendorId, reversedAt: null },
+    select: { id: true, codeId: true },
+  });
+  if (!redemption) return 0;
+
+  const { count } = await tx.discountRedemption.updateMany({
+    where: { id: redemption.id, vendorId, reversedAt: null },
+    data: { reversedAt: now },
+  });
+  if (count === 0) return 0;
+
+  await tx.discountCode.updateMany({
+    where: { id: redemption.codeId, vendorId },
+    data: { remainingRedemptions: { increment: 1 } },
+  });
+
+  return count;
+}
+
+// ---- admin surface (/staff/discounts) ---------------------------------------
+
+export interface CodeListRow {
+  id: string;
+  code: string;
+  description: string | null;
+  kind: DiscountKind;
+  value: number;
+  minSubtotalPence: number;
+  startsAt: Date;
+  endsAt: Date | null;
+  remainingRedemptions: number | null;
+  maxPerCustomer: number | null;
+  isActive: boolean;
+  /** DERIVED from DiscountRedemption — there is no stored counter to disagree with. */
+  redemptionCount: number;
+}
+
+export async function listCodes(db: AnyDb, vendorId: string): Promise<CodeListRow[]> {
+  const rows = await db.discountCode.findMany({
+    where: { vendorId },
+    orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
+    select: {
+      id: true,
+      code: true,
+      description: true,
+      kind: true,
+      value: true,
+      minSubtotalPence: true,
+      startsAt: true,
+      endsAt: true,
+      remainingRedemptions: true,
+      maxPerCustomer: true,
+      isActive: true,
+      _count: { select: { redemptions: true } },
+    },
+  });
+  return rows.map(({ _count, ...row }) => ({
+    ...row,
+    kind: row.kind as DiscountKind,
+    redemptionCount: _count.redemptions,
+  }));
+}
+
+export interface CreateCodeInput {
+  code: string;
+  description: string | null;
+  kind: DiscountKind;
+  value: number;
+  minSubtotalPence: number;
+  startsAt: Date;
+  endsAt: Date | null;
+  remainingRedemptions: number | null;
+  maxPerCustomer: number | null;
+}
+
+/**
+ * `vendorId` is supplied by the caller from `requireVendorRole`, which resolves
+ * it from the request host — never from the submitted form.
+ */
+export async function createCode(
+  db: AnyDb,
+  vendorId: string,
+  input: CreateCodeInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await db.discountCode.create({
+      data: {
+        vendorId,
+        code: normaliseCode(input.code),
+        description: input.description,
+        kind: input.kind,
+        value: input.value,
+        minSubtotalPence: input.minSubtotalPence,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+        remainingRedemptions: input.remainingRedemptions,
+        maxPerCustomer: input.maxPerCustomer,
+      },
+    });
+    return { ok: true };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return { ok: false, error: "This store already has a code with that name." };
+    }
+    throw error;
+  }
+}
+
+/**
+ * The only post-creation change a code accepts. P5b ships no edit path: changing
+ * a live code's value would ask whether past orders re-price (they must not) and
+ * create a window where two shoppers used "the same code" at different rates.
+ * Deactivate and create a replacement instead.
+ */
+export async function deactivateCode(db: AnyDb, vendorId: string, codeId: string): Promise<number> {
+  const { count } = await db.discountCode.updateMany({
+    where: { id: codeId, vendorId },
+    data: { isActive: false },
+  });
+  return count;
+}
+
+/* The admin write wrappers `createCodeForVendor` / `deactivateCodeForVendor` used
+ * to sit here and resolved Prisma themselves. They now live in
+ * `lib/discounts-service.ts` (#409).
+ *
+ * Their old docstring argued the resolution belonged here because ADR-004 slice
+ * 2's ESLint guard forbids `@/lib/db` in the feature layer, so an action cannot
+ * hand a client in. That premise is correct and is exactly why the wrappers
+ * moved: `lib/` is outside the guard's scope, so the sibling service is where a
+ * caller-supplied client can legally be resolved. It also claimed no property
+ * here needed proving from a plain script — but a self-resolving export cannot
+ * run in one at all, so the choice was never between "provable" and "not worth
+ * proving"; it was between provable and impossible.
+ */
+
+/* The request-scoped read facade that used to sit here now lives in
+ * `lib/discounts-service.ts` (#252) — it resolves the current vendor from
+ * request context, which this module deliberately never does. */

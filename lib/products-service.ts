@@ -1,0 +1,344 @@
+import { headers } from "next/headers";
+import { getPrisma, getPrismaWs } from "@/lib/db";
+import { getCurrentVendorId } from "@/lib/tenant";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { calendarDayInZone, STORE_TIMEZONE } from "@/lib/local-datetime";
+import { currentRestockDay } from "@/lib/restock";
+import type { GeneratedImageSource } from "@/lib/product-image";
+import { recordSearchQuery } from "@/lib/repositories/search-query-log";
+import { listApprovedAliasMap } from "@/lib/repositories/search-synonyms";
+import {
+  addProductImage as addProductImageRepo,
+  approveProductImageRow as approveProductImageRowRepo,
+  createProductForVendor as createProductForVendorRepo,
+  getAvailableFacets,
+  getProductBySlug,
+  getProductForAdmin as getProductForAdminRepo,
+  getProductsWithoutImages as getProductsWithoutImagesRepo,
+  listActiveProductSlugs,
+  listCategorySpotlights,
+  listInventoryForStaff as listInventoryForStaffRepo,
+  listOfferProducts as listOfferProductsRepo,
+  listProducts,
+  listProductsByCategory,
+  listProductsForAdmin as listProductsForAdminRepo,
+  matchProductListTerms,
+  promoteProductImage as promoteProductImageRepo,
+  quickUpdateInventory as quickUpdateInventoryRepo,
+  recordImageAttemptFailure as recordImageAttemptFailureRepo,
+  removeProductImage as removeProductImageRepo,
+  reorderProductImages as reorderProductImagesRepo,
+  saveGeneratedProductImage as saveGeneratedProductImageRepo,
+  searchProducts,
+  setPrimaryProductImage as setPrimaryProductImageRepo,
+  toggleProductImageConfirmedPhoto as toggleProductImageConfirmedPhotoRepo,
+  suggestProducts as suggestProductsRepo,
+  updateProductForVendor as updateProductForVendorRepo,
+  type AdminProductDetail,
+  type AdminProductPage,
+  type CatalogueWriteResult,
+  type ProductPage,
+  type ProductRepository,
+  type ProductWriteInput,
+  type RemoveImageResult,
+  type StaffInventoryPage,
+} from "@/lib/repositories/products";
+
+/**
+ * Same extraction as `app/(storefront)/orders/lookup/page.tsx`'s `resolveClientIp()`, duplicated
+ * rather than shared — matching that file's own reasoning (Cloudflare always sets
+ * `cf-connecting-ip` on a real request; `x-forwarded-for` is the local-dev fallback) and this
+ * repo's existing convention of a few duplicated lines over a new shared helper nobody asked for.
+ */
+async function resolveClientIp(): Promise<string> {
+  const h = await headers();
+  return h.get("cf-connecting-ip") ?? h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+}
+
+/**
+ * #876 — hides an expected restock day that has already passed. "Passed" is judged against the
+ * VENDOR's today, which only request scope can know: a client component would use the shopper's
+ * clock, and the repository may not read request context. `getCurrentVendorProfile()` is
+ * `React.cache`d and already called by the storefront layout, so this adds no query.
+ */
+async function vendorToday(): Promise<string> {
+  const profile = await getCurrentVendorProfile();
+  return calendarDayInZone(new Date(), profile?.timezone ?? STORE_TIMEZONE);
+}
+
+function withCurrentRestock<T extends { expectedRestockDay: string | null }>(
+  product: T,
+  today: string,
+): T {
+  return { ...product, expectedRestockDay: currentRestockDay(product.expectedRestockDay, today) };
+}
+
+async function withCurrentRestockPage(page: ProductPage): Promise<ProductPage> {
+  const today = await vendorToday();
+  return { ...page, items: page.items.map((item) => withCurrentRestock(item, today)) };
+}
+
+/**
+ * Request-scoped wrapper around `lib/repositories/products.ts`'s pure reads
+ * (#252) — resolves a live Prisma client and the current vendor, both of which
+ * need a real Workers request.
+ *
+ * Lives beside, not inside, `lib/repositories/`, matching
+ * `lib/data-rights-service.ts` and `lib/categories-service.ts`.
+ *
+ * **This docstring used to claim that the repository module's admin write path
+ * was already exercisable from a plain `tsx` script. It was false for all 14 of
+ * those exports, which resolved their own client** and so could not run in Node
+ * at all — `lib/db.ts` builds from `@prisma/client/wasm`, whose query compiler
+ * Node cannot load. #411/#412 made the claim true; it is left recorded here
+ * because the same sentence was confidently wrong in four separate docstrings
+ * (`customers.ts`, `reports.ts`, `discounts-service.ts` and this one), which is
+ * the evidence that nobody had ever checked it.
+ *
+ * `tests/repository-purity.test.ts` enforces the request-context half of the
+ * rule; `tests/repository-client-injection.test.ts` the client half.
+ *
+ * Constructed fresh per call, never cached across requests.
+ */
+export function getProductRepository(): ProductRepository {
+  const prisma = getPrisma();
+  // Resolve the current vendor once per repository instance (request-scoped);
+  // never cached across requests. Every query below is scoped to it (ADR-004 slice 2).
+  let vendorIdPromise: Promise<string> | undefined;
+  const vendorId = () => (vendorIdPromise ??= getCurrentVendorId());
+
+  return {
+    async listByCategory(categoryIds, opts) {
+      return withCurrentRestockPage(
+        await listProductsByCategory(prisma, await vendorId(), categoryIds, opts),
+      );
+    },
+
+    async list(opts) {
+      return withCurrentRestockPage(await listProducts(prisma, await vendorId(), opts));
+    },
+
+    async listActiveSlugs() {
+      // #955 — no `withCurrentRestockPage`: there are no cards to decorate, only slugs.
+      return listActiveProductSlugs(prisma, await vendorId());
+    },
+
+    async search(query, opts) {
+      const result = await searchProducts(prisma, await vendorId(), query, opts);
+      // #565 — logged only for the FIRST page of a search submission, not a "Next page" click:
+      // the ladder is recomputed identically on every call regardless, but a shopper paginating
+      // an already-successful search is not a gap worth counting toward the query log's purpose.
+      if (opts.cursor === undefined) {
+        await recordSearchQuery(
+          prisma,
+          await vendorId(),
+          await resolveClientIp(),
+          query,
+          result.directResultCount,
+          result.recovery?.rung ?? null,
+          result.directNameMatch,
+        );
+      }
+      return withCurrentRestockPage(result);
+    },
+
+    async getBySlug(slug) {
+      const product = await getProductBySlug(prisma, await vendorId(), slug);
+      return product === null ? null : withCurrentRestock(product, await vendorToday());
+    },
+
+    async availableFacets(context) {
+      return getAvailableFacets(prisma, await vendorId(), context);
+    },
+
+    async suggestProducts(query, candidateLimit) {
+      return suggestProductsRepo(prisma, await vendorId(), query, candidateLimit);
+    },
+
+    async matchListTerms(terms) {
+      return matchProductListTerms(prisma, await vendorId(), terms);
+    },
+
+    async synonymAliasMap() {
+      return listApprovedAliasMap(prisma, await vendorId());
+    },
+
+    async categorySpotlights(categoryIds) {
+      return listCategorySpotlights(prisma, await vendorId(), categoryIds);
+    },
+
+    async listOfferProducts(take) {
+      const [items, today] = await Promise.all([
+        listOfferProductsRepo(prisma, await vendorId(), take),
+        vendorToday(),
+      ]);
+      return items.map((entry) => ({
+        ...entry,
+        product: withCurrentRestock(entry.product, today),
+      }));
+    },
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Admin catalogue, inventory and product-image entry points (#412)
+ *
+ * Repository names are kept so a call site moves by changing its import path
+ * alone; the originals are aliased `…Repo` above. `vendorId` is a parameter,
+ * not resolved here — every caller holds an authoritative one from
+ * `requireVendorRole`. Each function resolves its client per call, inside the
+ * body.
+ *
+ * WHICH client is not a free choice. The seven that open an interactive
+ * transaction take `getPrismaWs()`; `PrismaNeonHttp` cannot execute one at all,
+ * and `updateMany`/`createMany` fail over HTTP even outside an explicit
+ * transaction because the query compiler opens one itself (#382).
+ * `tests/repository-transaction-safety.test.ts` is the guard on this.
+ * ------------------------------------------------------------------------- */
+
+export async function listInventoryForStaff(
+  vendorId: string,
+  options: { take: number; cursor?: string; query?: string },
+): Promise<StaffInventoryPage> {
+  return listInventoryForStaffRepo(getPrisma(), vendorId, options);
+}
+
+export async function listProductsForAdmin(
+  vendorId: string,
+  options: Parameters<typeof listProductsForAdminRepo>[2],
+): Promise<AdminProductPage> {
+  return listProductsForAdminRepo(getPrisma(), vendorId, options);
+}
+
+export async function getProductForAdmin(
+  vendorId: string,
+  id: string,
+): Promise<AdminProductDetail | null> {
+  return getProductForAdminRepo(getPrisma(), vendorId, id);
+}
+
+/**
+ * #523 — record one failed image-pipeline attempt, so the bounded selection can
+ * eventually give up on a product Workers AI permanently refuses.
+ *
+ * Wraps the repository function under its own name so the admin route and
+ * `scripts/fill-product-images.ts` call the same thing by the same name through
+ * their respective clients (#411/#412's convention).
+ */
+export async function recordImageAttemptFailure(
+  vendorId: string,
+  productId: string,
+): Promise<void> {
+  return recordImageAttemptFailureRepo(getPrisma(), vendorId, productId);
+}
+
+export async function saveGeneratedProductImage(
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+  needsReview: boolean,
+  source: GeneratedImageSource,
+): Promise<void> {
+  return saveGeneratedProductImageRepo(
+    getPrisma(),
+    vendorId,
+    productId,
+    storageKey,
+    alt,
+    needsReview,
+    source,
+  );
+}
+
+/** #900 (R8) — singular update, no nested writes: HTTP client. */
+export async function toggleProductImageConfirmedPhoto(
+  vendorId: string,
+  productId: string,
+  imageId: string,
+) {
+  return toggleProductImageConfirmedPhotoRepo(getPrisma(), vendorId, productId, imageId);
+}
+
+export async function getProductsWithoutImages(vendorId: string, limit: number) {
+  return getProductsWithoutImagesRepo(getPrisma(), vendorId, limit);
+}
+
+export async function approveProductImageRow(
+  vendorId: string,
+  productId: string,
+): Promise<CatalogueWriteResult> {
+  return approveProductImageRowRepo(getPrisma(), vendorId, productId);
+}
+
+/* --- transaction-bearing writes: WebSocket client only (#382) ------------- */
+
+/**
+ * #878 — a singular `product.create` with NESTED inventory (and tier) creates opens an implicit
+ * transaction, so it belongs here. Over `getPrisma()` it failed on every call with "Transactions
+ * are not supported in HTTP mode" (reproduced under `npm run preview`, 2026-09-23).
+ */
+export async function createProductForVendor(
+  vendorId: string,
+  input: ProductWriteInput,
+): Promise<CatalogueWriteResult> {
+  return createProductForVendorRepo(getPrismaWs(), vendorId, input);
+}
+
+export async function updateProductForVendor(
+  vendorId: string,
+  id: string,
+  input: ProductWriteInput,
+): Promise<CatalogueWriteResult> {
+  return updateProductForVendorRepo(getPrismaWs(), vendorId, id, input);
+}
+
+export async function setPrimaryProductImage(
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+): Promise<CatalogueWriteResult> {
+  return setPrimaryProductImageRepo(getPrismaWs(), vendorId, productId, storageKey, alt);
+}
+
+export async function addProductImage(
+  vendorId: string,
+  productId: string,
+  storageKey: string,
+  alt: string,
+): Promise<CatalogueWriteResult> {
+  return addProductImageRepo(getPrismaWs(), vendorId, productId, storageKey, alt);
+}
+
+export async function promoteProductImage(
+  vendorId: string,
+  productId: string,
+  imageId: string,
+): Promise<CatalogueWriteResult> {
+  return promoteProductImageRepo(getPrismaWs(), vendorId, productId, imageId);
+}
+
+export async function removeProductImage(
+  vendorId: string,
+  productId: string,
+  imageId: string,
+): Promise<RemoveImageResult> {
+  return removeProductImageRepo(getPrismaWs(), vendorId, productId, imageId);
+}
+
+export async function reorderProductImages(
+  vendorId: string,
+  productId: string,
+  orderedImageIds: string[],
+): Promise<CatalogueWriteResult> {
+  return reorderProductImagesRepo(getPrismaWs(), vendorId, productId, orderedImageIds);
+}
+
+export async function quickUpdateInventory(
+  vendorId: string,
+  productId: string,
+  data: { quantity?: number; isActive?: boolean },
+): Promise<CatalogueWriteResult> {
+  return quickUpdateInventoryRepo(getPrismaWs(), vendorId, productId, data);
+}

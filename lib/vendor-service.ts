@@ -1,0 +1,157 @@
+import { cache } from "react";
+import { getPrisma, getPrismaWs } from "@/lib/db";
+import { getCurrentVendorIdOrNull } from "@/lib/tenant";
+import {
+  DEFAULT_SENDER_NAME,
+  applyThemeToVendor as applyThemeToVendorRepo,
+  fetchVendorProfile as fetchVendorProfileRepo,
+  getVendorBranding as getVendorBrandingRepo,
+  getVendorConfig as getVendorConfigRepo,
+  listThemes as listThemesRepo,
+  listVendorThemes as listVendorThemesRepo,
+  replaceVendorFooterHours as replaceVendorFooterHoursRepo,
+  saveVendorHoursOverride as saveVendorHoursOverrideRepo,
+  deleteVendorHoursOverride as deleteVendorHoursOverrideRepo,
+  saveVendorTheme as saveVendorThemeRepo,
+  updateVendorMarkKey as updateVendorMarkKeyRepo,
+  updateVendorLogoKey as updateVendorLogoKeyRepo,
+  updateVendorWhatsappQrKey as updateVendorWhatsappQrKeyRepo,
+  updateVendorStorefrontConfig as updateVendorStorefrontConfigRepo,
+  type BrandPrimitives,
+  type VendorProfile,
+  type VendorFooterHoursInput,
+  type VendorStorefrontConfigInput,
+} from "@/lib/repositories/vendor";
+import type { HoursOverrideRow } from "@/lib/footer-hours";
+
+/**
+ * Request-scoped vendor-profile accessors (#252) — the two functions that
+ * resolve WHICH vendor the current request belongs to, split out of
+ * `lib/repositories/vendor.ts` so every export there takes `vendorId`
+ * explicitly and a plain `tsx` script can import that module in real Node.
+ *
+ * `fetchVendorProfile(vendorId)` stays in the repository and is what both of
+ * these delegate to. `tests/repository-purity.test.ts` enforces the location.
+ */
+
+/**
+ * The current request's vendor profile, or `null` when the host resolves to no
+ * vendor (the storefront layout redirects those to /coming-soon). Memoized per
+ * request — one query shared across layout/header/page/metadata.
+ */
+export const getCurrentVendorProfile = cache(async (): Promise<VendorProfile | null> => {
+  const vendorId = await getCurrentVendorIdOrNull();
+  return vendorId ? fetchVendorProfileRepo(getPrisma(), vendorId) : null;
+});
+
+/**
+ * Vendor sender name for transactional email subjects (lib/auth.ts). Deliberately
+ * NOT the `cache()`d accessor: it runs inside Better Auth's route-handler callback,
+ * not a React render. Falls back to the platform default when unresolved.
+ */
+export async function getCurrentVendorSenderName(): Promise<string> {
+  const vendorId = await getCurrentVendorIdOrNull();
+  if (!vendorId) return DEFAULT_SENDER_NAME;
+  return (await fetchVendorProfileRepo(getPrisma(), vendorId)).senderName;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Vendor entry points taking an explicit vendorId (#411)
+ *
+ * Distinct from the two accessors above, which resolve the vendor from the
+ * request host because their callers genuinely do not know it. These four have
+ * callers that do: `requireVendorRole` on the staff storefront page, and
+ * `order.vendorId` on the two transactional-email paths.
+ *
+ * Repository names are kept so a call site moves by changing its import path
+ * alone; the originals are aliased `…Repo` above.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The vendor profile for a KNOWN vendor — used by the confirmation and
+ * status-email paths, which hold `order.vendorId` and run outside a React
+ * render, so neither the host lookup nor `cache()` applies.
+ */
+export async function fetchVendorProfile(vendorId: string): Promise<VendorProfile> {
+  return fetchVendorProfileRepo(getPrisma(), vendorId);
+}
+
+export async function getVendorConfig(vendorId: string) {
+  return getVendorConfigRepo(getPrisma(), vendorId);
+}
+
+export async function getVendorBranding(vendorId: string) {
+  return getVendorBrandingRepo(getPrisma(), vendorId);
+}
+
+export async function getVendorLocation(vendorId: string) {
+  const { getVendorLocation: getVendorLocationRepo } = await import("@/lib/repositories/vendor");
+  return getVendorLocationRepo(getPrisma(), vendorId);
+}
+
+export async function updateVendorLogoKey(vendorId: string, logoStorageKey: string) {
+  return updateVendorLogoKeyRepo(getPrisma(), vendorId, logoStorageKey);
+}
+
+export async function updateVendorMarkKey(vendorId: string, markStorageKey: string) {
+  return updateVendorMarkKeyRepo(getPrisma(), vendorId, markStorageKey);
+}
+
+export async function updateVendorWhatsappQrKey(
+  vendorId: string,
+  whatsappCommunityQrKey: string | null,
+) {
+  return updateVendorWhatsappQrKeyRepo(getPrisma(), vendorId, whatsappCommunityQrKey);
+}
+
+/**
+ * `getPrismaWs()`, not `getPrisma()`: this opens an interactive transaction so
+ * the config and branding rows commit together, and the HTTP adapter cannot
+ * execute one at all (#382).
+ */
+export async function updateVendorStorefrontConfig(
+  vendorId: string,
+  data: VendorStorefrontConfigInput,
+) {
+  return updateVendorStorefrontConfigRepo(getPrismaWs(), vendorId, data);
+}
+
+/**
+ * #1055 — `getPrismaWs()` for the same reason as above: the replace is an interactive transaction
+ * carrying `createMany`, neither of which the HTTP adapter can run.
+ */
+export async function replaceVendorFooterHours(vendorId: string, data: VendorFooterHoursInput) {
+  return replaceVendorFooterHoursRepo(getPrismaWs(), vendorId, data);
+}
+
+/** #1060 — HTTP client: prune, count and `upsert` open no interactive transaction. */
+export async function saveVendorHoursOverride(
+  vendorId: string,
+  today: string,
+  row: HoursOverrideRow,
+) {
+  return saveVendorHoursOverrideRepo(getPrisma(), vendorId, today, row);
+}
+
+/** #1060 — `deleteMany` scoped by vendor, which the HTTP client runs fine. */
+export async function deleteVendorHoursOverride(vendorId: string, id: string) {
+  return deleteVendorHoursOverrideRepo(getPrisma(), vendorId, id);
+}
+
+/** The seeded theme catalogue (#75), for the `/staff/storefront` picker. */
+export async function listThemes() {
+  return listThemesRepo(getPrisma());
+}
+
+export async function listVendorThemes(vendorId: string) {
+  return listVendorThemesRepo(getPrisma(), vendorId);
+}
+
+export async function saveVendorTheme(vendorId: string, name: string, primitives: BrandPrimitives) {
+  return saveVendorThemeRepo(getPrisma(), vendorId, name, primitives);
+}
+
+/** Copies a theme's eight brand primitives onto a vendor's `VendorBranding` row (#75, #714). */
+export async function applyVendorTheme(vendorId: string, themeRef: string) {
+  return applyThemeToVendorRepo(getPrisma(), vendorId, themeRef);
+}

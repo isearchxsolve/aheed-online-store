@@ -1,0 +1,414 @@
+import { describe, it, expect } from "vitest";
+import {
+  buildStaffTimeline,
+  buildTimeline,
+  canCancel,
+  canTransition,
+  formatOrderDate,
+  formatOrderDateTime,
+  isOrderStatus,
+  nextStatus,
+  orderStatusLabel,
+  ORDER_STATUSES,
+  paymentControlsFor,
+  REVENUE_STATUSES,
+  STAFF_QUEUE_STATUSES,
+  type StaffStatusEventInput,
+  type StatusEventInput,
+} from "@/lib/order-status";
+
+// lib/order-status.ts is deliberately pure — no lib/db import — so like
+// tests/cart.test.ts this needs no @prisma/client/wasm mocking.
+
+const ALL_STATUSES = [
+  "PENDING_PAYMENT",
+  "CONFIRMED",
+  "READY_FOR_COLLECTION",
+  "OUT_FOR_DELIVERY",
+  "DELIVERED",
+  "COLLECTED",
+  "CANCELLED",
+] as const;
+
+const at = (iso: string): Date => new Date(iso);
+const event = (status: string, iso: string): StatusEventInput => ({
+  status,
+  createdAt: at(iso),
+});
+
+describe("orderStatusLabel", () => {
+  it("gives every OrderStatus a distinct, non-empty customer-facing label", () => {
+    const labels = ALL_STATUSES.map(orderStatusLabel);
+    for (const label of labels) {
+      expect(label.length).toBeGreaterThan(0);
+    }
+    expect(new Set(labels).size).toBe(ALL_STATUSES.length);
+  });
+
+  it("never leaks the raw enum name into customer copy", () => {
+    for (const status of ALL_STATUSES) {
+      expect(orderStatusLabel(status)).not.toBe(status);
+      expect(orderStatusLabel(status)).not.toContain("_");
+    }
+  });
+
+  it("falls back for an unrecognised status rather than throwing", () => {
+    const label = orderStatusLabel("NOT_A_STATUS");
+    expect(label.length).toBeGreaterThan(0);
+    expect(label).not.toBe("NOT_A_STATUS");
+  });
+});
+
+describe("buildTimeline", () => {
+  it("sorts ascending by date regardless of input order", () => {
+    const timeline = buildTimeline([
+      event("DELIVERED", "2026-08-03T10:00:00Z"),
+      event("PENDING_PAYMENT", "2026-08-01T10:00:00Z"),
+      event("OUT_FOR_DELIVERY", "2026-08-02T10:00:00Z"),
+    ]);
+
+    expect(timeline.map((entry) => entry.status)).toEqual([
+      "PENDING_PAYMENT",
+      "OUT_FOR_DELIVERY",
+      "DELIVERED",
+    ]);
+  });
+
+  it("labels each entry with orderStatusLabel", () => {
+    const timeline = buildTimeline([event("CONFIRMED", "2026-08-01T10:00:00Z")]);
+    expect(timeline[0].label).toBe(orderStatusLabel("CONFIRMED"));
+  });
+
+  it("collapses CONSECUTIVE duplicates, keeping the earliest occurrence", () => {
+    const timeline = buildTimeline([
+      event("CONFIRMED", "2026-08-01T10:00:00Z"),
+      event("CONFIRMED", "2026-08-01T11:00:00Z"),
+      event("DELIVERED", "2026-08-02T10:00:00Z"),
+    ]);
+
+    expect(timeline).toHaveLength(2);
+    expect(timeline[0].at).toEqual(at("2026-08-01T10:00:00Z"));
+  });
+
+  it("preserves NON-consecutive repeats — a re-confirmation is a real event", () => {
+    const timeline = buildTimeline([
+      event("CONFIRMED", "2026-08-01T10:00:00Z"),
+      event("CANCELLED", "2026-08-02T10:00:00Z"),
+      event("CONFIRMED", "2026-08-03T10:00:00Z"),
+    ]);
+
+    expect(timeline.map((entry) => entry.status)).toEqual(["CONFIRMED", "CANCELLED", "CONFIRMED"]);
+  });
+
+  it("returns an empty timeline for an order with no events", () => {
+    expect(buildTimeline([])).toEqual([]);
+  });
+
+  it("does not mutate the caller's array", () => {
+    const events = [
+      event("DELIVERED", "2026-08-02T10:00:00Z"),
+      event("CONFIRMED", "2026-08-01T10:00:00Z"),
+    ];
+    buildTimeline(events);
+    expect(events[0].status).toBe("DELIVERED");
+  });
+
+  it("carries no note field — an internal staff note cannot reach the customer", () => {
+    // P4b lets staff write OrderStatusEvent.note. Even when one is smuggled in
+    // on the input object, nothing about it survives into the timeline.
+    const smuggled = {
+      status: "OUT_FOR_DELIVERY",
+      createdAt: at("2026-08-01T10:00:00Z"),
+      note: "INTERNAL-DO-NOT-SHOW",
+    } as StatusEventInput;
+
+    const timeline = buildTimeline([smuggled]);
+
+    expect(Object.keys(timeline[0]).sort()).toEqual(["at", "label", "status"]);
+    expect(JSON.stringify(timeline)).not.toContain("INTERNAL-DO-NOT-SHOW");
+  });
+});
+
+describe("order date formatting", () => {
+  it("formats as en-GB day-month-year, never the ambiguous US order", () => {
+    // 11 August 2026 — a US format would render this as "8/11/2026".
+    expect(formatOrderDate(at("2026-08-11T09:30:00Z"))).toBe("11 August 2026");
+  });
+
+  it("includes the time when steps can share a day", () => {
+    const formatted = formatOrderDateTime(at("2026-08-11T09:30:00Z"));
+    expect(formatted).toContain("11 August 2026");
+    expect(formatted).toMatch(/\d{2}:\d{2}/);
+  });
+});
+
+// ---- Transition legality (P4b, #125) ---------------------------------------
+
+describe("canTransition", () => {
+  it("allows exactly the rungs of the staff ladder", () => {
+    expect(canTransition("CONFIRMED", "OUT_FOR_DELIVERY", "DELIVERY")).toBe(true);
+    expect(canTransition("OUT_FOR_DELIVERY", "DELIVERED", "DELIVERY")).toBe(true);
+    expect(canTransition("CONFIRMED", "READY_FOR_COLLECTION", "COLLECTION")).toBe(true);
+    expect(canTransition("READY_FOR_COLLECTION", "COLLECTED", "COLLECTION")).toBe(true);
+  });
+
+  it("allows NOTHING else across the whole matrix", () => {
+    const legal: string[] = [];
+    for (const from of ALL_STATUSES) {
+      for (const to of ALL_STATUSES) {
+        if (canTransition(from, to, "DELIVERY")) legal.push(`DELIVERY:${from}->${to}`);
+        if (canTransition(from, to, "COLLECTION")) legal.push(`COLLECTION:${from}->${to}`);
+      }
+    }
+
+    // Asserting the exact set, not just spot-checks: a future added status must
+    // not be able to widen the ladder silently.
+    legal.sort();
+    expect(legal).toEqual([
+      "COLLECTION:CONFIRMED->READY_FOR_COLLECTION",
+      "COLLECTION:READY_FOR_COLLECTION->COLLECTED",
+      "DELIVERY:CONFIRMED->OUT_FOR_DELIVERY",
+      "DELIVERY:OUT_FOR_DELIVERY->DELIVERED",
+    ]);
+  });
+
+  it("refuses to move an unpaid order at all", () => {
+    for (const to of ALL_STATUSES) {
+      expect(canTransition("PENDING_PAYMENT", to)).toBe(false);
+    }
+  });
+
+  it("treats DELIVERED and CANCELLED as terminal", () => {
+    for (const to of ALL_STATUSES) {
+      expect(canTransition("DELIVERED", to)).toBe(false);
+      expect(canTransition("CANCELLED", to)).toBe(false);
+    }
+  });
+
+  it("never skips a rung or moves backwards", () => {
+    expect(canTransition("CONFIRMED", "DELIVERED", "DELIVERY")).toBe(false);
+    expect(canTransition("OUT_FOR_DELIVERY", "CONFIRMED", "DELIVERY")).toBe(false);
+    expect(canTransition("DELIVERED", "OUT_FOR_DELIVERY", "DELIVERY")).toBe(false);
+
+    // Collection constraints
+    expect(canTransition("CONFIRMED", "COLLECTED", "COLLECTION")).toBe(false);
+    expect(canTransition("READY_FOR_COLLECTION", "CONFIRMED", "COLLECTION")).toBe(false);
+  });
+
+  it("permits nothing from or to an unrecognised status, without throwing", () => {
+    expect(canTransition("NOT_A_STATUS", "DELIVERED")).toBe(false);
+    expect(canTransition("CONFIRMED", "NOT_A_STATUS")).toBe(false);
+    expect(canTransition("", "")).toBe(false);
+  });
+});
+
+describe("nextStatus", () => {
+  it("returns the single legal successor, or null at the ends of the ladder for DELIVERY", () => {
+    expect(nextStatus("CONFIRMED", "DELIVERY")).toBe("OUT_FOR_DELIVERY");
+    expect(nextStatus("OUT_FOR_DELIVERY", "DELIVERY")).toBe("DELIVERED");
+    expect(nextStatus("PENDING_PAYMENT", "DELIVERY")).toBeNull();
+    expect(nextStatus("DELIVERED", "DELIVERY")).toBeNull();
+    expect(nextStatus("CANCELLED", "DELIVERY")).toBeNull();
+    expect(nextStatus("NOT_A_STATUS", "DELIVERY")).toBeNull();
+  });
+
+  it("returns the single legal successor, or null at the ends of the ladder for COLLECTION", () => {
+    expect(nextStatus("CONFIRMED", "COLLECTION")).toBe("READY_FOR_COLLECTION");
+    expect(nextStatus("READY_FOR_COLLECTION", "COLLECTION")).toBe("COLLECTED");
+    expect(nextStatus("PENDING_PAYMENT", "COLLECTION")).toBeNull();
+    expect(nextStatus("COLLECTED", "COLLECTION")).toBeNull();
+    expect(nextStatus("CANCELLED", "COLLECTION")).toBeNull();
+    expect(nextStatus("OUT_FOR_DELIVERY", "COLLECTION")).toBeNull();
+  });
+
+  it("cannot disagree with canTransition", () => {
+    for (const from of ALL_STATUSES) {
+      for (const method of ["DELIVERY", "COLLECTION"] as const) {
+        const next = nextStatus(from, method);
+        if (next === null) {
+          // Nothing legal from here at all.
+          expect(ALL_STATUSES.some((to) => canTransition(from, to, method))).toBe(false);
+        } else {
+          expect(canTransition(from, next, method)).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+describe("isOrderStatus", () => {
+  it("accepts every real status and rejects anything else", () => {
+    for (const status of ALL_STATUSES) {
+      expect(isOrderStatus(status)).toBe(true);
+    }
+    for (const forged of ["BANANA", "", "confirmed", "DELIVERED "]) {
+      expect(isOrderStatus(forged)).toBe(false);
+    }
+  });
+});
+
+// ---- Staff timeline (P6a, #158) --------------------------------------------
+
+describe("buildStaffTimeline", () => {
+  const staffEvent = (
+    status: string,
+    iso: string,
+    note: string | null = null,
+    actorName: string | null = null,
+  ): StaffStatusEventInput => ({ status, createdAt: at(iso), note, actorName });
+
+  it("orders events oldest first regardless of input order", () => {
+    const timeline = buildStaffTimeline([
+      staffEvent("DELIVERED", "2026-08-03T10:00:00Z"),
+      staffEvent("CONFIRMED", "2026-08-01T10:00:00Z"),
+      staffEvent("OUT_FOR_DELIVERY", "2026-08-02T10:00:00Z"),
+    ]);
+    expect(timeline.map((e) => e.status)).toEqual(["CONFIRMED", "OUT_FOR_DELIVERY", "DELIVERED"]);
+  });
+
+  it("carries the note and the acting user through to the entry", () => {
+    const [entry] = buildStaffTimeline([
+      staffEvent("OUT_FOR_DELIVERY", "2026-08-02T10:00:00Z", "Left with neighbour.", "Sam Staff"),
+    ]);
+    expect(entry.note).toBe("Left with neighbour.");
+    expect(entry.actorName).toBe("Sam Staff");
+    expect(entry.label).toBe("Out for delivery");
+  });
+
+  it("keeps system events, which carry no actor", () => {
+    const [entry] = buildStaffTimeline([
+      staffEvent("CONFIRMED", "2026-08-01T10:00:00Z", "Payment confirmed.", null),
+    ]);
+    expect(entry.actorName).toBeNull();
+    expect(entry.note).toBe("Payment confirmed.");
+  });
+
+  it("does NOT collapse consecutive identical statuses, unlike the customer timeline", () => {
+    const events = [
+      staffEvent("CONFIRMED", "2026-08-01T10:00:00Z", "Payment confirmed."),
+      staffEvent("CONFIRMED", "2026-08-01T10:00:05Z", "Duplicate webhook delivery."),
+    ];
+    // The shopper is spared the retry noise...
+    expect(buildTimeline(events)).toHaveLength(1);
+    // ...but for staff the repeat IS the diagnostic information.
+    expect(buildStaffTimeline(events)).toHaveLength(2);
+  });
+
+  it("returns an empty timeline for no events", () => {
+    expect(buildStaffTimeline([])).toEqual([]);
+  });
+});
+
+/**
+ * P7.5a (#238) — the set of statuses that count as revenue.
+ *
+ * `getFinancialsForStaff` aggregated on vendorId alone, so abandoned checkouts
+ * and cancelled orders were reported to the owner as money taken (39% overstated
+ * on staging). These tests pin the two ways that fix can silently regress.
+ */
+describe("REVENUE_STATUSES", () => {
+  it("excludes orders that were never paid for or were cancelled", () => {
+    expect(REVENUE_STATUSES).not.toContain("PENDING_PAYMENT");
+    expect(REVENUE_STATUSES).not.toContain("CANCELLED");
+  });
+
+  it("includes DELIVERED — the case that breaks if it is derived from the staff queue", () => {
+    // STAFF_QUEUE_STATUSES is a WORKLIST: it omits DELIVERED because there is
+    // nothing left to do, not because the money isn't real. Expressing revenue
+    // in terms of it is the tempting one-liner and would drop the most certain
+    // revenue there is.
+    expect(REVENUE_STATUSES).toContain("DELIVERED");
+    expect(STAFF_QUEUE_STATUSES).not.toContain("DELIVERED");
+  });
+
+  it("is exactly the post-payment statuses", () => {
+    expect([...REVENUE_STATUSES]).toEqual([
+      "CONFIRMED",
+      "READY_FOR_COLLECTION",
+      "OUT_FOR_DELIVERY",
+      "DELIVERED",
+      "COLLECTED",
+    ]);
+  });
+});
+
+/**
+ * P9.2 (#696) — cancellation is a predicate, NOT a rung on the ladder.
+ *
+ * The question `canCancel` answers is "are the goods still in the shop?", which
+ * is why it is not derived from STAFF_QUEUE_STATUSES or REVENUE_STATUSES: those
+ * answer different questions, and REVENUE_STATUSES' own comment records what
+ * happened (#238, revenue overstated 39%) the last time two such sets were
+ * expressed in terms of each other.
+ */
+describe("canCancel", () => {
+  it("permits exactly the two statuses where the goods are still on the premises", () => {
+    expect(canCancel("CONFIRMED")).toBe(true);
+    expect(canCancel("READY_FOR_COLLECTION")).toBe(true);
+  });
+
+  it("refuses OUT_FOR_DELIVERY — those goods are on a van and cannot be restocked", () => {
+    // There is no return-to-stock step modelled anywhere, so an Inventory
+    // increment here would write a lie into the stock count.
+    expect(canCancel("OUT_FOR_DELIVERY")).toBe(false);
+  });
+
+  it("refuses the terminal statuses and the unpaid one", () => {
+    expect(canCancel("DELIVERED")).toBe(false);
+    expect(canCancel("COLLECTED")).toBe(false);
+    expect(canCancel("CANCELLED")).toBe(false);
+    // PENDING_PAYMENT has its own path (releaseOrder), which is also the only
+    // one permitted to touch the Payment row.
+    expect(canCancel("PENDING_PAYMENT")).toBe(false);
+  });
+
+  it("refuses an unrecognised status, like canTransition", () => {
+    expect(canCancel("NOT_A_STATUS")).toBe(false);
+    expect(canCancel("")).toBe(false);
+  });
+
+  it("covers every OrderStatus value, so a new status cannot be silently omitted", () => {
+    for (const status of ALL_STATUSES) {
+      expect(typeof canCancel(status)).toBe("boolean");
+    }
+  });
+});
+
+/**
+ * #696 deliberately did NOT add cancellation to the ladder. This pins that:
+ * nextStatus drives the queue's single button, and a second legal target would
+ * make it ambiguous and turn a forward-only control into a destructive one.
+ */
+describe("LEGAL_TRANSITIONS is unchanged by #696", () => {
+  it("offers no route to CANCELLED from any status, by either method", () => {
+    for (const method of ["DELIVERY", "COLLECTION"] as const) {
+      for (const from of ALL_STATUSES) {
+        expect(canTransition(from, "CANCELLED", method)).toBe(false);
+      }
+    }
+  });
+
+  it("still yields exactly one forward rung from CONFIRMED", () => {
+    expect(nextStatus("CONFIRMED", "DELIVERY")).toBe("OUT_FOR_DELIVERY");
+    expect(nextStatus("CONFIRMED", "COLLECTION")).toBe("READY_FOR_COLLECTION");
+  });
+});
+
+// #1324 R26 — which payment controls the staff order page shows.
+describe("paymentControlsFor (#1324)", () => {
+  const paid = new Set([
+    "CONFIRMED",
+    "OUT_FOR_DELIVERY",
+    "DELIVERED",
+    "READY_FOR_COLLECTION",
+    "COLLECTED",
+  ]);
+  it.each(
+    ORDER_STATUSES.flatMap((status) => ["ADMIN", "STAFF"].map((role) => [role, status] as const)),
+  )("%s on %s", (role, status) => {
+    expect(paymentControlsFor(role, status)).toEqual({
+      checkPayment: role === "ADMIN" && status === "PENDING_PAYMENT",
+      resendEmail: role === "ADMIN" && paid.has(status),
+    });
+  });
+});

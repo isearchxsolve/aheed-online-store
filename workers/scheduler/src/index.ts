@@ -1,0 +1,118 @@
+/**
+ * The job scheduler (P9.2, #618).
+ *
+ * A clock and an authenticated fetch. Nothing else lives here.
+
+ * `opennextjs-cloudflare build` and gitignored, and it exports only `fetch` plus
+ * three Durable Object classes. There is no `scheduled` export to attach a Cron
+ * Trigger to, and editing the generated entry is pointless because the next
+ * build overwrites it. So the trigger lives in a second, minimal Worker that
+ * calls back into the application over HTTP.
+ *
+ * WHY IT STAYS DUMB. Every piece of domain logic — which orders are stale, what
+ * the payment provider said, whether an order may be cancelled — runs inside the
+ * application Worker, on the proven OpenNext runtime where Prisma's WASM query
+ * compiler already works. This Worker holds no database access and no domain
+ * knowledge, so it can never disagree with the application about any of it, and
+ * whether Prisma loads outside OpenNext is a question this design never has to
+ * ask.
+ *
+ * WHY THE JOB LIST IS A LITERAL. A config-driven list would make a typo'd path
+ * silently schedule nothing — a failure with no error and no output. As constants
+ * in source (`select-jobs.ts`), adding or renaming a job is a reviewable diff.
+ *
+ * WHY IT READS KV FIRST (#1324). Every job touches Neon, and Neon stays awake
+ * for five minutes after any query, so an unconditional 15-minute tick kept the
+ * database awake about 8 hours a day with no traffic at all. The application now
+ * writes activity markers to a KV namespace this Worker also binds, and the tick
+ * calls a job only when its marker says there is work. Reading KV costs no
+ * database wake. The daily `0 3 * * *` run calls everything regardless, and the
+ * decision fails open on any doubt — see `select-jobs.ts`.
+ */
+
+import { ERROR_EVENTS_LAST_AT_KEY, PAYMENT_SWEEP_DUE_AT_KEY } from "../../../lib/job-signal-keys";
+import { ALL_JOB_PATHS, selectJobs, type SignalRead } from "./select-jobs";
+
+interface Env {
+  /** Origin of the application Worker, e.g. `https://staging.aheedfoodcentre.nocaped.com`. */
+  APP_BASE_URL: string;
+  /** Shared secret proving to the application that an invocation came from here. */
+  JOB_INVOCATION_TOKEN: string;
+  /**
+   * The activity markers (#1324). Optional on purpose: until the owner creates
+   * an environment's namespace the binding is simply absent, and every read
+   * fails open to calling the job, which is exactly the pre-#1324 behaviour.
+   */
+  JOB_SIGNALS?: KVNamespace;
+}
+
+async function readSignal(env: Env, key: string): Promise<SignalRead> {
+  if (!env.JOB_SIGNALS) return { ok: false };
+  try {
+    return { ok: true, value: await env.JOB_SIGNALS.get(key) };
+  } catch (error) {
+    console.error(
+      `job-signal read of ${key} failed; running its job: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return { ok: false };
+  }
+}
+
+function listOrNone(paths: readonly string[]): string {
+  return paths.length === 0 ? "none" : paths.join(",");
+}
+
+const JOB_TOKEN_HEADER = "x-job-token";
+
+async function invoke(env: Env, path: string): Promise<void> {
+  const url = `${env.APP_BASE_URL}${path}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { [JOB_TOKEN_HEADER]: env.JOB_INVOCATION_TOKEN },
+    });
+  } catch (error) {
+    // Never rethrow: one unreachable job must not stop the rest of the tick.
+    console.error(
+      `scheduled job ${path} could not be reached: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+
+  if (!response.ok) {
+    console.error(`scheduled job ${path} returned ${response.status}`);
+    return;
+  }
+
+  // The body is the job's own summary. Logged whole because it is small,
+  // structured, and the only record of what a tick actually did.
+  console.log(`scheduled job ${path} ok: ${await response.text()}`);
+}
+
+const scheduler = {
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
+    // Read one after the other, each in its own try: a throwing first read must
+    // not cost the second its answer.
+    const paymentDueAt = await readSignal(env, PAYMENT_SWEEP_DUE_AT_KEY);
+    const errorLastAt = await readSignal(env, ERROR_EVENTS_LAST_AT_KEY);
+
+    const jobs = selectJobs({ cron: controller.cron, now: new Date(), paymentDueAt, errorLastAt });
+    const skipped = ALL_JOB_PATHS.filter((path) => !jobs.includes(path));
+
+    // One line per invocation, ran or not: with gating, a quiet tick is now the
+    // normal case, and this line is what tells a quiet tick from a dead one.
+    console.log(
+      `scheduler tick cron=${controller.cron} ran=${listOrNone(jobs)} skipped=${listOrNone(skipped)}`,
+    );
+
+    // Sequential, not Promise.all: the job list is short, and a tick that runs
+    // them in order keeps the log readable and the load on the app Worker flat.
+    for (const path of jobs) {
+      await invoke(env, path);
+    }
+  },
+};
+
+export default scheduler;

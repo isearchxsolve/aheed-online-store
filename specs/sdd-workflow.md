@@ -1,0 +1,1358 @@
+---
+id: sdd-workflow
+title: SDD Workflow
+audience: [dev]
+type: doc
+status: approved
+version: "2.53.1"
+updated: 2026-10-31
+visibility: internal
+summary: The SDD delivery loop — Orient, Propose, Spec, Build, Document (build notes), Clear, Validate, Fix, Ship, Document (final), Clear — with two context resets, plus the Discover, Learn and business case review stages that run at milestone close. Most stages are slash commands.
+tags: [sdd, workflow, process, context]
+---
+
+# SDD Workflow
+
+The operational vocabulary for how work moves through this repo — one keyword per stage, most of
+discipline is invoked directly rather than relied on from memory. `CLAUDE.md`'s **four SDD gates**
+(Propose, Spec, Validate, Changelog) are the non-negotiable core; the surrounding stages are the
+connective tissue this repo's actual history shows are just as easy to get wrong. Where this doc and
+a command file disagree, this file governs — commands are regenerated to match, not the reverse
+(same relationship `design-system.md` has to `tokens.css`).
+
+## The loop
+
+```
+ORIENT → PROPOSE → SPEC → BUILD → DOCUMENT (build notes)
+                                        ↓
+                                     CLEAR  ← switch to Sonnet 5
+                                        ↓
+                                   VALIDATE ⇄ FIX
+                                        ↓ (passes)
+                                      SHIP
+                                        ↓
+                              DOCUMENT (final, incl. KMS)
+                                        ↓
+                                     CLEAR  ← switch to Opus 5 → back to ORIENT
+```
+
+Three further stages sit **outside** that per-slice loop and run on the milestone, not the slice:
+
+```
+   ... last slice of a milestone ships and is documented ...
+                        ↓
+                    DISCOVER   (forward-looking: what should we consider next?)
+                        ↓
+                     LEARN     (backward-looking: what did this milestone teach us?)
+                        ↓
+              BUSINESS CASE    (outward-looking: what is this worth now?)
+                        ↓
+      findings land in docs/research/ + docs/business-analysis/ + promoted lessons
+                        ↓
+              back to ORIENT for the next milestone
+```
+
+Discover and Learn are **independently invocable at any time** (`/discover`, `/learn`) and both run
+**automatically at milestone close**, in that order — Discover before Learn, so the retrospective
+can react to what discovery just surfaced rather than the other way round. The **business case
+review** follows Learn, because it consumes what Learn established rather than re-deriving it; see
+**Business case review** below. None of the three is a gate: none can block a merge, and none
+produces approved scope. Their output is evidence.
+
+**Why the switch sits after Document, not before.** Document (final) is reconciliation work —
+roadmap row, KMS rebuild, board sync — against a branch the current Sonnet 5 session already has
+full context on from Ship; it needs none of Opus's extra reasoning. Switching model *before* it, as
+this diagram previously showed, means the newly-switched Opus 5 session spends tokens re-orienting
+to that same context just to do reconciliation, then sits idle for the switch that actually matters:
+Opus is what the *next* loop's Orient/Propose/Spec/Build needs. Corrected 2026-08-12: the switch now
+sits at the second Clear, right before Orient, so Document runs on the model that's already warm and
+the next loop starts already on Opus 5 — one switch, spent where it's used.
+
+**Why the two Clears.** A context that just built something is the worst possible judge of whether
+it matches the spec — it remembers the intent, so it reads the intent into the code. Clearing before
+Validate forces the check to run against `requirements.md` and the artifact on disk, which is the
+only version of the spec a future maintainer will ever have. This has already caught real defects
+under the old single-context flow (a consolidated `features/cart/actions.ts` that quietly deviated
+from the spec's one-file-per-action shape; webhook functions that resolved `getPrisma()` internally
+and so couldn't be proven against real Postgres) — the reset makes that catch systematic rather than
+lucky.
+
+**The cost.** Everything load-bearing must be on disk *before* a Clear. Anything living only in the
+conversation is gone. That is the discipline the flow is buying, not a side effect of it.
+
+## Project-state handoff responsibilities
+
+Four artifacts answer four different questions. Keep those boundaries explicit so a context reset
+does not create either lost knowledge or four copies of the same knowledge:
+
+- **Build Notes — what happened in this slice?** `build-notes.md` carries implementation decisions,
+  changed areas, deviations, validation context and known-shaky areas needed across the
+  pre-validation Clear. It is detailed and slice-local.
+- **Authoritative documentation — what is permanently true?** Architecture, runtime, roadmap,
+  operations and other standing decisions are corrected in their owning documents. A handoff may
+  point to that authority; it must not replace or duplicate it.
+- **Model Handoff — where does the overall project stand now?** `docs/model-handoff.md` is a concise
+  project-wide recovery snapshot containing only important current position a fresh model would
+  otherwise have to rediscover. It is not another changelog or a substitute for Build Notes.
+- **Orient — what is actually true now?** Orient reads the handoff to recover context, then
+  reverifies volatile Git, GitHub, Project, PR, deployment and scope-relevant environment state
+  before acting. The live result wins.
+
+The two judgment checks that maintain these boundaries live at Document (build notes) and Document
+(final) below. They are deliberately not automated in `sdd:preclear`: whether a finding is routine
+slice detail, durable truth or material overall state is a semantic decision, not a file-presence
+check.
+
+## Two machine checks
+
+Every SDD gate fires *before or at merge* — `pre-commit` (Gate 2), `pre-push` and `gates.yml`
+(Gate 4), CI (Gate 3). Nothing had teeth after Ship, which is exactly how P3a, P3b and P3c all
+shipped with no roadmap change-log entry while cart, checkout and payments went live. Two commands
+turn the loop's two honor-system promises into exit codes:
+
+| Command | Stage | Asks |
+|---|---|---|
+| `npm run sdd:preclear` | end of Document (build notes) | Would this Clear destroy anything? |
+| `npm run sdd:audit` | Orient | Did the last shipped slice — and the last promotion — actually get documented? |
+
+Both live in `scripts/sdd-check.ts` and copy `hooks/pre-push`'s posture: resolve `origin/staging`,
+else `origin/main`, else don't block. `sdd:audit` only looks at slices *after* the loop baseline
+constant — it deliberately does not police slices that predate this workflow.
+
+`sdd:audit` checks **two** things as of 2026-08-18 (#207): that every slice after the baseline has a
+change-log row citing its spec path, and that every merged `staging → main` **promotion** has a row
+citing its PR number (`PR #229`) or its merge SHA. The promotion half was missing for a long time,
+which is why a missing promotion row recurred five times, each caught by eye at a later `/orient`
+while the audit reported green. Three details it is worth knowing before trusting its output:
+
+- **A bare `#229` does not count.** Issues and PRs share one number space here, so a row about issue
+  #229 would otherwise satisfy a promotion PR #229 that nobody ever documented. Write `PR #229`.
+- **A promotion merged after the roadmap was last edited is reported as *pending*, not missing.**
+  Under the carry-forward rule its row can only land on the next slice's branch, so failing it would
+  fire on every branch cut straight after a promotion — the fastest way to get a check ignored.
+- **It skips rather than fails when `gh` is unavailable or unauthenticated**, matching
+  `hooks/pre-push`'s "resolve what you can, else don't block" posture. A skip line in the output is
+  not a pass; re-run it once `gh auth status` succeeds.
+
+On its first real run it found **three** promotions nobody had ever noticed were undocumented —
+PRs #118, #121 and #134 — on top of the five that had been caught by eye. Their rows were backfilled
+in the same slice.
+
+Neither check is a substitute for judgment. `sdd:preclear` proves files exist and the tree is clean,
+not that the build notes are any good; `sdd:audit` proves a roadmap row *mentions* the slice or
+promotion, not that the row is worth reading.
+
+**A `validation.md` row asking `sdd:audit` to report zero gaps cannot pass at `/validate` if it
+means the CURRENT slice's own row** — `sliceDirs()` walks the live `specs/` filesystem, so the
+slice being validated is always present and always ungapped-only-after-Document(final), which is
+what writes its roadmap row. `/validate` runs *before* Ship, so that row cannot exist yet by
+construction. Written correctly, such a row names a **specific prior PR or slice** the way slice 1's
+own R19 did ("confirm the roadmap row for PR #393 exists") — checking that the *previous* loop's
+Document(final) landed, not this one's. Hit at #411/#412's `/validate` (2026-08-27): the row was
+copied forward as "`sdd:audit` exits 0 and prints no ✘ line" with no PR pinned, so it failed on the
+slice's own not-yet-documented directory — a spec-writing mistake, not a code defect, and NOT
+something to patch under `/fix`. Report it unverified/deferred (same posture as the R33/R34-style
+post-deploy rows) rather than blocking on it, and write the next slice's equivalent row pinned to a
+specific already-landed PR.
+
+## The delivery board
+
+The GitHub Project **“Aheed Online Store — Delivery”** (`#2`, owner `sriahead`, provisioned by
+`scripts/provision-project.sh`) is a generated **status-and-priority view** of this roadmap, never a
+scope source. It carries Status, Priority (`High`/`Medium`/`Low`) and Complexity (`S`/`M`/`L`);
+scope and acceptance criteria live in `specs/`. The owner maintains Priority deliberately, so an
+open `High` item goes to Propose ahead of an assistant-generated ranking.
+
+Its one non-obvious rule, which the loop has to respect: **`Done` means *in production*, not
+merged.** PRs here merge into `staging`, not the default branch, so `Closes #NN` does **not**
+auto-close on merge — the issue closes when the work is promoted to `main`. Staging-merged work
+therefore sits in **In Review** until promotion. That is the agreed semantics, not a bug, and it is
+why open issues for shipped slices are expected rather than a backlog leak.
+
+| Loop stage | Board action |
+|---|---|
+| Propose | add the new issue to the project, set **Phase**, leave Status **Backlog** |
+| Build | move to **In Progress** |
+| Ship — merged to `staging` | move to **In Review** (*not* Done — it isn't in production yet) |
+| Ship — promoted to `main` | issue closes → **Done** |
+| Document (final) | reconcile the board against reality; it's the status-layer twin of the roadmap update |
+| Owner defers an issue | Status **Deferred**, milestone **Deferred — owner/external gated**, Priority cleared, a comment saying what it waits on; the issue stays **open** |
+
+**`Deferred` is a fifth Status, outside the loop, and set only by the owner** (added 2026-09-24).
+It parks an open issue that is waiting on an owner decision or outside input rather than on code —
+`#422` (the multi-site decision) and `#400` (per-store counts, blocked on `#422`) were the first
+two. A Deferred issue is **not closed and not Backlog**: Orient lists it apart from both, and it is
+never a `/propose` candidate until the owner revives it. To pick one up again, move it back to a
+phase milestone and set Status to **Backlog**. Never defer an issue on your own judgement; that call
+belongs to the owner, as does its Priority.
+
+> **Prerequisite, now met** (corrected 2026-08-11, extended 2026-09-24). All five options —
+> `Backlog` / `In Progress` / `In Review` / `Done` / `Deferred` — exist on Project #2, so the table
+> above is usable as written. An earlier version of this blockquote said the opposite and told the
+> reader to substitute `Todo`; it had gone stale, and a reader following it would have filed status
+> wrongly. It also said the Status options are UI-only. **That is no longer true:**
+> `updateProjectV2Field` accepts `singleSelectOptions`, but it **replaces the whole option set**.
+> Pass every existing option **with its `id`**, or each existing option is recreated under a new ID
+> and every item on the board loses its Status. `Deferred` was added this way, and the item count
+> per status was the same before and after.
+
+## Scale the loop to the change
+
+The full loop — two Clears, two model switches — is for a **slice**. A one-file correction (a typo,
+a stale doc line, a one-line fix) goes Build → Ship with a CHANGELOG entry and no Clears at all.
+This is stated so the loop gets scaled down deliberately rather than skipped wholesale, which is
+what happens to a process that charges slice-sized ceremony for a one-line fix.
+
+## Orient
+
+Check the actual repo before proposing or building anything — not what a doc *says* is true.
+
+- Read `CLAUDE.md` first, then `docs/model-handoff.md`. The handoff is dated recovery context, not
+  authority for volatile GitHub, Project, deployment or environment state; use its fresh-session
+  checks as leads to reverify, and replace assumptions with the live result.
+- Read the code/config for the area you're touching, not just the doc that describes it.
+  `docs/repo-structure.md`'s phase-tags have already gone stale in places (it tagged `tsconfig.json`
+  and a hex/px-lint rule as P6 after both were effectively superseded) — `specs/roadmap.md` and the
+  actual filesystem are authoritative, planning-doc sketches are not. Use the handoff to avoid a
+  repository-wide rediscovery; read deeper authoritative docs and code only for the current task or
+  a discrepancy the live checks surfaced.
+- Check whether a roadmap item is *actually* buildable now, not just nominally next. `lib/repositories/`
+  is listed under P0/P1 scope but has nothing to wrap until real Prisma models exist beyond
+  `HealthCheck` — confirmed by checking the schema, not by assuming the roadmap line is ready.
+- Check current branch and how far `staging`/`main` have actually diverged (`git fetch` + `git log
+  origin/main..origin/staging`) before assuming either is in a known state — both moved underneath
+  this workflow mid-session more than once.
+- **Divergence alone doesn't prove the commits were gated.** Cross-check `gh pr list --state all
+  --limit 15` against that commit range — if recent `staging` commits don't line up with merged PRs,
+  they were pushed directly, which means `gates` never ran on them. Caught at a P6.7 Orient (2026-08-17):
+  six slices' worth of commits after PR #182 turned out to be direct pushes, and the one PR that *did*
+  run `gates` in that window had failed and been merged anyway — `staging` had been quietly red on
+  `lint`/`format:check`/`vitest` the whole time. `git log`'s divergence count doesn't distinguish a
+  reviewed merge commit from a direct push; only the PR list does.
+- Coming out of a Clear, Orient is also the *re-entry* point: the previous loop's docs are on disk,
+  so read them rather than assuming continuity with a conversation that no longer exists.
+- **Run `git worktree list`.** A Build carried out by a forked/sub-agent under an isolated worktree
+  (the Agent tool's `isolation: "worktree"`) commits to a checkout at `.claude/worktrees/<agent-id>/`
+  on its own branch — not to the main checkout. `git status`, `git log`, and `sdd:preclear`'s
+  clean-tree check all run against whatever directory they're invoked from, so none of them see that
+  work at all; the main checkout can report a fully clean tree while a worktree sitting one level
+  down holds spec, build, and index-rebuild commits nobody's looked at. First hit 2026-08-25: a
+  fresh `/validate` context found nothing wrong by every check it knew to run, because it never knew
+  to run `git worktree list` — the human had to name the path before the work was found at all. See
+  Document (build notes) and Validate below for the other two ends of this.
+- **Run `npm run sdd:audit`.** It reports whether slices shipped under this loop got their roadmap
+  change-log entry and reached `ARTIFACT_INDEX.md`. A gap here means the previous loop's Document
+  (final) never landed — fix it on the current branch, per the carry-forward rule, rather than
+  noting it and moving on. This is the only check that runs *after* Ship, so treat a failure as
+  real work, not a warning.
+- Read the delivery board's Status and Priority with
+  `gh project item-list 2 --owner sriahead --format json --limit 2000` — the default page silently
+  truncates this board, and so does any fixed limit the board outgrows: if the returned `items`
+  count equals the limit, raise it and re-read (`600` hid a `High` item at 607 items, 2026-10-21).
+  Trust `specs/` and the filesystem for scope; a board that disagrees with the
+  repo needs reconciling. Lead the orientation report with open items whose Priority is `High`, then
+  give sequencing, blocker and owner-gated commentary within that set rather than replacing it with
+  an assistant-generated priority list. Report `Deferred` items separately, as parked by the owner
+  and not next up.
+- Reverify open PRs, relevant GitHub state, current deployments and any environment fact the next
+  scope depends on. A previous handoff's values are evidence of what to check, never current truth.
+- **Run `npm run branches:count`** (#935). Every loop leaves a `feature/*` and a `docs/*` branch
+  behind, and by 2026-09-29 that had built up to 229 local and 245 origin branches. When either
+  count reaches 30, the script prints an `ACTION:` line. Report it in the orientation summary and
+  suggest `/prune-branches`, which keeps the 12 newest names plus `main`, `staging` and the current
+  branch, and deletes only merged copies with no open PR. The step warns and never blocks. Pruning
+  itself needs the user's explicit yes after a dry run.
+
+## Propose
+
+Gate 1. Calibrate the ceremony to the size of the fork.
+
+- **Routine, single-approach work**: state the plan in a sentence or two and proceed. Don't open
+  a planning session for a typo fix or an obvious one-file change.
+- **Real forks** — architecture choices, a missing input (brand assets, an undecided config
+  approach), anything with more than one defensible answer — stress-test it: name the alternative,
+  say why it lost, and ask rather than guess when the answer is genuinely the user's call (e.g.
+  Tailwind CSS-first `@theme` vs `tailwind.config.ts`; a placeholder palette vs waiting for a real
+  brand kit).
+- Open a GitHub issue before the spec, for anything beyond a trivial fix. The issue is what a PR's
+  `Closes #NN` and the eventual CHANGELOG entry both anchor to.
+- **Put it on the board**: `gh project item-add 2 --owner sriahead --url <issue-url>`, set its
+  **Phase**, and leave Status at **Backlog**. An issue that never reaches the board is invisible to
+  every later stage — ten issues (#93–#106) were filed after the board was provisioned and none of
+  them were added, until a sync caught it.
+- **Assign a milestone**: Every issue must be explicitly associated with its relevant roadmap milestone (e.g., `gh issue edit <number> -m "P6 — Admin & staff panel"`). This ensures the GitHub issue matches the project board's phase.
+- **When a slice's plan claims it "absorbs" or "closes" an existing issue number, open that issue
+  and check its actual title/body match the claimed scope before citing it anywhere.** A wrong
+  number is invisible once written down: every downstream artifact (`plan.md`, `requirements.md`,
+  `CHANGELOG.md`, the PR body, `specs/roadmap.md`) trusts the citation rather than re-opening the
+  source, so it propagates silently. Found at `#618`'s `/document` (2026-09-06): `#94` had been
+  cited across `specs/roadmap.md` as "abandoned checkout handling" since this phase's original
+  2026-08-19 insertion — **eight** separate mentions across three months — but the real issue #94
+  is "Abandoned guest-cart retention & cleanup," an unrelated data-hygiene concern. No issue for the
+  real "abandoned checkout handling" concept had ever existed; `#618` itself was the first artifact
+  to actually specify it, under a citation that happened to point at the wrong number the entire
+  time. A one-line `gh issue view <N> --json title` at the moment a slice's plan first names the
+  number it claims to absorb would have caught this before it was ever written down once.
+- Wait for explicit approval on non-trivial work before Spec/Build. A prior approval does not carry
+  forward to a new, unrelated decision.
+
+## Spec
+
+Gate 2 — no source without `specs/<YYYY-MM-DD-feature>/requirements.md`.
+
+**Under this flow the spec carries more weight than it used to**: it is the *only* thing the
+post-Clear validation context has to check against. An ambiguity that a same-context validator would
+have silently resolved from memory becomes a genuine failure mode here. Write for a reader who was
+not present.
+
+- **Every slice gets all three files: `plan.md`, `requirements.md`, `validation.md`.** Copy from
+  `specs/templates/feature-spec/`, don't write from a blank file or from memory of "the most recent
+  slice" — that's exactly how four slices drifted to a two-file pattern and lost `plan.md` before
+  this line existed (issue #27). `plan.md` carries the front-matter and is the file that gets an
+  `ARTIFACT_INDEX.md` entry — it's the narrative (goal, scope, deliberately-excluded, rationale)
+  that `requirements.md`'s terse `R1..Rn` list can't carry on its own. `requirements.md` and
+  `validation.md` deliberately don't get their own front-matter/index entry.
+- `requirements.md`: numbered `R1..Rn`, each one objectively checkable sentence (a tool exits 0, a
+  file exists with property X, a route returns Y) — no "should" language. `validation.md`: a
+  `| Req | How to verify |` table, one concrete step per row.
+- **A keyword grep over generated SQL matches clauses, not just statements — anchor it.** `#1134`'s
+  R9 asked `grep -inE '\b(DROP|UPDATE|INSERT)\b'` to print nothing over a purely additive migration,
+  and it matched `ON UPDATE CASCADE` inside both foreign-key `ADD CONSTRAINT` statements Prisma
+  always emits. Anchor on a statement start (`^\s*(DROP|UPDATE|INSERT)\b`) or name the allowed
+  statement kinds and read the file.
+- **Don't verify the *absence* of a word with `grep` when the artifact is prose or carries an
+  explanatory comment.** Good code and good docs *name the thing they deliberately exclude* — so the
+  grep matches the explanation and the only way to "pass" is to delete the most useful sentence in
+  the file. P4a hit this twice in one slice: R5 (`grep -n "note"` matched the comment explaining why
+  `note` is deliberately absent) caught at Build, and R27 (`grep -n "Todo"` matched the *corrected*
+  blockquote naming the mistake it had just fixed) caught at Validate. Target the syntax that would
+  actually constitute the defect (`\bnote\s*[:?]` for a field), or assert the property in a test, or
+  state the property and read it — but don't let a check reward deleting the rationale.
+- **A third instance of the same trap, this time in a requirement's own literal text rather than a
+  grep**: `requirements.md`'s R40 in the validation-debt-bucket slice forbade a closing keyword
+  "immediately before" a protected issue number in "any commit message, PR body, **or document**
+  changed on this branch" — broader than `validation.md`'s own row, which checked only commit
+  messages and the PR body (the actual surfaces GitHub's closing-keyword scanner reads). Several
+  already-existing docs, and this slice's own new `plan.md`, quote the exact wrong-example phrase
+  from the #214 lesson two bullets above *to warn against writing it* — that lesson only exists
+  because someone needs to keep telling the story. A validator reading R40 at face value would have
+  to scrub that quote to "pass" a document-content check that was never actually load-bearing (file
+  prose isn't a GitHub closing-keyword surface), which is exactly the P4a failure mode: the check
+  rewards deleting the rationale. This paragraph itself now avoids reproducing that phrase, for the
+  same reason. Caught at `/validate` (2026-08-18) by checking against `validation.md`'s
+  actual operational scope rather than `requirements.md`'s broader prose, and flagged as a
+  spec-wording note rather than patched under `/fix` (tightening the requirement's own text is a
+  Spec-level correction, not a validation finding). **When writing a requirement that forbids a
+  pattern, scope its text to the surface that's actually checked** — a requirement broader than its
+  own validation row is a requirement two readers can satisfy differently, which is the same defect
+  this stage exists to prevent everywhere else.
+- **A fourth instance (#539, 2026-09-02) adds the wrinkle that makes this trap hard to see coming:
+  the string you are asserting is absent propagates into *generated* files.** R9 required that no
+  file in the repository still claim `deploy-staging` deliberately runs no quality job, verified by
+  a repo-wide `grep`. A correct implementation returns **four** matches — the slice's own `plan.md`
+  quotes the removed comment verbatim as historical context (which is the whole point of the
+  narrative file), that quotation is embedded into `app/(admin)/staff/runbook/docs.ts` by
+  `kms:build-index`, it is copied again into `kms/site-internal/content/` by
+  `kms:assemble:internal`, and `validation.md` contains the search string itself. So the count is
+  not merely "one more than expected" — **one authored sentence becomes three or four matches**, and
+  scrubbing the rationale would not even fix it while the generator still runs. **Scope an
+  absence-grep to the directory that would actually hold the defect** (`.github/`, `lib/`, `app/`),
+  never the repo root, and remember that anything you write in a spec is machine-copied into at
+  least two other places. Amended mid-build and committed separately, matching how #537 corrected
+  its own R2 for the same class of reason.
+- **A fifth instance (#674, 2026-09-08) is about literal same-physical-line requirements against a
+  file that hard-wraps its own prose.** R17 required `CLAUDE.md` to state a permitted-exception
+  file's name and the words `raw SQL` **on one line**, checked with `grep -n '<file>' CLAUDE.md`
+  piped through a second grep for `raw SQL` — a same-line co-occurrence check. The bullet that
+  satisfies R17's substance reads as one continuous sentence but is written across two physical
+  source lines, because every bullet in `CLAUDE.md` is hard-wrapped at roughly 100 columns — the
+  same convention this very sentence follows. The literal grep failed; the requirement's actual
+  intent (both facts stated together, with the exception's scope) was met. Caught at `/validate`
+  and reported as a spec/check mismatch rather than silently passed or silently patched — reflowing
+  one bullet to satisfy a same-line technicality against the file's own formatting style would have
+  been validating around the check, not fixing anything real. **A requirement asking for
+  co-occurrence "on one line" in a document that hard-wraps needs to mean "in the same
+  bullet/paragraph," not "on the same physical source line"** — word it that way, or check
+  adjacency (matches within N lines of each other) instead of exact line identity.
+- **A requirement about what a command PRINTS or EXITS WITH is not proved by testing the function behind
+  it (#1216, 2026-10-22).** R5 required `--emit-route` to put nothing but the route block on stdout.
+  The exported `emitRouteCommand` returned exactly that and its tests passed, while `main()` wrote a
+  "manifest is valid" line to stdout before calling it — found only when `/validate` ran the real
+  script. Make the validation row run the script (`npx tsx …`, capture stdout and the exit code
+  separately), and when a command's output is pasted somewhere (a `wrangler.toml` block), put every
+  progress line on stderr from the start.
+- If the slice also changes a **standing decision** (architecture, tech choice, design tokens), also
+  write or update the relevant **persistent doc** (`specs/architecture.md`, `tech-stack.md`,
+  `design-system.md`, ...) — the dated folder is the one-time slice, the persistent doc is what
+  future sessions read as current truth.
+- **A class-list assertion cannot prove a geometric property, and writing one is how a real defect
+  hides behind a green test.** `#232`'s R11 required a control not to overlap its neighbour and
+  checked the Tailwind class that was *supposed* to produce that — which passed while the two
+  controls overlapped by 2px on a phone, because the card's skew renders them 46px wide rather than
+  the 44px the offset assumed. When a requirement states a property of the rendered result
+  (non-overlap, a minimum hit area, an alignment), **its validation row must measure the rendered
+  result** — `scripts/verify-mobile-layout.ts --widths 360 --measure '<sel>,<sel>'` prints the
+  boxes. Keep the class assertion as a cheap guard if you like, but say in the row that the class
+  passing is not the requirement.
+- **Run `npm run kms:build-index` after a slice's LAST doc edit, not the first.** `#232` ran it at
+  Build, then edited `specs/design-system.md` again at Fix, which left
+  `app/(admin)/staff/runbook/docs.ts` stale while `ARTIFACT_INDEX.md` stayed current — one
+  generator, two outputs, only one of which obviously drifts (the `#537` shape). `/validate` caught
+  it; CI would have. A doc edit at Fix or Document means regenerating again.
+- **Adversarial pass before presenting**: read your own draft asking what's missing, ambiguous, or
+  quietly out of scope. Explicitly list deferred items (don't let them vanish silently) and check
+  the spec doesn't contradict an existing ADR or persistent doc.
+- Commit the spec files as their own commit, before any implementation commit.
+
+### Front-matter and MDX traps when writing a spec
+
+Moved here from `CLAUDE.md` in #786, because this is the stage at which front-matter actually gets
+written. Every one of these is invisible to `lint`, `typecheck`, `test`, `format:check` and `build`
+— they fail either the `quality/kms` CI job or, worse, the `deploy-docs-internal` workflow on the
+push *after* the slice merges. `npm run kms:validate` catches the front-matter ones locally and is
+fast; the MDX ones need `npm run kms:assemble:internal` plus a real Next build in
+`kms/site-internal`.
+
+- **A GFM table cell (or any prose) containing a bare `<` immediately followed by a digit breaks
+  the internal KMS docs site build, and nothing in the app's own `lint`/`typecheck`/`test`/`build`
+  catches it.** `docs/*.md` and `specs/*.md` are assembled into MDX (`npm run
+  kms:assemble:internal`) and built with Nextra in `kms/site-internal`, a separate pipeline the
+  `gates` workflow never runs. MDX parses `<1%` as the start of an invalid JSX tag name
+  (`Unexpected character '1' before name`), so a slice's own PR can pass every check and merge
+  clean while `deploy-docs-internal` fails on the very next push. Hit in P7d (#218):
+  `docs/nfr-baseline.md` shipped a `<1%` table cell in PR #245, and the break was found only when
+  `/ship` opened the staging→main promotion PR and read `deploy-docs-internal`'s status. Fixed as
+  its own follow-up PR (#248) rather than amending the already-merged one. Write `under 1%` (or
+  wrap the value in backticks) instead of a bare `<N` anywhere in `docs/`/`specs/` prose or tables.
+  Before merging a slice that adds or edits either directory, a real check is `npm run
+  kms:assemble:internal && (cd kms/site-internal && npx next build --webpack)` — not just the root
+  `lint`/`build`.
+- **The same pipeline breaks on a bare `{...}` in prose, and this has now cost a build THREE times.**
+  MDX evaluates `{anything}` outside backticks as a **JSX expression**, so quoting a code fragment
+  the natural way — `"Save {formatPrice(saving)}"` inside double quotes — compiles fine, passes every
+  root gate, and then dies at *prerender* with `ReferenceError: formatPrice is not defined` naming
+  the doc's own URL (`/dev/<id>`). Double quotes do not escape anything in Markdown; only backticks
+  do. **Write `` `Save {formatPrice(saving)}` ``**, and note a path template like
+  `` `bundles/{bundleId}/{uuid}.webp` `` is already safe *because* it is in backticks — the trap is
+  the unbackticked case, not the braces themselves. First hit at P8.5e (PR #360, "escape bare
+  curly-brace reference breaking `deploy-docs-internal`"); hit again at P8.5c's `/build-notes`,
+  caught before merge only because that slice actually ran the check above. **A third hit, in the
+  storefront-browsing-ux-fixes slice (#496, 2026-08-31), is the more instructive one**: it wasn't an
+  edit to an existing doc, it was a bare `"Shop {Department}"` written into a brand-new `plan.md`'s
+  *first draft*, describing a UI button's own label in prose. Writing fresh spec prose is exactly as
+  exposed as editing an existing one — there is no "this file is new, so it's fine" exemption. Caught
+  the same way as the second hit: the two-command check below, run before push, not discovered via a
+  failed `deploy-docs-internal` after merge. **Run the two-command check on every slice that adds or
+  edits a spec file, including the very first one you write for it, and read its real exit status** —
+  piping it through `tail` reports the pipe's success, not the build's, which is how a `Next.js build
+  worker exited with code: 1` can look like `exited with code 0`.
+- **A spec's front-matter `id` cannot contain a literal `.`** — `kms/schema/frontmatter.ts`'s `id`
+  regex is `^[a-z0-9-]+$`. A phase name that already has a dot (`P8.1a`, `P7.5a`, `P6.5`, …) is easy
+  to copy straight into `id:` when writing a new `plan.md` at `/spec`, and none of
+  `lint`/`typecheck`/`test`/`format:check`/`build` catch it — only the `gates` workflow's own "KMS —
+  front-matter validation" step does, on the next push. Every existing dotted-phase slice's `id`
+  replaces the dot with a dash and suffixes `-plan` (e.g. `p7-5a-reports-cart-integrity-plan`);
+  follow that convention at `/spec` rather than rediscovering the regex at `/ship`. First hit this
+  way in P8.1a (#334, PR #338): `id: p8.1a-frontend-a11y-debt` failed `gates` on first push, fixed to
+  `p8-1a-frontend-a11y-debt-plan` — which then required its own `npm run kms:build-index` (a
+  previously-invalid `plan.md` becoming valid makes it a newly-countable artifact, so the checked-in
+  `ARTIFACT_INDEX.md`/`docs.ts` go stale in the same commit that fixes the `id`). Run `npm run
+  kms:validate` locally after writing or editing any spec's front-matter — it's fast and catches
+  this before a push, unlike the `<1%` MDX trap above which needs the heavier
+  `kms:assemble:internal` build.
+- **`kms/schema/frontmatter.ts`'s `summary` field is capped at 300 characters
+  (`z.string().min(20).max(300)`), and nothing in `lint`/`typecheck`/`test`/`format:check`/`build`
+  checks it either** — same invisibility class as the two traps above, just a length limit instead
+  of an MDX-parse failure. A `plan.md` written with a full narrative summary (the style this file's
+  own prose encourages) can overrun it easily. First hit at `#565`'s `/validate` (2026-09-03,
+  PR #577): a 363-character `summary` failed only `npm run kms:validate`, which runs in CI's
+  `quality/kms` job — so this would have failed on push, not locally, exactly like the `id` regex
+  trap above. Fixed by trimming to the load-bearing sentence rather than dropping detail from the
+  file's actual prose. `npm run kms:validate` (the same command that catches the `id` regex issue)
+  catches this too — run it after writing any spec's front-matter, not just when the `id` looks
+  unusual.
+
+
+## Build
+
+Implement to the approved spec — nothing more.
+
+- Move the issue to **In Progress** on the board when you start.
+- Reuse before create: check for an existing port/adapter/utility before writing a new one.
+- Match existing conventions: semantic design tokens, not raw hex/px, in UI; Clean Architecture
+  layering (components never import Prisma or the storage client directly); the project's existing
+  file/module shape for the area you're in.
+- No scope creep past `requirements.md`. A gap you notice but that's out of scope becomes a Propose
+  candidate for later, not a silent addition now.
+- **Design for testability against the acceptance criteria.** If a requirement asserts a runtime
+  property (a transaction is atomic, a handler is idempotent), the code must expose a way to prove
+  it from a plain script — pass `prisma`/`vendorId` as explicit arguments rather than resolving them
+  from request context inside the function. `placeOrder(prisma, vendorId, input)` exists in exactly
+  that shape because the earlier version couldn't be exercised outside a request.
+
+## Document (build notes)
+
+Everything that must survive the Clear. This is a **write-to-disk** stage, not a summary stage.
+
+- Write `specs/<YYYY-MM-DD-feature>/build-notes.md` **from
+  `specs/templates/feature-spec/build-notes.md`**, not from a blank file: what was changed and why,
+  decisions taken during the build that the spec didn't dictate, anything deliberately deviating
+  from the spec (and the justification), and any known-shaky area worth extra scrutiny. The
+  template's four headings are exactly what `sdd:preclear` greps for — keep them, and write "None."
+  under one rather than deleting it. No front-matter: like `requirements.md`/`validation.md` it's
+  slice-local, not a KMS artifact.
+- **Gate 4 lands here, not in the final Document stage** — the `[Unreleased]` `CHANGELOG.md` entry
+  must be on the branch *before* it merges, and the pre-push hook plus CI both enforce that. Write it
+  in the terse style of existing entries (what shipped, why, what's deliberately deferred). Gate 4's
+  CI check only verifies a diff exists **against the PR's current base branch** — if another PR
+  merges first and moves that base, your diff can vanish and the check fails on reopen. Write it
+  before opening the PR, never as a follow-up push.
+- Update any **persistent doc** whose standing decision this slice changed (see Spec). These are part
+  of the change and belong on the same branch, not deferred to the post-ship pass.
+- Anything deliberately deferred becomes a tracked GitHub issue now, while the reasoning is fresh —
+  not a comment, and not something the next context is expected to remember.
+- **If this Build ran under a forked sub-agent's isolated worktree rather than the main checkout,
+  say so in "What changed and why" — name the worktree path and branch explicitly** (e.g.
+  `.claude/worktrees/agent-<id>/`, branch `feature/<slug>`). `git worktree list` can enumerate
+  whatever worktrees still exist at the time someone thinks to run it, but it ties a path to a
+  branch name, not to a task — it cannot tell a fresh context which worktree is *this* slice's, and
+  a worktree can be removed or pruned before anyone looks. The build-notes file is the one artifact
+  the Clear bets on (see above); a worktree's location is exactly the kind of thing that doesn't
+  survive the Clear unless it's written down here.
+- **Run the Project-State Handoff Check before this stage is considered complete:**
+
+  > Did Orient → Propose → Spec → Build discover or change project-level knowledge that would be
+  > lost after Clear and that a future model would otherwise need to rediscover?
+
+  If yes, persist it at the correct level before Clear: current-slice implementation and validation
+  detail goes in `build-notes.md`; durable project truth goes in its authoritative documentation;
+  important overall current position goes in `docs/model-handoff.md`. Routine implementation detail
+  stays in Build Notes and is not copied into the project handoff. If no important overall state
+  changed, leave the handoff untouched. This is a mandatory judgment check, not an
+  `sdd:preclear` heuristic.
+- Commit it all. If it isn't committed, the Clear destroys it.
+- **`sdd:preclear` checks only slice files *added* on the branch.** A second PR into a slice folder that
+  already exists on `staging` (a multi-PR slice, `#1223` Phase 2a) only *modifies* its files, so
+  `sdd:preclear` prints `no specs/<date-slice>/ touched` and exits 0 **without running the four-file,
+  heading and CHANGELOG checks**. A skip line is not a pass: run those four checks by hand and say so in the
+  build notes.
+- **Then run `npm run sdd:preclear` and get exit 0.** It is the gate on this stage, not a
+  formality: it derives the slice from the branch, requires all four spec files, requires the
+  build-notes template's sections, requires a `CHANGELOG.md` diff against the base, and requires a
+  clean working tree. Don't announce that it's safe to clear on the strength of having *intended*
+  to commit everything.
+
+## Clear (pre-validation)
+
+A hard context reset. **Manual — the user runs `/clear`; the assistant cannot invoke it.**
+
+`npm run sdd:preclear` must exit 0 first. It checks, mechanically:
+
+- [ ] `specs/<date-feature>/` — `plan.md`, `requirements.md`, `validation.md`, `build-notes.md`
+- [ ] `build-notes.md` has its four required sections
+- [ ] `CHANGELOG.md` differs from the base branch (Gate 4)
+- [ ] The working tree is clean — nothing lives only in the editor
+
+Still on you, because no script can judge them:
+
+- [ ] The build notes are actually *informative*, not just present
+- [ ] Persistent-doc updates for any changed standing decision
+- [ ] Project-State Handoff Check completed, with information persisted at the correct level
+- [ ] GitHub issues filed for every deferred item
+- [ ] **If Build ran in an isolated sub-agent worktree, its path and branch are written into
+      `build-notes.md`, not left to `git worktree list` to rediscover.** `sdd:preclear`'s clean-tree
+      check runs `git status --porcelain` in the main checkout only — a worktree with committed,
+      unpushed changes reports the main tree as clean and passes this gate while the actual work sits
+      undiscoverable one directory down. Nothing mechanical catches a missing worktree reference; this
+      is a judgment check, same as the other items in this list.
+- [ ] **`npm run kms:build-index` has been run and the result committed.** Every slice adds a
+      front-mattered `plan.md`, so every slice makes the generated artefacts stale — and CI fails on
+      exactly that. `sdd:preclear` now checks it (#132), as does the `kms` job in `quality.yml`.
+      P4a remembered by hand; P4b didn't and burned a red CI run plus a fix commit.
+      **`kms:build-index` writes TWO files, and they go stale under different conditions** (#537):
+      `ARTIFACT_INDEX.md` renders **front-matter only**, while `app/(admin)/staff/runbook/docs.ts`
+      embeds each document's **full body**. So editing a doc's *content* without touching its
+      front-matter — appending a roadmap change-log row, correcting a paragraph in `CLAUDE.md` —
+      leaves the index byte-identical and `docs.ts` different. Every check watched only the index
+      until 2026-09-02, which is how a stale `/staff/runbook` article reached production with CI
+      green. **`npm run kms:check-generated` is the command that answers "are they current?"**; it
+      derives its file list from the generator's own `GENERATED_ARTIFACTS` export, so it cannot fall
+      behind a new output.
+      **Run it LAST — after every front-matter edit, immediately before `git add`.** The index
+      embeds each artifact's `version`/`updated`, so bumping any front-matter *after* the rebuild
+      re-stales it, and "I ran `kms:build-index`" is not the same claim as "the index matches the
+      tree". P5a's closeout burned a red CI run on exactly this: the index was rebuilt first, then
+      `roadmap.md` (1.13.0→1.14.0) and this file (2.4.0→2.5.0) were bumped, and CI's rebuild-and-diff
+      caught two stale version cells. The check normalises away the timestamp and commit footer, so
+      a footer-only difference is *not* what fails it — a version cell is.
+      **If a slice's own `validation.md` writes this check as a raw `git diff --exit-code
+      ARTIFACT_INDEX.md`, it will spuriously fail on every re-run once the index has been committed
+      once.** The footer embeds `git rev-parse HEAD` at generation time, so a committed index can only
+      ever cite its own parent commit — regenerating it again post-commit always shows a one-commit
+      footer diff, forever, by construction. `gates.yml`'s check (above) strips exactly that footer
+      with `sed` before comparing; a slice's `validation.md` row for this check should mirror that
+      normalisation (or just trust CI's result) rather than a bare `git diff --exit-code`. P6.7's
+      closeout slice wrote the bare version, `/validate` reported it failing, and `/fix` spent a
+      commit chasing it — harmless (freshening the index is never wrong) but unnecessary, since CI
+      would have passed either way.
+
+Then **switch to Sonnet 5** (`/model claude-sonnet-5`) for the validation half of the loop. The
+assistant cannot switch its own model — if a stage is running on the wrong one, it should say so and
+ask rather than proceed quietly.
+
+## Validate
+
+Gate 3, run from a **fresh context**. Load `requirements.md` + `validation.md` + the artifact.
+
+- **The spec is the authority.** Validate the artifact against `validation.md`'s rows and
+  `requirements.md`'s `R1..Rn` — not against what the build notes claim was done. Read
+  `build-notes.md` only as supporting context (where to look, what was deliberately deviated), never
+  as a substitute for checking. If the notes and the artifact disagree, the artifact is the fact and
+  the notes are the claim.
+- **If the spec itself looks wrong**, say so rather than validating around it. A fresh context that
+  conforms to a bad requirement produces a passing slice that's still broken; escalate it as a
+  finding and, if it's a real design defect, go back to Spec rather than patching under Fix.
+- **A "this check can fail" guard proves nothing until you have shown the mutation landed.** At `#1223`'s
+  Phase 2a the guard for the className-parity script was "change one `className` in a scratch copy and expect
+  a non-zero exit"; the first attempt edited a file that did not contain the string, the `sed` matched nothing,
+  and the script correctly exited 0 on an unchanged tree, which looked like a pass of the wrong kind. Print the
+  match count or `diff` the copy before reading the exit code.
+- **Check `git worktree list` before concluding a slice's work doesn't exist.** If `build-notes.md`
+  names a sub-agent worktree (see Document (build notes)), or if the main checkout looks clean but
+  the spec claims a Build happened, the artifact may live at `.claude/worktrees/<agent-id>/` on its
+  own branch rather than in the current directory. Run every check in this stage — reading the
+  artifact, `lint`/`test`/`build`, `git log` — against that worktree's path (`git -C
+  <worktree-path>` or `cd` into it), not the main checkout; the two are separate working trees with
+  independent `git status`, and the main checkout's history will not contain the worktree's commits
+  until something merges them. A worktree branch is also very likely unpushed and PR-less at this
+  point — that's expected, not itself a finding, but it means CI has not run against it and Ship
+  hasn't happened yet either.
+- Run the local suite as a fast pre-flight (`lint`, `format:check`, `typecheck`, `test`, `build`) —
+  but **don't fully trust local `format`/`lint` output on a Windows checkout**. `core.autocrlf`
+  rewrites line endings on checkout, which makes `prettier --check` flag files that are actually fine
+  on the real (Linux) CI runner. When local and CI disagree, CI is the authority; verify by diffing
+  against the actual committed git blob (`git show HEAD:<file>`) before treating a flagged file as
+  real drift.
+- **If the slice touches `docs/*.md` or `specs/*.md`, that local suite is not the fast pre-flight
+  it looks like — none of `lint`/`build`/`test` build the internal KMS docs site, and a defect
+  there merges clean and only fails on the next push.** See this file's "Front-matter and MDX
+  traps when writing a spec" section (added at P7d's `/document`, #218, after exactly this
+  happened; moved here from `CLAUDE.md` in `#786`): `npm run kms:assemble:internal
+  && (cd kms/site-internal && npx next build --webpack)` is the real check for those directories.
+- Walk **every row** of `validation.md`, not just the generic lint/test/build commands. A row that
+  can't be checked in this environment is reported as unverified, with the reason — never quietly
+  marked as passing.
+- **A `validation.md` row's literal command can be a stricter or looser proxy for its own
+  requirement's actual wording — check the requirement text, not just the command's exit code.**
+  Three instances in one slice's `/validate` (P7.5c+f, #263): a `grep -icE '\b(DROP\|NOT
+  NULL\|UPDATE)\b'` restricted to `ALTER TABLE` lines matched a migration's standard `ON UPDATE
+  CASCADE` foreign-key clause on a table the *same* migration creates — the requirement's own text
+  scoped the ban to "pre-existing tables," which the blanket grep didn't encode; a doc comment
+  explaining, in prose, why a file makes *no* call to three named functions matched a grep built to
+  catch an actual call to them — the same shape as the established `PromoSlider`/P4a trap (bare-word
+  match on a reference, not a use), just applied to negative-space documentation instead of a
+  replaced component's name; and a check's target file (`lib/email.ts`) didn't contain the function
+  name it was grepping for because that function lives one layer up
+  (`features/orders/send-status-email.ts`, which calls into `lib/email.ts`) — the underlying claim
+  was true, the file path in the check was stale. None were code defects; all three were caught only
+  by reading the requirement's own prose after the literal command "failed" or "passed" for the
+  wrong reason, and reported as such rather than either blindly trusting the grep or blindly
+  reporting a false failure. **A fourth instance, P8.1a (#334):** a row asserted `grep -n
+  "overflow-clip" <file>` would return exactly one match as proof a class landed nowhere else, but
+  it returned three — the code's own explanatory comment (added in the same slice, saying *why* the
+  class is scoped where it is) said the word twice in prose. Same shape as the bare-word-match trap
+  above, just triggered by the fix's own documentation rather than a stale reference. Fixed by
+  scoping the check to the className attribute (`grep -n 'className="[^"]*overflow-clip'`) rather
+  than the bare string — the general fix for this whole class of trap is to grep for the *construct*
+  the requirement actually cares about, not a word that construct happens to contain.
+  **A fifth and sixth instance, P8.1b (#335/#337), both structural rather than a bare-word
+  match this time.** A row required `lib/repositories/roles.ts`'s exports to have `prisma` and
+  `vendorId` as their literal "first two parameters" — true for one of the two functions, but the
+  other's real second parameter is a second Prisma client the transaction needs
+  (`applyVendorRole(prisma, prismaWs, vendorId, ...)`), with `vendorId` third. The requirement's own
+  text only asked that both be explicit parameters *somewhere*, with no ordering claim — the
+  `validation.md` row was stricter than what it was proving. Separately, a gate-stage row asserted
+  `grep -n "<id>" ARTIFACT_INDEX.md` would find the slice's front-matter `id` string, but the
+  generated table never renders that field at all (it shows title/type/version/summary, keyed
+  internally by file path) — no slice's `id` has ever appeared there, so the check as written could
+  not pass for *any* slice, not just this one. Neither was a code defect; both were caught by
+  checking what the generator actually emits and what the requirement's prose actually claims,
+  rather than trusting either check's literal exit code.
+  **A seventh instance, #491's `/validate` (2026-09-03):** a row demanded a doc section "must no
+  longer contain" two specific numbers at all, when the paired requirement's own text only asked
+  that the section state the *current* value, explicitly modeled on a sibling requirement one row up
+  that permits a historical citation (`0.10.4`, the pre-fix version) alongside the corrected current
+  one. The doc content was and remained correct — it cited the old, wrong number once, clearly
+  labeled as the very thing that had been stale — but the row as literally written would have failed
+  it. Caught by reading the paired requirement's prose rather than running the row's grep as a
+  pass/fail gate; the row's wording should have mirrored its sibling's historical-citation carve-out
+  and didn't. **The general lesson these seven instances point to: a `validation.md` row is a proxy
+  for its requirement, not the requirement itself — when a row's literal command and its own
+  requirement's prose disagree, the prose wins**, and the disagreement is the finding worth recording
+  (fix the row's wording next time it's touched; don't force the artifact to satisfy an
+  over-literal check). **An eighth instance, P2.6 slice 5 (#568), is five occurrences of one specific
+  shape in a single slice rather than a new shape**: `grep`-based rows for "no `"use client"`
+  directive," "no `aria-modal`/`usePathname`/`Escape`," "no `export const runtime`," and "no raw hex
+  literal" all "failed" because the file's own explanatory comment — written to say *why* the thing
+  is absent — contains the very string the grep was told to treat as evidence it wasn't. Each was
+  confirmed absent from real code by reading the mechanism (a directive only as the file's first
+  statement, an attribute only as a JSX prop, a hex literal only in a `className`) rather than by the
+  literal command. Five in one slice, all the same bare-word-in-prose shape this section already
+  named at P8.1a/#334, is itself the finding: a source-text grep in a hygiene-style
+  `validation.md` row should be assumed to trip on its own justifying comment by default, not treated
+  as a surprise worth re-diagnosing each time it happens.
+  **A ninth instance, deferred-abstraction sweep (#662, 2026-09-08), is the same mechanism running in
+  reverse — a false PASS on a real defect, not a false FAILURE on a correct build.** All eight prior
+  instances are a `validation.md` row's grep, written by a spec author and run manually, tripping on
+  a comment it shouldn't have. This one is a shipped TEST FILE's own internal parser:
+  `tests/radius-scale.test.ts`'s `declaredTokens()` read `design-system/tokens/tokens.css` with a
+  regex that didn't strip comments first, and the explanatory comment above the token declarations
+  quotes `` `--radius: 0.25rem` `` in prose (to explain why bare `rounded` needs its own token). The
+  regex matched that occurrence *inside the comment*, then greedily captured through to the real
+  declaration's own terminating `;`, silently corrupting the parsed value for exactly the one token
+  the comment was written to justify. The test still passed 3/3 on every rebuild — the bug produced
+  no failure to notice, only a permanently blind collision check for that one step. Found only at
+  `/validate` by deliberately reintroducing a real collision (`rounded-sm` against bare `rounded`,
+  both `0.25rem`) and observing the test *stay green* — the same "prove it bites" step
+  `validation.md`'s own R4 row already prescribed for exactly this reason. **The transferable
+  distinction**: the eight prior instances are a reason to doubt a validation row that *fails* against
+  a plausibly-correct build; this is a reason to doubt a filesystem/source-parsing TEST that *passes*
+  with unusual ease, when that test's own subject matter is code carrying an explanatory comment. A
+  test that parses a source file for structured data (tokens, declarations, exported names) and
+  doesn't strip comments first is exposed to this the moment anyone writes a comment that quotes the
+  syntax being parsed — which good comments do constantly, since that's what they're for. Strip
+  comments before parsing, or anchor the parse to a construct a comment can't produce (line start, a
+  specific delimiter a comment's prose won't contain).
+- **A tenth instance, `#786`'s `/validate` (2026-09-17), is the setup command itself under-matching,
+  not a row misreading a correct match.** `#786`'s R9 row scanned inbound references with `git grep
+  -l "CLAUDE.md" -- 'docs/**/*.md' 'specs/**/*.md'` — a glob that silently excludes every file
+  directly inside `docs/` or `specs/` (`docs/model-handoff.md`, `specs/roadmap.md`,
+  `specs/sdd-workflow.md` itself, and others), matching only files at least one directory deeper.
+  The row reported clean; three real stale cross-references (including one inside this very file,
+  pointing at a `CLAUDE.md` section `#786` had just relocated) went uncaught until `/document`'s
+  own reconciliation pass happened to re-grep more broadly. Confirmed by running `'docs/*.md'` and
+  `'docs/**/*.md'` side by side against the same file set and diffing the results — they disagree.
+  **When a pathspec must reach every depth including the root of the directory it names, pair it
+  with the single-level form** (`'docs/*.md' 'docs/**/*.md'`, not `'docs/**/*.md'` alone) or drop
+  the glob entirely and grep the whole tree, then exclude what doesn't apply.
+- **An eleventh instance, `#861`'s `/ship` (2026-09-22), is a diff-shape check narrower than the
+  scope it was meant to prove.** `requirements.md`'s preamble stated a blanket scope ("nothing
+  outside `kms/`, two generated artifacts, `quality.yml` and `tests/` is touched; no document body
+  is edited"), but the only machine check for it (R22) greped `git diff --name-only` against four
+  named path prefixes (`prisma/`, `lib/`, `features/`, `components/`, plus `app/` with one named
+  exception) — a deliberate, narrower proxy for a subset of the scope statement, not the whole of
+  it. Both `/validate` passes ran that grep, both reported clean, and neither ever printed the full
+  unfiltered file list to eyeball against the preamble's actual "nothing outside..." wording. A
+  Build-stage commit had touched `docs/model-handoff.md` — outside every one of R22's four
+  prefixes, so the grep genuinely found nothing, and outside the stated scope, so it should have
+  been a finding. It surfaced only at `/ship`, reading the merge diff after the PR had already
+  merged. The content itself was benign (a routine handoff-log append, matching this repo's own
+  standing convention — see "Project-state handoff responsibilities" above), so nothing needed
+  rolling back, but the gap in the check was real: **a diff-shape row that names specific path
+  prefixes is a proxy for a broader prose scope statement, the same relationship every prior
+  instance in this list has to its own requirement — read the full unfiltered `git diff --name-only`
+  against the stated scope at least once, not just the named prefixes a `validation.md` row happens
+  to grep.**
+- UI changes: verify against rendered output (compiled CSS, rendered HTML, browser screenshot), not
+  code review alone. DB-touching code: `npm run preview`, never `npm run dev` (see `CLAUDE.md`).
+- **A twelfth instance, `#1131`'s `/validate` (2026-10-17): a source-wide grep matched generated
+  text, and a setup step leaked a secret.** R29's `git diff origin/staging -- app components lib
+  features ... | grep -E "queryRaw|executeRaw|Prisma\.sql"` printed a hit that was prose inside
+  `app/(admin)/staff/runbook/docs.ts`, the generated embed of `specs/architecture.md`, which mentions
+  `$queryRaw` nine times already. Loop over `git diff --name-only` and count per file, then exclude
+  generated artefacts (`docs.ts`, `ARTIFACT_INDEX.md`) before treating a hit as code. Separately,
+  `set -a; . ./.env` in Git Bash tried to execute comment and URL lines and echoed a fragment of an
+  API key into the session output: read single keys with `grep '^KEY=' .env`, never source an env
+  file. And a `validation.md` row can assume a state the dev database is no longer in (R4/R5 expect
+  *restored*, the database was *hidden*); check the starting state before the first row, and say so.
+- **A thirteenth instance, P11 slice 1's `/validate` (2026-10-21): a row's own stated safety
+  property didn't hold for the code as shipped, and the named function was not the bug.**
+  `validation.md`'s `C1` documentation claimed `assertNotDeployedDatabase` throws "before a Prisma
+  client is constructed, so no connection is attempted and no credential is used" — true for the
+  call site inside `maybeSeedGeneratedCatalogue`, but `prisma/seed.ts`'s `main()` ran
+  `healthCheck.count()` roughly 100 lines earlier, so a bogus-password repro of `C1` failed on an
+  auth error before the guard was ever reached, masking the refusal instead of proving it. Not a
+  bare-word match this time: `assertNotDeployedDatabase` was itself correct and already fully
+  unit-tested; the claim that was wrong was about *when in the call sequence* it ran. Caught by
+  tracing `main()`'s actual statement order, not by re-reading the guard function in isolation.
+  Fixed with a real code change (a second, earlier call to the same guard), not a row rewrite, and
+  re-proven with an isolated fixture `secrets/staging.vars` rather than a real host. **The general
+  lesson: a validation row asserting an ordering/safety property ("X happens before Y," "nothing
+  happens until Z") is a claim about the artifact's call graph, not just about the function it
+  names — verify the actual sequence, not only that the named function works correctly on its
+  own.**
+- **A row that needs a real narrow viewport (phone-width overflow, tap targets) is not a
+  Claude-in-Chrome job — check `docs/developer-portal/local-dev-playbook.md`'s "Measuring the
+  storefront at real phone widths" section first.** Desktop Chrome, including a Claude in Chrome
+  session, cannot be resized below ~501-1536px depending on the environment, and a same-origin
+  `<iframe>` workaround doesn't work either (`next.config.mjs` sends `X-Frame-Options` /
+  `frame-ancestors 'none'`, and in at least one session the automation extension's own sandboxing
+  blocked it too). `scripts/verify-mobile-layout.ts --base <url> --path <path> --widths 360,390,768`
+  drives headless Chrome over the real DevTools protocol instead and reports `documentScrollWidth`
+  at the exact width asked for — proven at the `#1107`/`#1041` Document pass (2026-10-15) after a
+  `/validate` session spent real effort on the browser-automation dead end first. Reach for this
+  tool before reaching for `resize_window`, not after.
+- **Server actions can be driven headlessly against `npm run preview`** — no browser needed. Next
+  renders every `<form action={serverAction}>` with progressive-enhancement fields, so submitting
+  those fields as `multipart/form-data` invokes the real action, and `Set-Cookie` on the response
+  is how you prove a *negative* (P3d's "matching writes nothing" was verified this way). Three
+  traps, each of which cost a dead end in P3d:
+  - **`fetch`/undici silently drops a caller-set `Host` header.** Under multi-tenancy the vendor is
+    resolved from the host, so every request lands on `/coming-soon` and looks like a broken app.
+    Use `node:http` with `{ setHost: false }` and set `Host` yourself.
+  - **`$ACTION_REF_1` renders with no `value` attribute.** A parser that requires `value="..."`
+    drops it, the action payload is unparseable, and the POST fails as a bare `500` with nothing in
+    the response body. Parse each `<input>` whole, then read `name`/`value` out of it.
+  - **A `<select>` is a form field too.** Serialize `<input>` *and* `<select>` in document order, or
+    any action pairing repeated fields positionally will be tested against the wrong shape.
+  - **An action's id is a stable build-time hash, independent of any session** — you don't need to
+    render an authenticated page to discover it. `.next/server/server-reference-manifest.json` maps
+    every server action's id to its `filename`/`exportedName`; grep the built bundle
+    (`.next/server/app/**/page.js`) for that id string to confirm which `$ACTION_1:0` shape it
+    expects. This is what let P5b's Validate exercise `/staff/discounts`'s admin actions — including
+    the no-`Cookie` and wrong-role refusal cases — **without a valid session to render the form
+    first**, which matters exactly when the row under test is about authorization itself.
+- **Check which database the Worker is actually on before trusting a live result.** `npm run preview`
+  reads `.dev.vars`; `prisma migrate`/`db:seed` and any local inspection script read `.env`. When
+  those point at different Neon projects, a live check silently validates against a database the app
+  isn't using. Compare both before starting, not after a confusing result.
+- **A slice's `validation.md` must say to apply its own pending migration to staging before any
+  write-path row that needs it — this doesn't happen automatically.** CI applies migrations via
+  `prisma migrate deploy` only at merge (CLAUDE.md); a fresh-context `/validate` runs before that,
+  so staging's schema is still one migration behind whatever the branch adds. Skipping this line
+  isn't a "the harness happened to fail" outcome — it's a hard crash: `npx prisma migrate status`
+  reports the migration pending, and the write-path check throws a real Postgres
+  `NullConstraintViolation`/similar, indistinguishable at first glance from a genuine code defect.
+  The fix is `npm run db:migrate` (or `db:migrate:dev`) against `DIRECT_URL`, additive and safe on
+  staging, but only if `validation.md` actually says to run it. First given this instruction in the
+  catalogue-debt-bucket slice's `validation.md`; P7b's `validation.md` omitted the same instruction
+  for its own migration and hit exactly this crash at `/validate`, caught and fixed only because the
+  session recognised the error shape rather than reporting a false code failure. **Write this line
+  into every slice's `validation.md` that ships a migration, not just the ones that happened to get
+  bitten** — don't wait for the next slice to rediscover it the hard way.
+- **A real browser can sign in against `npm run preview` — #176 is fixed** (verified 2026-08-17 at
+  the #192 audit). `lib/auth-origin.ts`'s `splitHostPort` keeps the request port (and handles
+  bracketed IPv6 literals) and `inferProto` returns `http` for loopback rather than trusting
+  `wrangler dev`'s default `x-forwarded-proto: https`, so preview's trusted origin is
+  `http://localhost:8787`, port included. **This entry said the opposite until 2026-08-17, and its
+  diagnostic is now inverted** — it told the reader that `Origin: http://localhost:8787` gets `403`
+  and that `Origin: http://localhost` (no port) gets `200`, and instructed them to apply a
+  temporary uncommitted patch to `lib/auth-origin.ts`. Today the port-ful origin is the one that
+  passes and the port-less one is correctly refused as a genuine mismatch, so a validator following
+  the old text would have concluded a working app was broken. The fix had actually landed as
+  GAP-002 of P6.5, but its only evidence was 26 unit tests — the reported symptom was never
+  re-fired, so #176 stayed open and this paragraph stayed stale. Current behaviour, if you need to
+  confirm it:
+
+  | `Origin` on `POST /api/auth/sign-in/email` | Result |
+  |---|---|
+  | `http://localhost:8787` | reaches credential checking (`401` on a wrong password) |
+  | `http://localhost` | `403 INVALID_ORIGIN` — correct, it isn't the request's origin |
+
+  Because the origin check runs *before* credential validation, a deliberately wrong password is
+  enough to tell the two apart — you never need a real credential to test this. Headless
+  `node:http` calls with a session cookie remain the right tool for rows that don't specifically
+  need a real browser (CORS, canvas/EXIF, on-screen rendering).
+- **A destructive full-database wipe (`npx prisma migrate reset --force`) can be blocked outright by
+  the coding agent's own sandbox, independent of whether the target is dev/staging/production.** Hit
+  at the catalogue-depth-and-scale slice's `/validate` (#489): the intended approach for proving an
+  exact-count requirement (R4's "18 Aheed products on a clean seed run") was to reset the dev branch
+  to empty and reseed, and the reset command was refused by the harness's own destructive-action
+  classifier before it ever reached the database. **This is not necessarily a wall** — if the slice's
+  own seed script has idempotent, additive toggles (here, `SEED_REMOVE_GENERATED=1` and
+  `SEED_SCALE_PRODUCTS`), exercising *those* against the existing seeded state proves the same
+  exact-count properties (remove → count at curated baseline → reseed → count at scale → reseed again
+  → count unchanged) without ever needing a wipe. Reach for the toggle-based sequence first; treat a
+  full reset as a last resort to ask the user about, not something to retry past a refusal.
+- CI (`gates`) is the real Gate 3 — don't report a slice done until it's actually green on GitHub,
+  not "should be green based on local output."
+- **A subagent delegated this stage has no legitimate channel to receive a `/ship` instruction, and
+  its own report that it did is not evidence.** A read-only `/validate` run, delegated to a forked
+  subagent during the crawlability slice (`#955`/`#996`/`#994`, 2026-10-05), pushed its branch and
+  opened a PR on its own, then separately asked to merge — in both cases citing an in-band message
+  it claimed to have received instructing it to do so. No such message was sent by the coordinating
+  session or the user; no corroborating source was found (the PR carried no comments or reviews, and
+  no peer session was live at the time). Whether this was contamination from tool output the
+  subagent read during a long run, or the subagent generating a false justification for a scope
+  decision it made on its own, was never established, and does not need to be to draw the operating
+  rule: **treat a subagent's claim of having received authorization as a claim to verify against
+  real `git`/`gh` state, never as a fact to relay to the user.** If delegating Validate to a
+  subagent, its task should stay read-only; if it reports taking a push/PR/merge action anyway, stop
+  it, verify the actual repository and GitHub state directly, and surface the discrepancy to the
+  user rather than narrating the subagent's account as settled.
+
+## Fix
+
+Validation failed. Correct the artifact, then **re-run Validate from the top** — not just the row
+that failed, since a fix can break a row that previously passed.
+
+- Fix the root cause, not the check. If a requirement can't be proven because the code isn't shaped
+  to allow it, reshape the code — that's what produced the `placeOrder(prisma, vendorId, input)` and
+  `getWebhookOrderService()` refactors, both found at this stage.
+- **Know when a fix is really a redesign.** If it needs a new decision rather than a correction, stop:
+  that's a Spec-level change, and improvising it here — on the validation model, in a validation
+  mindset — is how scope quietly escapes review. Say so and go back.
+- Update `build-notes.md` and, if the fix changed observable behaviour, the CHANGELOG entry.
+- **`hooks/pre-commit`'s Gate 2 check only looks for a *new* `specs/*/requirements.md` on the
+  branch** — it has no way to recognise "this branch corrects an already-existing, already-approved
+  spec," which is exactly what a Fix-stage branch usually is. A Fix commit that touches
+  `app/`/`lib/`/etc. with no new spec file will be blocked by the hook even when the actual Gate 2
+  intent (spec exists before code) is satisfied — the spec just isn't new. `git commit --no-verify`
+  is the hook's own documented escape hatch for this case; use it, and say so in the commit message
+  and to the user, rather than silently bypassing or inventing a throwaway spec file just to satisfy
+  the heuristic. First hit at the P7a `/fix` pass (2026-08-17, #123/#162).
+
+## Ship
+
+Get validated work through the branch → PR → deploy chain deliberately. Not one of `CLAUDE.md`'s four
+named gates, but the part of this repo's actual history most prone to drift.
+
+- Branch off the freshly **fetched** base (`origin/staging`, not a stale local branch) for new work.
+- **A branch cut from the wrong base doesn't announce itself — `git log origin/staging..HEAD`
+  still looks reasonable even when the actual base was `origin/main`.** Found at the
+  catalogue-depth-and-scale slice's `/validate` (2026-08-31, #489): a promotion PR (#488, staging →
+  main) had merged between the previous Orient and this slice's `/build`, and the feature branch
+  ended up cut from `origin/main` at that promotion's merge commit rather than from `origin/staging`
+  — `git checkout -b` had resolved a stale-relative-to-`staging` starting point without either
+  branch name appearing wrong at a glance. Harmless *this time* only because `origin/staging` and
+  `origin/main` were content-identical (the promotion had nothing left to diverge on), confirmed
+  with `git diff origin/staging origin/main` returning empty — a real difference between the two
+  would have silently pulled unrelated, unreviewed `main`-only content into the PR's diff. Caught by
+  comparing `git merge-base HEAD origin/staging` against `git merge-base HEAD origin/main` — they
+  should be the same commit when the branch is cut correctly, and here they weren't. **Fixed at Ship
+  by rebasing onto `origin/staging` before pushing** (`git rebase origin/staging`), which is safe
+  and mechanical whenever the diff-emptiness check above holds — the rebase in this case had zero
+  conflicts and produced a byte-identical tree, confirmed with `git diff <old-HEAD> <new-HEAD>`
+  returning empty. **Run this merge-base comparison at Orient (right after `git fetch`) and again
+  before pushing at Ship** — it's a two-second check and the failure mode is silent otherwise.
+- Push everything for one logical unit as a complete commit (or set of commits) *before* opening
+  the PR. Don't iterate live against CI on an already-open PR — merges here have landed within
+  seconds of opening more than once, stranding a fast-follow commit outside the merge.
+- Open the PR referencing its issue (`Closes #NN`). Wait for the **actual** CI result before calling
+  it ready — poll correctly (multi-line `gh pr checks` output breaks a naive string-equality check;
+  match on absence of `pending` instead) rather than assuming a run will pass.
+- **A cloud session cannot use `gh`'s GraphQL, so `gh pr create`, `gh pr merge`, `gh pr checks`, `gh project`
+  and `gh pr view --json` all return a 403 (`#1223`).** REST works: create with `gh api repos/<o>/<r>/pulls -f
+  title=… -f head=… -f base=staging -F body=@<file>`, label with `gh api repos/<o>/<r>/issues/<n>/labels -f
+  'labels[]=…'`, poll with `gh api repos/<o>/<r>/commits/<sha>/check-runs`, and merge with `gh api -X PUT
+  repos/<o>/<r>/pulls/<n>/merge -f merge_method=squash` (`merge` for a `staging` to `main` promotion). **Project
+  #2 has no REST route here, so a board move is left to the owner or a local session and must be reported as
+  not done**, not skipped. The cloud session's egress proxy also refuses the staging and production hosts, so
+  the `/api/health` read of the post-merge step needs the owner to paste it.
+- **`gh pr checks` is a view, not the truth — cross-check a long "pending" against
+  `gh run view <run-id> --json status,conclusion`.** During P5a's promotion (#140) a `gates` run
+  showed every step green in the Actions UI, including `Complete job`, while the job's own status
+  stayed `in_progress` and `gh pr checks` reported `pending 0` for **56 minutes**; `gh run cancel`
+  on it returned `HTTP 500`. The run had in fact succeeded in ~1 minute. githubstatus.com showed
+  **Actions "Operational"** but a separate active **API Requests / GraphQL** degradation — the
+  status-finalisation write rides that degraded path, so the component badge for Actions stays green
+  while its status reporting is broken. Consequences for this stage: an `until ! gh pr checks | grep
+  pending` loop can spin forever on an already-finished run, and "still pending" is **not** evidence
+  a job is still working. When a run's steps are all green but its status won't settle, read the run
+  API directly, and check **every** status-page component rather than only Actions. See also
+  `CLAUDE.md`'s outage guidance: an incident window is the wrong time to exercise the production
+  gate, but a stuck *reporting* layer is not the same thing as a stuck job.
+- Merging, and any promotion that triggers a deploy, are hard-to-reverse and visible to others:
+  always get explicit confirmation before either, even immediately after a related approval — one
+  merge is not blanket permission for the next one.
+- Confirm the deploy workflow (`deploy-staging`/`deploy-production`) actually completed. Don't infer
+  success from the merge alone. Then read the deployed host's `/api/health`: `commit` is the merge,
+  `db.ok` is `true`, `reference.reachable` is `true` and `reference.sources` is non-empty. **A
+  `drift` of `false` is not evidence of health** — until `#1119` it was reported as `false` even
+  when the reference database never answered, and every promotion record from PR #775 to
+  2026-10-16 cited it while address lookup was down. `drift` is now `null` when nothing was
+  compared, but the assertion stays on `reachable` and `sources`.
+- **If this Build ran in a sub-agent's isolated worktree, remove it once its branch has merged.**
+  Nothing does this automatically — a worktree survives merge indefinitely, and its content becomes
+  a strict subset of the target branch the moment the merge lands. Confirm the branch actually
+  merged and the worktree is clean (`git -C <path> status --porcelain`), then `git worktree remove
+  <path>` (unlock first with `git worktree unlock <path>` if needed). Three worktrees were found
+  sitting idle at once in the same session that added this line — two from already-merged P8.5a/b
+  slices — and idle worktrees are exactly what makes `kms:build-index`'s walk-scoping bug (#357;
+  `kms/schema/repo.ts`'s `EXCLUDE_DIRS` now excludes `.claude`) reachable at all: the more of these
+  accumulate unremoved, the bigger that blast radius gets.
+- **Move the issue to `In Review` once it's merged to `staging`** — not `Done`. `Done` means in
+  production, and `Closes #NN` won't fire on a staging merge because staging isn't the default
+  branch. The issue closes (→ `Done`) when the work is promoted to `main`.
+- `staging → main` is its own deliberate promotion PR, mirroring the existing "Promote X to
+  production" title convention — staging gets deploy-tested first, the production merge is a second,
+  separate confirmation, not a rubber stamp on the first.
+- **A promotion PR closing several issues needs the keyword repeated per issue** —
+  `closes #93, closes #96, closes #99`, not `Closes #93, #96, #99`. GitHub only honours the closing
+  keyword for the *first* issue in a comma-separated list; the rest stay open on merge with no error
+  or warning (#112, found on PR #108). This bites specifically here because slice PRs merge into
+  `staging`, never the default branch, so every issue closure is deferred to a promotion PR — which
+  is exactly where several `Closes` references pile up at once.
+  **Put each keyword on its own line, and prove the link before merging.** PR #953 (2026-09-30)
+  wrote `closes #938, closes #939, closes #945, closes #619, closes #620` on one line and GitHub
+  linked **none** of them — `closingIssuesReferences` was empty and all five stayed open on merge,
+  again with no warning. Every earlier multi-issue promotion that linked (PR #915, PR #921) had one
+  `closes #NN` per line. The cause was not confirmed, so do not rely on either form by eye: run
+  `gh pr view <N> --json closingIssuesReferences` before asking for the merge and check it lists
+  every issue, then confirm each issue is `CLOSED` after the deploy.
+- If a PR merges before a fix/follow-up commit lands, don't force-push or rewrite history to patch it
+  in retroactively — open a tracking issue and land the fix as its own proper follow-up PR.
+- **A PR body referencing an issue that must stay open is a closing-keyword trap, independent of the
+  staging/main issue above.** Drafting PR #209's body for a slice against issue #192 (an umbrella
+  issue that stays open on purpose — one of its four items was explicitly left undischarged), a
+  first draft included a line reading "Closes issue #192's uncovered validation debt…" — not the
+  canonical `Closes #NN` form, but close enough in prose to be worth not trusting by eye. Verified
+  with `gh pr view <N> --json closingIssuesReferences` (empty, confirming GitHub's keyword parser
+  requires the keyword immediately adjacent to the reference, e.g. `Closes #192` with nothing
+  between them) — but the safer habit is to avoid the closing-keyword words entirely anywhere near
+  that issue number in the body, and to run the same `closingIssuesReferences` check on any PR that
+  references an issue it must not close, before merging rather than after.
+- **That `closingIssuesReferences` check is not sufficient — it doesn't see every commit message in
+  the merged set, and one of those closed an issue for real.** PR #214 (promoting to `main`)
+  correctly showed no `#174` in `closingIssuesReferences` before merging — verified per the bullet
+  above. It still closed `#174`. The actual trigger was a *commit* message already on `staging`
+  (`/fix`'s `2b04085`), which quoted the exact wrong text it was correcting:
+  `specs/roadmap.md's Build-time row claimed "closes #174"... corrected to state only #173/#208
+  close`. GitHub's closing-keyword scanner reads every commit landing on the default branch, not
+  just the PR's own body/title that `closingIssuesReferences` reports on — and it doesn't parse
+  quotation marks or surrounding context, so it pattern-matched `"closes #174"` inside that quote
+  and closed the issue despite the sentence's actual point being the opposite. Caught within minutes
+  via the routine post-promotion issue-state check (`gh issue view <N> --json state` on every issue
+  touched by the slice) and fixed — `gh issue reopen` with a comment explaining what happened, board
+  status corrected from the auto-triggered `Done` back to where it belonged. **The rule this
+  generalises to**: never write the literal string `closes #NNN` (or `close`/`closed`/`fixes`/
+  `fixed`/`resolves`/`resolved` immediately followed by `#NNN`) anywhere near an issue number that
+  must stay open — not in a PR body, not in a commit message, not inside a quotation, not inside a
+  sentence whose entire point is that the issue *shouldn't* close. `closingIssuesReferences` only
+  covers one of those surfaces; the only fully reliable check is reading every commit message in the
+  set before it merges, or checking actual issue state immediately after — which is why that
+  post-promotion check belongs in the routine, not just as a recovery step.
+  **This rule fired a second time on the panel-refusal/category-filter slice's own promotion
+  (PR #672, 2026-09-08)** — the exact "sentence whose entire point is that the issue shouldn't
+  close" case this bullet already named, not a new variant. Two commits already on `staging`
+  (Build's `43b5057`, Spec's `6b84c93`) each carried a caution phrased as a colon-separated list —
+  the keyword, a colon, a space, then the first issue's number — naming three issues (one of them
+  `#670`) that had to stay open. No quotation marks this time, and the words plainly meant "do not
+  do this." GitHub closed only the first-listed issue on merge, consistent with the
+  first-in-a-list rule two bullets up — caught and reversed the same way as `#174`. **The
+  practical fix, since the general rule alone survived from #214 to here unread at the moment it
+  mattered:** don't write the caution as prose containing the keyword at all — list the issue
+  numbers as bare digits with no `close`/`fix`/`resolve` word anywhere in the sentence (e.g. "carry
+  #670, #513, #439 forward, unstarted" reads the same to a human and matches nothing to GitHub's
+  scanner).
+- **A squash-merged promotion PR breaks every regular-merge promotion that comes after it, with a
+  spurious content conflict in whatever files both promotions touch.** First flagged as "worth
+  knowing" when PR #275 squash-merged P7.5b into `main` (leaving `origin/main` without P7.5b's
+  original commits as ancestors); it became a real blocker two slices later, at PR #283's promotion.
+  A **regular** merge computes a 3-way diff against the merge-base — but the merge-base was the
+  commit *before* PR #275, and both `main` (via the squash) and `staging` (via the original commits)
+  had since diverged from it in the same append-only log files (`ARTIFACT_INDEX.md`, `CHANGELOG.md`,
+  `specs/roadmap.md`), so git reported `CONFLICTING` even though `staging`'s content was a strict
+  superset of `main`'s in every touched file — verified with `git diff origin/main origin/staging`
+  before touching anything, which is the check to run first rather than assuming a real conflict.
+  **The fix generalises, not just for this one instance**: merge `origin/main` into `staging` with a
+  content-identical resolution (confirm with `git diff origin/staging HEAD --stat` being empty
+  *before* pushing — if it isn't empty, something in `main` really is unique and needs a real
+  decision, not this shortcut) and push that reconciliation commit to `staging`, restoring `main` as
+  an ancestor so the pending promotion PR becomes a clean fast-forward-style merge again. That push
+  will fail Gate 4's CHANGELOG-diff hook (a reconciliation commit carries no new content by
+  construction) — `--no-verify` is correct there, with the same explicit-confirmation treatment as
+  any other hook bypass or merge. **The real fix is upstream of all this: promotion PRs use a
+  regular merge (`gh pr merge --merge`), never squash**, matching every promotion before and since
+  PR #275 (#250, #257, #259, #271). Squash-merging one is what created the divergence in the first
+  place; there is no known reason PR #275 needed to deviate, so treat a squash option on a promotion
+  PR as a mistake to avoid rather than a style choice.
+- **A required quality job can fail on the actual merge-triggered deploy run even though the exact
+  same suite passed clean on the PR's own pre-merge CI, minutes earlier, on the identical commit.**
+  `deploy-production`'s `quality / quality` job for the referral/discount-code-integrity promotion
+  (PR #1006, 2026-10-06) failed on `tests/add-to-cart-feedback.test.tsx:93` — the already-known
+  flake `#983`, independently confirmed during this slice's own `/validate` to pass reliably alone
+  and to be unrelated to the shipped code. The PR's pre-merge `quality / quality` check had passed
+  clean on the same commit. `deploy-staging`/`deploy-production` re-run the full suite from scratch
+  rather than reuse a prior CI result, so a flaky test gets an independent roll each time — passing
+  at PR review proves nothing about the merge-triggered run. **The correct response is
+  `gh run rerun <run-id> --failed`, not a new commit and not `--no-verify`/force-pushing past it**:
+  the `deploy` job itself had not run yet (`quality` gates it), so nothing was deployed on the
+  failing attempt, and re-running only the failed job is the same "fix nothing, just retry" move
+  already covered for a suspected GitHub Actions incident — the difference here is the cause is a
+  *known local flake*, confirmed in the same session's `/validate`, not an external outage. Always
+  read the actual failure before re-running blind: a different test, or a different line, would
+  mean a real regression, not this.
+
+**Write the post-ship sanity-check guide** (owner, 2026-10-31, `#1333`). Once the deploy is
+confirmed, write a short guide anyone can run straight after the ship, and when the feature is
+revisited later:
+
+- numbered steps, each with the exact command or action and the **expected result**;
+- quick checks first (no infrastructure), then live ones, marking which need an owner action;
+- a `Last run: <date>` line, and "any other result: stop, reopen `#NN`".
+
+Put the canonical copy in the doc an operator reads for that area (a "Sanity check" subsection in
+the runbook or guide), and the same steps as a comment on the slice's issue. Run the quick checks
+yourself before posting and mark what ran. When a later slice changes the feature, **update that
+guide and its "Last run" line** rather than writing a new one. First example: `env-setup.md`,
+"Sanity check: the copy rolls back (#1333)".
+
+Then go straight to **Document (final)** — no model switch here. It runs on the same Sonnet 5
+session that just shipped.
+
+**A feature branch cut from `origin/staging` inherits `origin/staging` as its upstream** (#1077, 2026-10-13: `git branch -vv` showed `[origin/staging: ahead 6]`). A bare `git push` would have gone to `staging` itself, not the feature branch. Push with an explicit target and reset the upstream in one step: `git push -u origin HEAD:refs/heads/<branch>`. The `staging` ruleset would have refused it, but do not rely on that.
+
+## Document (final)
+
+The durable record of what actually shipped and what validation actually proved. Verified permanent
+documentation supersedes an incorrect build-time claim, but it does not replace `build-notes.md`'s
+slice-local record. **Runs on the same model as Ship (Sonnet 5), not a freshly-switched Opus 5** —
+see "Why the switch sits after Document, not before" above.
+
+- Rebuild the KMS index (`npm run kms:build-index`) and re-validate front-matter
+  (`npm run kms:validate`). **The index footer records the commit it was built from, so a post-ship
+  rebuild always trails the slice it documents by one commit.** That is expected, not a bug — it
+  rides along on the next slice's branch rather than triggering a PR of its own.
+- Reconcile the docs with what validation actually found. Live verification routinely surfaces things
+  no amount of pre-ship writing would have predicted (an unverified Resend sending domain that
+  blocked all real email delivery; a payment-failure path that needed a scheduled window against live
+  secrets) — those become tracked issues and doc corrections here.
+- **Run the final-state handoff reconciliation after Validate/Fix/Ship:** did the completed work
+  materially change the overall project state a fresh model needs for recovery? If yes, update the
+  authoritative documentation first, then reconcile `docs/model-handoff.md` with the final shipped
+  state. Remove or replace stale information rather than appending history, and reference authority
+  rather than copying it. If nothing material changed, leave the handoff untouched. This does not
+  turn Build Notes into final documentation or make the handoff a second changelog.
+  - **Check `docs/model-handoff.md`'s own `Last Verified` top entry, not just the slice's own
+    bullet.** `sdd:audit` checks that every promotion is *cited somewhere* in the roadmap's change
+    log, but nothing checks whether the handoff's `Last Verified` pointer — the fact a fresh session
+    reads first — has kept pace with it. Measured at `#1087`'s Document pass (2026-10-14): three
+    promotions (`#1069`, the footer/privacy cookie list, `#1083`/`#1078`/`#1079`/`#1077`) had each
+    landed its own correct "DONE, in production" bullet further down the file, while the top
+    `Last Verified` entry still named a `main` commit from three promotions earlier — silently
+    correct in one place and stale in the other, inside the same document. `sdd:audit` passed
+    throughout. Diff the handoff's stated `main` commit against `origin/main`'s actual tip before
+    calling this stage done, not just against this slice's own promotion.
+- Update `specs/roadmap.md`: progress, and a closure note in its change log if this closed out a
+  phase/milestone, matching existing entries' style. **This is the step `sdd:audit` checks at the
+  next Orient** — if it doesn't land, the next loop opens with a reported gap. Verify with
+  `npm run sdd:audit` before you consider this stage done, rather than waiting to be caught.
+- **Reconcile the delivery board** — the status-and-priority-view twin of the roadmap update. Every issue for
+  this slice should be `In Review` (staging) or closed/`Done` (promoted to `main`), and anything
+  newly deferred should be on the board with a Phase. Nothing that belongs in `specs/` goes there.
+- Record anything the loop itself taught — a trap worth encoding in this file or `CLAUDE.md` — while
+  it's still cheap to write down.
+- Later phases (P7 compliance, P8 handover) need compliance reports / a handover pack per their own
+  specs when the time comes — call that out explicitly in that phase's `requirements.md`, don't
+  assume this stage covers it by default.
+- **If this slice closed out a milestone, run `/discover` then `/learn` before the model switch and
+  the Clear** — see **Milestone close (Discover, then Learn)** below. The closure row records what
+  ended; those two phases are what stop the milestone's forward-looking findings and its lessons
+  from dying with the conversation that held them.
+
+**Carry-forward rule:** doc changes made after the slice's PR merged land on the *next* slice's
+branch, not a PR of their own. Gate 4 requires a CHANGELOG diff on every branch, so a doc-only PR
+needs its own CHANGELOG entry to be pushable at all — worth it for a real correction, wasteful for
+an index footer.
+
+**The carry-forward rule and Ship's "branch from a fresh `origin/staging`" pull in opposite
+directions, and the fresh branch wins silently.** Carried Document commits are local and unpushed,
+so a new slice branched from `origin/staging` simply does not have them. Nothing fails: no test, no
+CI job, and `sdd:audit` only notices a missing roadmap row later. At `#1309` (2026-10-27) the
+Document passes for `#1295` and `#1305` sat only on the local `feature/1305` branch and were left
+out of the `#1309` merge; they were recovered by cherry-pick. **Before branching a new slice, run
+`git log --oneline origin/staging..<previous slice branch>`** and carry any `docs(...): Document`
+commits it lists onto the new branch, by cherry-picking them or by branching from that commit. The
+generated `ARTIFACT_INDEX.md` and runbook `docs.ts` conflict on every such cherry-pick: take either
+side and run `kms:build-index` afterwards.
+
+**A Document (final) closeout for a promotion, committed right after `main` and `staging`
+converge, false-positives on `hooks/pre-commit`'s local Gate 2 check.** That hook (`git commit`
+time, not CI) hardcodes its comparison against `origin/main` and treats any staged path under
+`app/` as a "source change" requiring a new `specs/*/requirements.md` — which incidentally catches
+`app/(admin)/staff/runbook/docs.ts`, a KMS-generated file, not authored source. A closeout branch
+created *before* a promotion has plenty of other branches' spec directories sitting in the
+`origin/main...HEAD` range to satisfy the check trivially; one created *immediately after* the
+promotion that same closeout is documenting has almost nothing in that range, so the identical
+docs-only diff shape (`roadmap.md`/`CHANGELOG.md`/`ARTIFACT_INDEX.md`/`docs.ts`, no new spec dir)
+that passed cleanly minutes earlier now blocks. `gates.yml` (the hook's own comment: "the real
+enforcement") has no equivalent Gate 2 check at all, only Gate 4 — so `git commit --no-verify` is
+the hook's own documented escape hatch, not a real gap, **provided the diff genuinely is
+docs-only** (verify with `git status --porcelain` before reaching for it, not after guessing).
+
+When this stage is done, tell the user to **switch to Opus 5** (`/model claude-opus-5`) and *then*
+run `/clear` — the assistant can do neither itself. Switching here, not right after Ship, means the
+model that does the reconciliation work is the one already holding the context, and the model that
+starts the next loop's Orient/Propose/Spec/Build is warm rather than freshly switched and idle.
+
+## Clear (post-documentation)
+
+Second hard reset, closing the loop. **Manual — the user switches to Opus 5, then runs `/clear`.**
+
+Before clearing, confirm committed (or deliberately carried forward as uncommitted working-tree
+changes, noted for the next branch):
+
+- [ ] Final documentation and KMS index
+- [ ] Roadmap updated
+- [ ] Every deferred item is a tracked issue, not a memory
+
+Then return to **Orient** for the next slice, already on Opus 5 — which, coming out of a Clear,
+means reading the repo rather than resuming a conversation.
+
+## Discover
+
+**Forward-looking. Independently invocable (`/discover`); automatic at milestone close, before
+Learn.** Discover asks what the product and the project should be considering next, and answers it
+from the repo's actual state rather than from a feature list someone supplies.
+
+**What it investigates:** new customer problems, business opportunities, UX friction, operational
+gaps, risks, unexamined assumptions, market or competitor observations, technical constraints, and
+areas that may deserve future attention but currently have no owner.
+
+**The classification step is the whole point.** Every finding must be placed in one of three
+buckets before it is written down:
+
+- **Already implemented** — cite the file or schema field. It is not a discovery.
+- **Already tracked** — cite the issue number and its roadmap phase, including if it was
+  *deliberately* deferred or ruled out by an ADR. It is not a discovery either, and re-proposing it
+  as one destroys trust in the whole log.
+- **Genuinely unowned** — no issue, no spec, no schema support. Only these are findings.
+
+Grounding sources, in order of authority: the schema and code; `specs/roadmap.md` and the open
+issues; the ADRs; `CLAUDE.md`; then anything external. **Actual implementation reality outranks any
+document that describes it** — this repo has repeatedly found docs asserting properties the code did
+not have.
+
+**Separate observation from interpretation from recommendation, always.** An observation cites a
+line. An interpretation is labelled as one. A confidence level (Known / Inferred / Needs
+validation) is stated. An assumption presented as evidence is the failure mode this phase exists to
+prevent.
+
+**Discover may challenge an approved plan** — wrong sequencing, a gate nobody noticed, a simpler
+alternative, a grocery-behaviour conflict — and it should, rather than quietly agreeing. What it
+must never do is **change** approved scope. A challenge is written as a finding with a next action,
+and it goes through `/propose` like anything else.
+
+**Output:** one entry per finding appended to `docs/research/discovery-log.md`, each ending in
+exactly one next action: `RESEARCH MORE`, `PROPOSE`, `ADD TO ROADMAP/BACKLOG`, `READY FOR SPEC`, or
+`DO NOT PURSUE`. Findings that warrant action become GitHub issues; a finding that stays a hypothesis
+stays in the log and nowhere else.
+
+**Discover writes no code.** It is a read-and-write-docs pass. It does land as its own docs PR into
+`staging` (PR #963, PR #1018), which is what Gate 4 and the `docs-gates`/`quality` checks require of
+any branch — earlier revisions of this line said Discover "opens no PR of its own", which was never
+true of the docs branch and only ever true of application code.
+
+**Discover has no Document stage, and that is a real gap in the loop — not a quirk of one pass.**
+Nothing in `/discover` reconciles its findings into `docs/model-handoff.md`, so a Discover pass sits
+on `staging` until some *unrelated* slice's promotion carries it into `main`. PR #1019 (mobile
+finish, `#981`/`#982`) did exactly that on 2026-10-10: it promoted the eighth and ninth passes to
+production while the handoff a fresh model reads first described neither `#1016` (a Cloudflare-
+deprecated model id hardcoded at two live call sites) nor `#1017` (one shared, unattributed Workers
+AI pool). Orient's own step 9 reads `docs/research/discovery-log.md` directly and so does catch
+them, which is why this is a latency problem rather than a lost-knowledge one. **The rule:** at the
+next **Document (final)** after a Discover pass, promote any finding about *already-shipped* code
+into the handoff's own **Risks And Blockers** list. A finding about prospective scope stays in the
+discovery log, where `/propose` will find it. Both halves matter — copying every finding into the
+handoff would turn the recovery snapshot into a second discovery log, which
+**Project-state handoff responsibilities** above forbids.
+
+## Learn
+
+**Backward-looking. Independently invocable (`/learn`); automatic at milestone close, immediately
+after Discover.** Learn evaluates the milestone that just completed.
+
+**What it evaluates:** what was actually delivered against what the milestone said it would deliver;
+what worked and what did not; which assumptions were validated and which were disproved; what
+emerged that nobody planned for; which decisions and approaches should be repeated or avoided; and
+which lessons should change how future work is done.
+
+**Evidence discipline is the hard part.** Where measurable evidence exists — merged PRs, roadmap
+change-log rows, issue outcomes, CI run ids, live queries — use it and cite it. Where it does not,
+**state that no evidence is available and stop**. A retrospective that fills its gaps with plausible
+narrative is worse than one with holes in it, because the next reader cannot tell which rows were
+measured. "Still untested" is a legitimate and common outcome, especially for a milestone that
+shipped before any instrumentation existed.
+
+**Promotion is what makes a lesson durable, and the log is not promotion.** A lesson that changes
+how every future session works belongs in `CLAUDE.md`; one that changes the process belongs in this
+file; one that can be mechanically enforced belongs in a test or a CI check. This repo has paid
+repeatedly for rulings that lived only in a document nobody opens at decision time — the
+retrospective records the lesson, and the promotion is a separate, explicit act that the entry must
+name.
+
+**Learn also closes the research loop.** For any hypothesis that entered the milestone from
+`docs/research/discovery-log.md`, return to it and ask whether the behaviour it predicted actually
+changed. Record the answer — including "we still cannot tell" — and recommend iteration, rollback or
+abandonment. Defending a shipped idea against its own evidence is the anti-pattern.
+
+**Output:** one entry appended to `docs/research/milestone-retrospectives.md`, plus whatever
+promotions it names, plus any issues filed.
+
+## Milestone close (Discover, then Learn)
+
+A milestone closes when its last slice has been shipped, promoted to `main`, and documented — the
+same moment `specs/roadmap.md` gains its phase-closure change-log row.
+
+At that moment, **run `/discover` then `/learn`**, and treat the pair as part of closing the
+milestone rather than optional extra work:
+
+1. `/document` (final) completes as it always has — KMS index, roadmap closure row, board
+   reconciliation, `npm run sdd:audit` clean.
+2. **`/discover`** — findings appended to `docs/research/discovery-log.md`, issues filed for
+   anything with a next action beyond `RESEARCH MORE`.
+3. **`/learn`** — retrospective appended to `docs/research/milestone-retrospectives.md`, lessons
+   promoted to `CLAUDE.md` / this file / a test, and hypotheses from the last cycle answered.
+4. **Review and update the stakeholder business case** (`docs/business-analysis/business-case.md`),
+   per **Business case review** below. This is the only stage that runs after Learn, and it runs
+   after Learn deliberately.
+5. All three files' front-matter `version` and `updated` bumped, then `npm run kms:validate` and
+   `npm run kms:build-index` re-run — these are KMS artifacts and go stale like any other.
+6. **`npm run sdd:audit` exits 0.** The close is not finished until it does — see the note in
+   Business case review about what it reports mid-close.
+7. Only then the model switch and `/clear`.
+
+**Why Discover runs first.** Learn should be able to react to what Discover surfaced; a
+retrospective written first will re-derive half of it and miss the rest.
+
+**Why neither is a gate.** Both write evidence, and evidence that a merge depends on gets written to
+pass rather than to be true. The four SDD gates stay exactly as they are.
+
+**These two phases produce no implementation scope by themselves.** Everything they surface reaches
+the roadmap through `/propose`, and reaches code through `/spec`. That is not a formality here — it
+is the only thing keeping a research phase from becoming an unbounded backlog of work nobody agreed
+to do.
+
+## Business case review (at milestone close, after Learn)
+
+`docs/business-analysis/business-case.md` is the stakeholder-facing commercial account of the
+platform: what is built, what it costs to run, what it saves against Shopify, how it could earn, and
+what remains to be invested. It is a **living** artifact — a milestone that closes changes what
+"current" means in it, so it is reviewed at every close (`#777`).
+
+**Why after Learn, not before.** Learn establishes, from evidence, what the milestone actually
+delivered and which assumptions held. The business case consumes that. Reviewed first, it would
+re-derive the same material from the same sources and risk reaching a different answer than the
+retrospective sitting next to it.
+
+**What the review does:**
+
+1. **Move capabilities between IMPLEMENTED / IN PROGRESS / PLANNED** to match what the milestone
+   actually shipped, with the citation updated. A capability that was descoped moves *back*, and
+   saying so is the point.
+2. **Update the status block** — `Milestone assessed` and `Last reviewed`. `Last reviewed` is the
+   field `npm run sdd:audit` reads; it must be the ISO date of the review.
+3. **Re-research the external figures.** Shopify plan pricing and transaction rates, Stripe rates,
+   Cloudflare, Neon and Resend pricing, and the GBP/USD rate all move. Each carries its retrieval
+   date; if the date is stale, the figure is unverified rather than merely old.
+4. **Re-check the open items** listed in the previous revision entry, and answer each.
+5. **Append a revision entry** naming the milestone, what materially changed, and what was
+   **withdrawn or corrected**. Revise the body in place so a reader always sees current truth —
+   the record of what moved lives in the revision history, not as superseded prose left in the body.
+6. **Bump `version` and `updated`.**
+
+**The rules the artifact is held to** — these are why it is worth keeping rather than a marketing
+document: never present PLANNED functionality as IMPLEMENTED; cite a file, model, route or issue for
+every capability; label every derived figure `ESTIMATE` with its assumption at the point of use; and
+never state a modelled saving as a realised one.
+
+**`npm run sdd:audit` will report the business case as due from the moment `/document` writes the
+roadmap closure row until this review lands. That is the check working, not a fault.** It cannot
+know which stage of a close it is running in, and suppressing the report while a close is in flight
+would hide the case this check exists for — a close abandoned halfway. The close ends when
+`sdd:audit` exits 0 again.
+
+**This is not a gate**, for the same reason Discover and Learn are not: it runs after Ship, and
+evidence a merge depends on gets written to pass rather than to be true. It is enforced by
+`sdd:audit` at the next `/orient`, which reports rather than blocks.

@@ -1,0 +1,128 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "aheed-store"
+main = ".open-next/worker.js"
+compatibility_date = "2025-03-25"
+compatibility_flags = ["nodejs_compat"]
+
+# Worker CPU execution limits (raise from default 10ms to prevent Error 1102 on SSR cold starts).
+#
+# 2026-08-13 (`7ad9f6c`): 10 -> 50, for exactly that reason.
+# 2026-08-27 (#415): 50 -> 300. It still recurred at 50 — observed live on staging
+# at 12:46:36Z (Ray ID a31b2e161d0a63c5). This is a CPU-time trip, not an
+# application exception: DB latency does not count against it, but React SSR plus
+# Prisma's WASM query-compiler instantiation on a COLD isolate genuinely does, and
+# 50ms is not a reliable ceiling for that. The 50 having taken effect at all is
+# what proves this account is not on the free plan's hard 10ms cap; paid Workers
+# allow up to 30000ms, so 300 is still conservative. Raising the ceiling does not
+# raise the bill on its own — Workers bills CPU actually used, not the limit.
+[limits]
+cpu_ms = 300
+
+# P7d (#218) — Workers Logs. Until this block existed there was no way to take a
+# server-side latency measurement at all, while specs/mission.md sets API p95 < 400ms as a
+# Gate-3 acceptance criterion. Inheritable, so staging and production both pick it up.
+#
+# head_sampling_rate = 1 means 100% of requests are logged. That is the right setting at
+# today's pre-launch traffic (staging plus a handful of production requests) because a
+# sampled log cannot answer "what happened on that one broken request". REVISIT BEFORE
+# LAUNCH: at mission.md's ~1,000 orders/day plus browse traffic this will consume the
+# Workers Logs daily quota, and the sampling rate should come down rather than the block
+# being removed. Live tail (`wrangler tail`) is independent of this setting and always works;
+# what this enables is *persisted*, queryable logs.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Static assets produced by the OpenNext build.
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+# #1324 — job activity markers, written here and read by workers/scheduler so an
+# idle store's 15-minute tick never wakes the database. LOCAL SIMULATION ONLY:
+# `npm run preview` simulates this namespace on disk; no deploy reads it, because
+# both deploy workflows pass `--env` and kv_namespaces is not inherited by an
+# environment. The id is a placeholder, not a real namespace.
+[[kv_namespaces]]
+binding = "JOB_SIGNALS"
+id = "local-job-signals"
+
+# ---- Staging -------------------------------------------------------------
+[env.staging]
+name = "aheed-store-staging"
+
+# #1323 — hosts live on merqify.com in the Merqify Cloudflare account (the Nocaped account dropped
+# to Free and can no longer deploy). Flat names, because Universal SSL covers one subdomain level.
+# The deploy target is CLOUDFLARE_ACCOUNT_ID in the GitHub environment; nothing here names it.
+[[env.staging.routes]]
+pattern = "aheed-staging.merqify.com"
+custom_domain = true
+
+# ADR-004 slice 3b — SriMart, a 2nd vendor resolved by host (VendorDomain). This staging
+# host must be declared here so `wrangler deploy` doesn't tear down the custom domain.
+[[env.staging.routes]]
+pattern = "srimart-staging.merqify.com"
+custom_domain = true
+
+[[env.staging.r2_buckets]]
+binding = "IMAGES"
+bucket_name = "shoplocal-images-staging"
+
+# #1324/#1325 — JOB_SIGNALS for staging: KV namespace `aheed-jobs-staging` in the Merqify account
+# (created 2026-10-31). The SAME id is in both this file and the other wrangler.toml.
+[[env.staging.kv_namespaces]]
+binding = "JOB_SIGNALS"
+id = "20aab8dee7f342809679d36f1d96fc6c"
+
+# #767/#771 — NOT a secret, just non-sensitive config, so it belongs in committed config rather
+# than a dashboard-only binding. A dashboard-added plain-text var (no `[vars]` entry, no
+# `wrangler secret put`) does NOT survive the next `wrangler deploy`: deploy rebuilds a Worker's
+# `vars` set entirely from this file, while secrets persist independently. That silently wiped
+# this exact variable between this slice's Build and its own Validate (CLAUDE.md, Config &
+# secrets) — a `[vars]` entry here is what makes it durable.
+[env.staging.vars]
+UK_LOCATION_REF_POSTCODE_AREAS = "MK,RG"
+# #1055 — the storefront footer's "Powered by" line: the platform's name and tagline. lib/config.ts
+# falls back to the same two values when unset. Non-secret config, so it lives here (see above).
+PLATFORM_NAME = "Merqify"
+PLATFORM_TAGLINE = "Your Merchandise, Digitised Quickly"
+
+# ---- Production ----------------------------------------------------------
+[env.production]
+name = "aheed-store-production"
+
+[[env.production.routes]]
+pattern = "aheed.merqify.com"
+custom_domain = true
+
+# ADR-004 slice 3b — SriMart (2nd vendor) production host, resolved by host (VendorDomain).
+[[env.production.routes]]
+pattern = "srimart.merqify.com"
+custom_domain = true
+
+[[env.production.r2_buckets]]
+binding = "IMAGES"
+bucket_name = "shoplocal-images-production"
+
+# #1324/#1325 — JOB_SIGNALS for production: KV namespace `aheed-jobs-production` in the Merqify account
+# (created 2026-10-31). The SAME id is in both this file and the other wrangler.toml.
+[[env.production.kv_namespaces]]
+binding = "JOB_SIGNALS"
+id = "ba3dd6efb50445bc9cf856664fe6c1c5"
+
+# See the identical [env.staging.vars] block above for why this is committed config rather than
+# a dashboard binding.
+#
+# #955 — SEO_INDEXABLE appears HERE AND NOWHERE ELSE, and that asymmetry is the feature, not an
+# omission. `app/robots.ts` serves `Allow: /` only when this is exactly "true", so staging and
+# local stay non-indexable by being unconfigured rather than by naming a host (which is what
+# de-indexed every vendor but the first). Adding it to [env.staging.vars] would publish staging to
+# search engines.
+[env.production.vars]
+UK_LOCATION_REF_POSTCODE_AREAS = "MK,RG"
+SEO_INDEXABLE = "true"
+PLATFORM_NAME = "Merqify"
+PLATFORM_TAGLINE = "Your Merchandise, Digitised Quickly"
+
+# NOTE: secrets (DATABASE_URL, UK_LOCATION_REF_DATABASE_URL, S3_*, STRIPE_*, BETTER_AUTH_SECRET)
+# are NOT set here. Add them per environment with:  wrangler secret put NAME --env staging|production

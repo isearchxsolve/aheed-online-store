@@ -1,0 +1,6983 @@
+# Changelog
+
+All notable changes to the Aheed Online Store are recorded here. Format based on
+[Keep a Changelog](https://keepachangelog.com/). Per SDD Gate 4, this file is updated **before**
+every branch merges.
+
+## [Unreleased]
+
+### Added
+
+- **Sanity check for the Feature Catalogue and roadmap recording** (issue `#1374`, spec `specs/2026-10-31-feature-catalogue/`). Document pass records the staging merge in `specs/roadmap.md` and adds the canonical sanity check guide to `docs/store-admin-guide/admin-tabs-guide.md`.
+
+- **Feature Catalogue under the Admin menu** (issue `#1374`, spec `specs/2026-10-31-feature-catalogue/`). `/staff/feature-catalogue` is a demo reference of what the platform really does, organised by role (Customer, Admin, Staff, Platform Admin) and business area. Each feature gives what it does, its business value and a demo talking point, with an honest Live / Partial / Unavailable status and a "Not ready to demonstrate" table. Store admins and above see it under Insights & Help. The content is `features/feature-catalogue/catalogue.ts`; `tests/feature-catalogue.test.ts` fails if a named route disappears or a menu page is left out.
+
+### Changed
+
+- **The platform is named Merqify by default, and "Icon credits" becomes "Third-party credits"** (issue `#1371`). The footer reads "Powered by Merqify · Your Merchandise, Digitised Quickly" in every environment: `PLATFORM_NAME` and a new `PLATFORM_TAGLINE` fall back to those values when unset (unset used to hide the line), and both `wrangler.toml` environments set them explicitly. The credits page heading and title are now "Third-Party Credits & Licences"; its `/icon-credits` URL is unchanged.
+
+- **Scheduler gating is switched on, and production moves to Merqify** (issues `#1325` and `#1341`, spec `specs/2026-10-31-production-cutover/`). The `JOB_SIGNALS` KV namespaces `aheed-jobs-staging` and `aheed-jobs-production` now exist in the Merqify account and are bound in both `wrangler.toml` files, so an idle 15-minute tick no longer wakes the database (`ran=none`). The production cut-over (new database filled from old staging, secrets, promotion) follows the runbook, `env-setup.md`, "Production cut-over".
+
+  **Promoted to production (PR #1366, `ff1c13b`):** `aheed.merqify.com` and `srimart.merqify.com` now serve from the Merqify account and the new Neon database, with health, sign-in and gated ticks verified. The runbook gains a production sanity check, the image-copy resume (`--verify-only --copy-images`) and the IPv4-first workaround for this machine's network.
+
+- **A failed `migrate-to-new-neon --apply` now rolls back** (issue `#1333`, spec `specs/2026-10-31-atomic-neon-copy/`). The seeded-vendor delete and every insert run inside one transaction (`scripts/lib/neon-migration-apply.ts`), so the target is left exactly as `migrate deploy` made it and the same command can be re-run. This makes the copy safe against the real production database in `#1341`, which cannot be reset from a parent branch. `--simulate-failure` (only with `--apply`) proves the rollback on a disposable target. The image copy still runs after the commit and is not rolled back.
+
+  Merged to staging (PR #1360). The live rollback check passed on Neon on 2026-10-31: a forced failure rolled everything back, and a clean re-run committed in 720 ms with every model matching the plan.
+  A short sanity-check guide (two quick checks, five live steps) is in `env-setup.md`, "Sanity check: the copy rolls back".
+  Ship now ends with a post-ship sanity-check guide for every slice (`specs/sdd-workflow.md` 2.53.0, `/ship` step 10): steps with expected results, in the operator doc and on the issue, with a "Last run" date.
+
+- **The demo logins moved to `@merqify.com`** (issue `#1356`, spec `specs/2026-10-31-demo-accounts-merqify-email/`). The six `demo-*@example.com` accounts are now `demo-*@merqify.com`, so mail to them can be forwarded to the owner's inbox by Cloudflare Email Routing. The owner sets up forwarding once; the steps are in `env-setup.md`, "Demo mail forwarding".
+  - **`demo:accounts add` renames instead of re-creating.** An account still on its old `@example.com` address has its email changed in place, so its id, password, roles and orders carry over. If both addresses exist, it refuses before writing anything. `remove` deletes both forms.
+  - **Demo accounts are recognised by their exact addresses.** The new-Neon copy and `grant-role` treat the twelve roster addresses and any other `@example.com` address as demo or test accounts. Every other `@merqify.com` address is a real person. The roster now lives in `scripts/lib/demo-roster.ts`.
+  - **App emails to these addresses still do not arrive**, because Resend rejects unverified domains. That changes with `#1217`/`#104`.
+
+  Merged to staging (PR #1357) and deployed: both staging hosts serve `a9685fa`. It merged without an independent Validate pass.
+
+- **The Merqify image buckets are named after the ShopLocal platform cell** (`#1339`, amendment 7 to `specs/2026-10-29-merqify-platform-move/`). `wrangler.toml` binds `shoplocal-images-staging` and `shoplocal-images-production`, the buckets the owner created, instead of `aheed-images-*`, which do not exist in the Merqify account and would have failed the first deploy. The dev bucket is `shoplocal-images-dev`. The runbook and `.env.example`/`.dev.vars.example` follow; `.dev.vars.example` also pointed local dev at the production image host, which has a hotlink rule. Store hosts are unchanged (`aheed[-staging].merqify.com`, `srimart[-staging].merqify.com`).
+
+### Added
+
+- **The internal docs deploy refuses to publish without Cloudflare Access** (issue `#1328`, spec `specs/2026-10-30-docs-access-guard/`). The docs site has no login of its own, and `deploy-docs-internal` deploys it on every push to `staging` or `main`.
+  - **`scripts/verify-docs-access.ts --pre`**, before the build: the Access API must show a self-hosted application covering every docs host (read from `kms/site-internal/wrangler.toml`), with no `bypass` policy and no allow rule for everyone. Any API error refuses. The staging token needs **Access: Apps and Policies Read**.
+  - **`--post`**, after the deploy: signed-out requests to `/` and a deep link must redirect to `*.cloudflareaccess.com`. A normal page fails the job at once and names the custom domain to remove.
+  - **The docs host is now `docs-shoplocal.merqify.com`** (owner, 2026-10-30). The runbook, architecture and route test follow.
+
+  Until the staging environment's Cloudflare secrets name the Merqify account and its Access application exists (`#1339`), the docs deploy stays red: that is the guard refusing, not a new failure.
+  Merged to staging (PR #1353); the first `deploy-docs-internal` run refused at `--pre` as designed, and nothing was deployed.
+
+- **Roadmap phase P12 — Platform move, Aheed launch & Nocaped decommission** (`specs/roadmap.md` 1.187.0). One milestone and board Phase for the Merqify move, the Aheed Food Centre launch at `aheedfoodcentre.co.uk` and freeing the Nocaped account, with three workstream parent issues (`#1336`, `#1337`, `#1338`) holding every related issue as a sub-issue and the order recorded as GitHub dependencies. Twelve new issues cover work that was tracked only in the runbook or nowhere (`#1339`–`#1350`). Planning only; no code change.
+
+- **Hosting moves to the Merqify Cloudflare account and a new Neon account** (issue `#1323`, spec `specs/2026-10-29-merqify-platform-move/`). The Nocaped account dropped to the Workers Free plan and can no longer deploy.
+  - **New hosts on `merqify.com`**: `aheed-staging`, `srimart-staging` and `images-staging` for staging; `aheed`, `srimart` and `images` for production; `docs` for the internal docs behind Access. The scheduler and the image security policy follow.
+  - **`scripts/migrate-to-new-neon.ts`** fills a new, freshly migrated database from the old staging one. It defaults to a dry run. It copies the two stores, real users and **10% of the products** (245 for Aheed, plus SriMart's 3). It leaves behind test orders, carts, payments, logs and every `@example.com` account. It keeps the original ids, copies the images and re-counts everything at the end.
+  - **A migrated database is never empty**, so the copy accepts a target holding only the vendor every migration inserts (`aheed-food-centre`), replaces it with the copied one at `--apply`, and refuses if that vendor already owns any rows or any other store exists. A failed `--apply` leaves a partial target: reset it, do not re-run. Found by the first validation run; the original "target holds no store" refusal could never pass.
+  - **`scripts/grant-role.ts`** gives an existing user platform or store admin rights. A freshly migrated database has no admin, because every role on old staging belonged to a demo account.
+  - **Aheed Superstore retired**: its route, provisioning script, manifest and test are gone.
+  - **The UK location reference database and the dev database move too.** Reference data is rebuilt in the new Neon account from the public datasets with the existing sync script. Its direct URL must name the primary, which also fixes the replica problem in `#1123`. Dev is migrated and seeded.
+  - **`configure-env` now runs wrangler against the account named in the file being pushed**, not the machine's login, and prints that account first. It also pushes the two reference database URLs and, for production, the image storage keys the daily image job reads from GitHub. Dev's images bucket moves too.
+  - **"Freeing Nocaped" checklist**: every old Worker, bucket, token, Neon project and external registration, each removed only after both environments are proven and with owner approval.
+  - **Runbook**: `docs/developer-portal/env-setup.md`, "Merqify account": what the owner creates (the Access application for the docs site first), the `secrets/merqify-*.vars` files, the staging cut-over steps, production order and rollback.
+
+  Nothing changes until the owner's Merqify and Neon setup exists and the secrets move. No schema change.
+  Merged to staging (PR #1334) but not deployed: `deploy-staging`'s route guard refuses until staging's
+  `VendorDomain` rows name the `merqify.com` hosts, so staging stays on its last build until the cut-over.
+
+- **Background jobs only wake the database when there is work** (issue `#1324`, spec `specs/2026-10-28-event-gated-jobs/`):
+  - **Gated scheduler**: the 15-minute tick reads two markers from a new `JOB_SIGNALS` KV namespace and calls the payment sweep or the error-rate check only when it is due. An idle store goes from 96 database wakes a day to one. Any KV doubt runs the job.
+  - **Daily 03:00 UTC run** calls all three jobs ungated. The guest-cart reaper now runs only there, with its per-store cap raised from 500 to 5,000.
+  - **Stripe Checkout sessions expire 35 minutes after the order is created** (was Stripe's 24-hour default), so abandoned checkouts release their stock within the hour.
+  - **Return page check**: a shopper back from Stripe on a still-pending order is confirmed on the spot if Stripe says it was paid. It never cancels anything.
+  - **Staff order page** (store admins only): **Check payment now** for a pending order, and **Resend confirmation email** for a paid one.
+
+  The staging and production KV namespaces are an owner step (`docs/developer-portal/env-setup.md`, "Gated ticks"). Until they exist, everything runs as before.
+
+- **Four separated views (Shopper, Staff, Store Admin, Platform Admin)** on the existing role checks:
+  - **Landing after sign-in**: `/login` and Google sign-in now go through `/signed-in`, which sends a platform admin to `/staff/platform`, staff and store admins of the host's store to `/staff`, and everyone else to `/account`. A same-site `next` wins; an off-site one is ignored.
+  - **Demo accounts**: `demo-admin` is a store admin only. The new `demo-platform-admin@example.com` is the only platform admin, using the existing `DEMO_ACCOUNT_PASSWORD`. Re-run `npm run demo:accounts -- add` to apply this to a database.
+  - **Platform home**: `/staff/platform` shows seven platform-wide figures and links to every platform page. Store admins are refused.
+  - **Role-check test**: `tests/rbac-gate-matrix.test.ts` fails CI when a staff page, admin API route or staff server action has no server-side role check, or when a platform-only one does not refuse store admins.
+
+  No schema change (issue `#1319`, spec `specs/2026-10-28-rbac-four-views/`). Platform-wide user management is `#1320`.
+
+- **Pricing model v2 on `/staff/platform/costs`**:
+  - **Production costs as we grow**: 18 cost lines (Neon, Workers, R2, Workers AI, Resend, Twilio, Sentry, uptime, backups, company, accountant, ICO, insurance, legal) at 1-100 shops × 100-2,000 orders. Shows which free allowance runs out first, the one-off start-up costs, and both Stripe Connect options.
+  - **Partner time** as a cost, at the owner's £25 an hour.
+  - **Business models**: four that grow with orders and take no percentage of sales. Each shows what the shop pays (its own 1.5% + 20p under Connect, and disputes) beside Shopify, Square, Ecwid, Uber Eats and doing nothing at £15, £25 and £40 baskets.
+  - **What if**: inputs that recalculate in the browser and save nothing.
+  - **Add-ons, risks and recommendation**: 12 add-ons, a risks register, and a recommendation (customer service fee) with a dated founding-partner offer.
+
+  The v1 proposed plans and break-even engine are removed. CSV sections become production, models, comparison, add-ons and risks. Advisory only: no payment code or price changes (issue `#1313`, spec `specs/2026-10-28-pricing-model-v2/`).
+
+- **`/staff/platform/costs` becomes "Costs, Pricing & Business Model"**:
+  - **Costs**: 17 items grouped as fixed, usage-based and development tools, with an Owner to confirm list.
+  - **Competitors**: 10 competitors read from their own pricing pages on 2026-10-27, with source links. Unreadable or unpublished ones show no figures.
+  - **Proposed pricing**: four plans, each labelled Proposal.
+  - **Profitability**: break-even and at-zero-sales scenarios, converted at a dated Bank of England rate. No sales, order or vendor-count forecasts.
+  - **Business models**: six models with a written recommendation, which warns when the numbers disagree with it or its review date has passed.
+  - **Refresh Costs / Refresh Recommendations**: fetch only the registries' own pricing pages and use Workers AI to show unconfirmed, unsaved suggestions. Metered as the new `PRICING_REVIEW` AI feature, which needs one enum migration.
+  - **Export and review**: CSV export per section, Print / Save as PDF, and a quarterly `pricing-review` workflow that opens one reminder issue.
+
+  Advisory only: nothing changes live prices (issue `#1309`, spec `specs/2026-10-27-pricing-business-model/`).
+
+### Changed
+
+- **Checkout slot picker is a 7-day grid; Continue shopping beside Proceed to checkout and Continue to payment; cart, checkout and orders share the `standard` width; orders show 2 per row** — the slot picker now shows a week at a time (days across, time ranges down in Morning / Afternoon / Evening, Free / N left / Full cells, previous and next week arrows) and submits the same `fulfilmentSlotId` and `fulfilmentDate`; one new server action, `getAvailableSlotsForWeek`, fetches a week through the existing per-day lookup. Cart header Continue shopping and Smart Lists are matching pill buttons. The cart drawer is unchanged. Checkout moves from `narrow` to `standard`, so `specs/design-system.md` lists it there. Storefront only, no schema change (issue `#1305`, spec `specs/2026-10-27-checkout-width-and-slot-grid/`).
+
+- **Orders list is a card grid with Reorder items and Save as list on each card; Quick Shop links to orders; the cart has Continue shopping** — `/account/orders` shows 1, 2 or 3 orders per row (wide container), each card keeping its detail link with the two actions beneath it; Save as list from the list returns to the list with a status message. Quick Shop gains a "Your orders" tile and a count-free intro line. `/cart` always links back to `/categories`. Storefront only, no schema change (issue `#1302`, spec `specs/2026-10-27-orders-grid-quickshop-cart/`).
+
+### Fixed
+
+- **The internal docs deploy builds again.** `specs/sdd-workflow.md` 2.53.0 carried a bare `<date>` placeholder, which MDX read as an unclosed tag, so `deploy-docs-internal` failed on `81ab8ac`. It is now in backticks (2.53.1). CI `docs-gates` does not build the docs site, so it passed; the real `kms/site-internal` build is green locally.
+
+- **Staff users saw asset buttons that always failed** — `/staff/icons` is now read-only for STAFF; the mutation routes were already ADMIN-only (issue `#1288`).
+
+- **Dynamic slot asset activation across storefront touchpoints and themed 3D isometric prompt generation** (issue `#1285`).
+  - **Dynamic Slot Asset Activation:** Created `ActiveSlotIconsProvider` supplying active system icon assets from the `CategoryAsset` relational ledger directly into `<Icon3D />`. Now, activating or deactivating candidate assets in `/staff/icons` dynamically propagates to the live storefront header, view switcher, trust strip cards, and floating cart drawer.
+  - **Themed 3D Isometric Prompt Engineering:** Refined `buildSlotAssetPrompt` in `lib/category-image.ts` to align strictly with the store's visual identity (emerald green `#059669`, royal navy `#1E3A8A`, warm gold `#F59E0B`) and isolated 3D app icon specifications, preventing opaque photographic backgrounds or cluttered supermarket scenes.
+  - **Department Scroller on Landing Page:** Rendered `<DepartmentScroller />` on the storefront home page with prioritized high-fidelity category imagery ahead of procedural vector glyphs.
+  - **Alpha-Transparent 3D Icon Suite:** Reprocessed all 14 commercial 3D icons in `public/images/icons-3d/` with feathered alpha edge cutouts, ensuring crisp rendering without white bounding boxes across light, dark, and brand-tinted surfaces.
+
+- **Escape raw angle brackets in 3D icon spec files preventing MDX compilation errors in internal KMS** (issue `#1280`).
+
+- **Resolve broken 404 links, drill-down navigation to portal home, and configurable platform branding** (issue `#1276`).
+  - **404 Link Resolution:** Corrected broken links in `/dev` landing page (`/dev/doc/architecture`, `/dev/doc/tech-stack`, `/dev/doc/design-system`, `/dev/doc/roadmap`, `/dev/doc/sdd-workflow`, `/dev/doc/mission`), staff runbooks (`/staff/runbook/order-fulfilment-core`), and SDD self-review audit records. Validated 0 broken internal links across all 280+ compiled documentation artifacts.
+  - **Drill-down Navigation to Portal Home:** Configured Nextra 4 `_meta.json` top-level entries with `"type": "page"`, establishing persistent top navbar tabs (`Welcome`, `Client Help Centre`, `Internal Engineering`) across all views. Added `home: { title: "← Portal Overview", href: "/" }` to `/staff` and `/dev` sidebars to provide direct 1-click drill-down navigation back to the portal root (`/`).
+  - **Configurable Platform Name:** Replaced hardcoded "Aheed KMS" strings in `kms/site-internal` layout, metadata, navbar, and footer with dynamic resolution via `process.env.NEXT_PUBLIC_PLATFORM_NAME` / `process.env.PLATFORM_NAME` (defaulting cleanly to configurable platform name with `"Aheed"` defined in `wrangler.toml`). Exported `<PlatformName />` component via `kms/site-internal/mdx-components.tsx` and updated KMS index heading.
+
+### Added
+
+- **Running costs report for platform admins at `/staff/platform/costs`** (issue `#1295`; `specs/2026-10-27-running-costs-report/`). Read-only; registered in `PLATFORM_NAV_ITEMS` and refused to anyone who is not a platform admin.
+  - **Registry, not a table:** `lib/running-costs.ts` lists 11 services (Workers Paid $5/month, the `nocaped.com`, `merqify.com` and `aheedfoodcentre.co.uk` domains, Neon, R2, Access, GitHub on free tiers, Workers AI, Stripe, Cloudflare email), each marked Actual, Planned, Estimate or Unverified with an as-of date. USD only; no conversion. Edited in code and shipped; no schema change.
+  - **Totals:** now ($70.46/yr, $5.87/mo), with planned items ($86.22/yr) and at renewal prices after Verisign's `.com` rise on 2026-11-01 ($87.64/yr). Usage-based and unpriced items are in no total.
+  - **Needs attention and renewals:** auto-renew off, a renewal or a price change within 60 days. Today that flags `nocaped.com`, whose auto-renew is off and which expires 2027-08-15.
+  - **Live usage:** only Workers AI (`getPlatformAiNeuronsToday`); a failed read says "Usage unavailable", never 0. Every other row says "Usage not monitored".
+  - **Provider limits** for Workers, Neon, R2 and Workers AI are copied from the providers' own pricing pages with source and date, shown as not confirmed by the owner. Access, GitHub and Stripe pages could not be read, so those rows say "Limits not recorded".
+  - **Deferred:** threshold alerts, notifications and email, provider-API usage pulls, trial and credit expiry, domain rows read from the database.
+
+- **Deactivate icon and category assets, one circular icon medallion everywhere, and AI-replaceable icon inventory** (issue `#1288`; `specs/2026-10-27-icon-asset-activation-and-medallion/`).
+  - **Deactivate:** an active asset can be switched off from `/staff/icons` and the category manager (`POST /api/admin/category-images/deactivate`); the surface falls back to its built-in artwork, and a category's `imageKey` is cleared. Activate and deactivate each run in one interactive transaction.
+  - **`IconMedallion`:** every 3D icon, every decorative icon drawn at 32 px or more, and all category imagery render in one vendor-tinted circle (`components/icons/IconMedallion.tsx`); product photography stays square. `tests/icon-medallion-coverage.test.tsx` enforces it.
+  - **Slot registry:** `lib/icon-slots.ts` lists 15 3D slots (adds `postcode-search`, `contact-follow`, `rewards-gift`) and 81 flat `icon:<name>` slots; the generate route rejects unknown slots. The inventory is in the Icon & Visual Asset Standards Guide.
+  - **Prompts:** use the vendor's own brand colours and ask for circle-safe framing; Aheed's hardcoded colours are removed. ADR-008 v1.3.0 (Decision 6) and the design system record the rules.
+
+- **Category asset management, dedicated icon gallery, and realistic commercial system icons** (issue `#1285`; `specs/2026-10-27-category-asset-gallery-and-realistic-icons/`).
+  - **Category Asset Management Workflow:** Upgraded `CategoryImageManager.tsx` on `/staff/categories/[id]` enabling operators to generate multiple candidate visual assets, review them side-by-side in a responsive thumbnail grid, select the active live asset, and permanently delete redundant variations.
+  - **Dedicated Icon & Visual Asset Gallery:** Built centralized staff panel at `/staff/icons` (`IconGalleryClient.tsx` & `StaffIconsPage`) providing cross-category and system slot inspection, search filtering, high-resolution modal preview, activation, and one-click asset generation metered by Cloudflare Workers AI.
+  - **Relational Asset Ledger (`CategoryAsset`):** Added `CategoryAsset` Postgres model and hand-authored non-destructive migration `20261027080000_category_and_system_assets` with data backfill linking existing category images.
+  - **Photorealistic Commercial System Icons:** Generated, feathered, and optimized high-resolution WebP and PNG assets for 10 system touchpoints: `delivery-van`, `storefront`, `quick-shop`, `user-profile`, `cart-add`, `secure-checkout`, `order-updates`, `view-shopper`, `view-staff`, and `view-admin`. Registered in `Icon3D.tsx` and wired into `LocationControl.tsx` and `ViewSwitcher.tsx`.
+  - **Operator Playbook & Visual Standards:** Documented `/staff/icons` across all 7 required sections in `docs/staff-playbook/staff-tabs-guide.md` and updated `docs/client-help-centre/category-image-standards.md` and `icon-and-visual-asset-standards.md`.
+
+- **AI image generation for category icons and bulk catalogue backfill** (issue `#1283`; `specs/2026-10-26-category-ai-image-generation/`).
+  - **One-Click Category AI Image Generation:** Added `CategoryImageManager.tsx` with style selector (`photo` vs `3d-icon`), real-time image preview via `ImageWithFallback`, and one-click auto-generation backed by Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`) and R2 object storage.
+  - **Bulk Catalogue Backfill:** Added `BackfillCategoryImagesButton.tsx` and `/api/admin/category-images/backfill` to batch-generate imagery for all categories missing photos/icons up to 5 per invocation with budget guardrails.
+  - **Standardized Prompt Engineering:** Authored `lib/category-image.ts` defining distinct prompt formulas for Tesco-model commercial grocery studio photography and clean 3D isometric tactile icons.
+  - **Client Help Centre Documentation:** Updated `docs/client-help-centre/category-image-standards.md` detailing single and bulk generation workflows, style modes, and storage key conventions.
+
+- **Realistic 3D rendered icon suite, high-resolution asset delivery for Icon3D, and visual standards documentation** (issue `#1280`; `specs/2026-10-26-realistic-3d-icons/`).
+  - **Photorealistic Commercial 3D Rendered Suite:** Extracted and generated 12 commercial 3D rendered icons with studio lighting, clay-smooth tactile surfaces, and true alpha transparency: `storefront`, `quick-shop`, `user-profile`, `rewards-gift`, `rewards-coin`, `cart-add`, `delivery-van`, `halal-certified`, `secure-checkout`, `order-updates`, `postcode-search`, and `contact-follow`.
+  - **Dual-Format Asset Optimization:** Saved 24 lightweight WebP and PNG assets under `public/images/icons-3d/` (512x512 canvas, 432x432 safe zone, <65KB per asset).
+  - **Enhanced `<Icon3D>` Component:** Added `ICON_3D_IMAGE_ASSETS` registry and `renderAs?: 'auto' | 'image' | 'svg'` prop with instant zero-layout-shift procedural SVG fallback for SSR and test parity.
+  - **Client Help Centre Visual Standards:** Authored `docs/client-help-centre/icon-and-visual-asset-standards.md` establishing 3D asset dimensions, alpha cutouts, prompt engineering formulas, and merchant onboarding guidelines.
+
+- **Realistic product photography for categories, Category.imageKey schema, and dynamic image URLs** (issue `#1278`; `specs/2026-10-26-category-realistic-photography/`).
+  - **Schema & Migration:** Hand-authored migration `prisma/migrations/20261026150000_category_image_key/migration.sql` adding `imageKey TEXT` to "Category" with backfill for all existing seeded categories, updated `prisma/schema.prisma`, and regenerated WASM client.
+  - **15 Commercial Studio Photographic Assets:** Created 512x512 high-resolution, lightweight commercial studio product photographs under `public/images/categories/<slug>.jpg` matching UK supermarket retail standards (Tesco reference model) across Fresh Food, Bakery, Dairy & Eggs, Halal Meat, Food Cupboard, Drinks, Treats & Snacks, Household, Frozen Food, International, Health & Beauty, Baby & Kids, Pet Supplies, SriMart Electronics, and Home.
+  - **Dynamic Image URL Delivery:** Updated `lib/repositories/categories.ts` and `lib/categories-service.ts` to compose `imageUrl` dynamically from `CDN_BASE_URL` and relative `imageKey`. Updated search suggestions endpoint (`app/api/search/suggest/route.ts`) and staff category forms.
+  - **Responsive Photographic Scroller:** Enhanced `components/layout/DepartmentScroller.tsx` and `DepartmentGlyph.tsx` with clean card framing, eager loading for top 6 items, lazy loading for remainder, and seamless fallback to semantic icons without layout shift.
+  - **KMS Category Image Standards:** Documented image specifications and client onboarding guide in `docs/client-help-centre/category-image-standards.md`.
+
+
+- **Restructure KMS documentation into Client Knowledge Centre and Internal Engineering section** (issue `#1274`).
+  - **Client Help & Documentation Centre (`/staff`):** Reorganized into 8 primary client-friendly categories: Home & Getting Started, User Journey Maps, Set Up & Launch Your Store, Feature & Task Guides, Roles, Permissions & Security, Troubleshooting & Support, Reference Library, and Documentation Management.
+  - **Internal Project & Engineering Knowledge (`/dev`):** Established a dedicated, access-controlled technical repository housing System Architecture, ADRs (001–008), Business Strategy & Pitch, Product Requirements (PRD), Developer Playbooks, and 200+ milestone engineering plans.
+  - **Document Governance & Clean Separation:** Created `docs/client-help-centre/documentation-management.md` for article freshness, review cycles, and no-code `/staff/faqs` CMS authoring; pruned engineering sprint plans from the `/staff` track; integrated `shopping-guide.md` into the staff reference library.
+  - **Navigation & Discovery:** Configured Nextra 4 `_meta.json` sidebar metadata across root, `/staff`, and `/dev` for structured topic browsing and Pagefind indexing.
+
+- **Integrate Client Help & Documentation Centre into existing KMS** (issue `#1272`).
+  - **Comprehensive Client Help Centre:** Added 9 core documentation guides under `docs/client-help-centre/` covering Getting Started, Roles & Permissions, Features & Settings, Products & Catalogue, Integrations, Tutorials & FAQs, Troubleshooting & Escalation, and Glossary & Release Notes.
+  - **Documented End-to-End User Journey Maps:** Authored verified visual flowcharts (Mermaid), step-by-step guides, prerequisites, alternative error paths, and onboarding checklists for all 4 roles: Platform Admin, Vendor Admin, Staff, and Customer.
+  - **In-App Search & Deep Linking in `/staff/runbook`:** Enhanced `RunbookClient` with instant real-time article search and query param deep linking (`initialDocId`, `initialQuery`), allowing staff and admins to jump directly to specific guides.
+  - **Contextual Help Links:** Added contextual guidance buttons on `/staff/products/import` (bulk import guide), `/staff/onboarding` (onboarding checklist guide), and `/staff/delivery-areas` (delivery rules guide).
+  - **KMS Multi-Track Assembly & Navigation:** Updated `kms/site-internal` content hub with structured categories, assembled 279 documents, and verified full-text search indexing with Pagefind (282 pages indexed).
+
+- **Platform Admin role and platform-wide management suite** (issue `#1269`; `specs/2026-10-25-platform-admin-role-and-management/`).
+  - **Platform Admin Server-Side Role Enforcement:** Added `requirePlatformAdmin()` to `lib/auth-rbac.ts` ensuring strict `session.user.role === "ADMIN"` checking. Guaranteed that store-level admins holding `VendorMembership(role: "ADMIN")` with `User.role === "CUSTOMER"` are refused on all platform-wide management operations with HTTP 403 Forbidden (`<PanelRefusal title="Platform admin only" />`).
+  - **Dedicated Platform Navigation:** Added dedicated "Platform" menu to `components/staff/PanelNav.tsx` and platform navigation section to `/staff` hub (`app/(admin)/staff/page.tsx`), visible exclusively to platform administrators.
+  - **Multi-Tenant Platform Management Suite:** Built 5 dedicated platform administration pages under `app/(admin)/staff/platform/...`:
+    - `/staff/platform/vendors`: Central multi-vendor directory showing operational status, primary domain, catalogue counts, and team sizes across all tenants.
+    - `/staff/platform/domains`: Multi-tenant domain and route registry with canonical flags and store associations.
+    - `/staff/platform/onboarding`: Executive launch readiness roll-up across all platform tenants.
+    - `/staff/platform/settings`: Technical architecture overview covering edge runtime, database connection pooling, Better Auth federation, and external integration dependencies.
+    - `/staff/platform/health`: Real-time database latency diagnostics and error logging summary.
+  - **Storefront Configuration Dashboard Role Alignment:** Updated `lib/vendor-readiness-service.ts` and `components/staff/OnboardingReadinessDashboard.tsx` to explicitly tag every configurable setting with its responsible role (`VENDOR_OPERATOR` vs `PLATFORM_ADMIN`), added broken-down completion counters, and introduced role filter tabs.
+  - **Pure Repository Architecture:** Implemented `lib/repositories/platform-admin.ts` with explicit client injection and zero request context imports, adhering strictly to repository purity and transaction safety invariants.
+  - **Operator Documentation & Container Parity:** Documented all 5 new platform routes with the standard 7-part format in `docs/platform-admin-guide/platform-admin-guide.md`, passing `tests/operator-doc-coverage.test.ts` and `tests/page-container.test.ts`.
+
+- **Storefront Configuration Dashboard and Vendor Onboarding Readiness** (issue `#1267`; `specs/2026-10-25-storefront-configuration-dashboard/`).
+  - **Onboarding Readiness Dashboard:** Added staff panel dashboard `/staff/onboarding` under Store Setup (`tier: "admin"`) benchmarking store configuration against the canonical reference `https://aheedfoodcentre.nocaped.com/`.
+  - **Categorized Configuration Audit:** Evaluates 8 distinct areas: Profile & Identity, Storefront Branding, Delivery & Fulfillment, Operating & Order Hours, Catalogue & Inventory, Payment Methods & Badges, Customer Communication & Social, and Infrastructure & Compliance.
+  - **Actionable Tracking & Deep Links:** Computes overall completion percentage, launch readiness status (`LAUNCH_READY`, `NEEDS_ATTENTION`, `IN_PROGRESS`), item-level status badges (`CONFIGURED`, `ACTION_REQUIRED`, `PLANNED`), and deep navigation links directly to corresponding staff configuration pages.
+  - **Pure Repository & Service Separation:** Structured data extraction in `lib/repositories/vendor-readiness.ts` with injected Prisma client and zero request context imports, evaluated via pure engine in `lib/vendor-readiness-service.ts`.
+  - **Planned Features Segregation:** Distinguishes implemented in-app settings from planned/external roadmap items (#1217 Cloudflare Email, #113 Live Stripe Keys, External DNS), preventing planned platform tasks from blocking vendor-level readiness scoring.
+  - **Operator Documentation & Container Parity:** Authored full 7-section operator documentation in `docs/store-admin-guide/admin-tabs-guide.md` and registered layout in `tests/page-container.test.ts`.
+
+- **Provision Aheed Superstore test vendor on staging** (issue `#1265`; `specs/2026-10-25-aheedsuperstore-staging-onboarding/`).
+  - **Staging Custom Domain Route:** Added `[[env.staging.routes]]` with `pattern = "aheedsuperstore-staging.nocaped.com"` and `custom_domain = true` in `wrangler.toml` for automatic TLS certificate generation under the `nocaped.com` Cloudflare zone.
+  - **Vendor Manifest & Tenancy:** Created `prisma/manifests/aheedsuperstore.json` specifying vendor identity (`aheedsuperstore`), AA-compliant branding colors, delivery areas, and host mapping.
+  - **Staging Provisioning Script:** Authored `scripts/provision-aheedsuperstore-staging.ts` with strict production refusal guards (`assertNotProduction`), idempotently provisioning `Vendor`, `VendorBranding`, `VendorConfig`, `VendorDeliveryArea`, and `VendorDomain`.
+  - **Empty Initial Catalogue Invariant:** Asserts 0 `Product` and 0 `Category` rows upon provisioning, ensuring a clean slate for storefront testing.
+  - **Staff Admin Setup:** Automatically associates admin accounts with `aheedsuperstore` for direct testing of `/staff/products/import`.
+
+- **Staff Panel Stock File Upload & Catalogue Import** (`specs/2026-10-25-staff-catalogue-import/`).
+  - **Staff Import Page & Action:** Created `/staff/products/import` under Catalogue with `tier: "admin"`, wrapped in `<PageContainer width="standard">` and gated on `requireVendorRole("ADMIN")`.
+  - **In-Memory Two-Phase Workflow:** Implemented `validateStockFileAction` and `applyStockFileAction` providing full preview of candidate additions, existing record preservation, duplicate rejection reporting, and ADR-007 classifications before explicit commit.
+  - **Worker Bundle Protection:** Kept `@e965/xlsx` strictly out of the Worker bundle (`app/`, `features/`, `components/`, `lib/`), parsing CSV via pure streaming parser and Excel in the browser before action submission.
+  - **ADR-007 Default Policy & Stock Safety:** Enforces automatic restriction categorization (`TOBACCO`/`ALCOHOL` $\rightarrow$ `AGE_RESTRICTED`, `INSTANT LOTTERY` $\rightarrow$ `PROHIBITED`, `PHONE CARDS`/`NEWS`/`E-PAY`/`STAMPS` $\rightarrow$ `NOT_DELIVERABLE`, `DEFAULT` department $\rightarrow$ `NEEDS_REVIEW`). Creates all new products as hidden (`isActive: false`) with stock `UNKNOWN` and quantity 0.
+  - **Session Isolation & 10,000 Row Limit:** Derives `vendorId` exclusively from verified session, rejecting client-supplied vendor IDs, and aborts payloads $> 10,000$ rows before execution.
+
+- **Click & Collect order details: replace order reference with customer email** (issue `#1261`; `specs/2026-10-24-p1261-click-collect-email/`).
+  - **Click & Collect Order Details:** Replaced redundant Order Reference on Click & Collect card with customer Email in `components/orders/OrderAddressCard.tsx`.
+  - **Multi-View Email Propagation:** Wired customer email across staff order view (`app/(admin)/staff/orders/[orderNumber]/page.tsx`), account order history (`app/(storefront)/account/orders/[orderNumber]/page.tsx`), and confirmation views (`app/(storefront)/checkout/[orderNumber]/page.tsx`).
+  - **Repository & Summary Model:** Added `customerEmail` resolution to `OrderSummary` in `lib/repositories/orders.ts` (`findOrderForViewer`, `findOrderForUser`, and `findOrderForStaff`).
+
+- **Icon credits page, generated icon attribution, and cart tooltip cleanup** (issue `#1257`; `specs/2026-10-24-p1257-icon-credits-cart-tooltip/`).
+  - **Cart Hover Tooltip Purity:** Suppressed inner SVG `<title>` in `components/cart/CartDrawerShell.tsx` via `decorative={true}` on the trigger and drawer header icons, ensuring only `"My Cart"` displays on browser hover.
+  - **Clean Catalog Names:** Renamed `cart-add` in `lib/icons-3d/catalog.ts` to `"My Cart"` and stripped redundant `"3D "` prefixes from all icon catalog names.
+  - **Custom Label Rendering:** Updated `lib/icons-3d/render.ts` so custom `options.label` is respected in non-decorative SVG `<title>` elements.
+  - **Dedicated Icon Credits Page:** Authored `app/(storefront)/icon-credits/page.tsx` with clean, accessible attributions for all four third-party icon libraries (Lucide, Google Noto Emoji, Phosphor Icons, Simple Icons) with upstream links and SPDX notices.
+  - **Configurable Generated Icons Attribution:** Added Generated Icons section on `/icon-credits` attributing custom 3D artwork with **“Powered by [Platform Name]”**, reading from `getPlatformBrandingEnv().PLATFORM_NAME` (configurable via `PLATFORM_NAME` in config/env).
+  - **Storefront Footer Link:** Updated "Icon credits" in `components/layout/StorefrontFooter.tsx` to navigate directly to `/icon-credits`.
+  - **KMS MDX Prerender Safety:** Escaped platform name placeholder in slice specs to prevent Nextra/MDX JSX expression prerender errors during internal KMS deployment.
+
+- **UI and checkout improvements: My Cart tooltip, Contact Hub label, official payment logos, address layout, Click & Collect order details, animated Quick Shop** (issue `#1254`; `specs/2026-10-24-p1254-ui-checkout-improvements/`).
+  - **Cart Tooltip:** Standardized trolley trigger button tooltip to `"My Cart"` in `components/cart/CartDrawerShell.tsx`.
+  - **Contact & Follow Hub Clean Name:** Removed `"3D"` prefix from `contact-follow` in `lib/icons-3d/catalog.ts` and set floating trigger tooltip to `"Contact & Follow Hub"` in `components/layout/FloatingContact.tsx`.
+  - **Official Payment Vector Logos:** Upgraded Visa, Mastercard, Google Pay, Apple Pay, and American Express in `public/payment-methods/` to official brand marks with interlocking red/orange/yellow circles for Mastercard, 4-color Google G and dark gray Pay for Google Pay, Visa blue for Visa, Apple silhouette + Pay for Apple Pay, and white on blue for Amex, all consistently centered on 48×30 rounded tiles.
+  - **UK Address Layout:** Reordered address inputs in `components/checkout/CheckoutForm.tsx` so `Flat, building (optional)` appears above `Street address`.
+  - **Click & Collect Order Details:** Enhanced `components/orders/OrderAddressCard.tsx` to branch on `fulfilmentMethod`. When `COLLECTION`, renders a clear "Click & Collect" section with "Customer Collection" badge, customer name, order reference, and contact phone, without displaying the store's address as a customer delivery destination.
+  - **Quick Shop Icon Animation:** Activated CSS keyframe animation (`animated={true}`) on the header's Quick Shop 3D icon in `components/layout/ShoppingListLink.tsx`.
+
+- **Quick Shop mobile visibility, icon sizing, 3D user profile icon and navigation drill-down fixes** (issue `#1251`; `specs/2026-10-24-p1251-navigation-icon-fixes/`).
+  - **Quick Shop Main Navigation Placement:** Moved `ShoppingListLink` into `Main Navigation` directly alongside `Shop`, ensuring persistent, prominent visibility on mobile, tablet, and desktop viewports, while giving the mobile search bar full unobstructed row width.
+  - **Enlarged 3D Icons & Enhanced Tooltips:** Increased `FloatingContact` icon from 28px to 38px to properly fill the 48px floating button; increased header `Shop` and `Quick Shop` 3D icons from 20px to 24px; increased `CartDrawerShell` cart icon to 28px; increased `RewardsLauncher` coin icon to 24px. Enhanced `title` tooltips across all interactive navigation and floating triggers with descriptive copy.
+  - **3D User Profile Icon:** Added `user-profile` 3D icon to `lib/icons-3d/catalog.ts` (expanding catalog to 20 icons). Replaced the plain letter initial in `Header.tsx` with a dedicated 3D user-profile avatar icon for signed-in and guest users.
+  - **Reliable Drill-Down Navigation:** Added `prefetch={false}` on `Shop` and `Quick Shop` links to prevent Next.js App Router partial flight cache corruption when crossing route groups; added smooth scroll-to-top fallback when clicking active section.
+
+- **Expand 3D icon suite across Shop, Quick Shop, Contact and Follow, and Department navigation** (issue `#1248`; `specs/2026-10-24-p1248-3d-icons-expansion/`).
+  - **3 New 3D Icons (`lib/icons-3d/catalog.ts`):** Added `storefront` (3D supermarket store with awning canopy), `quick-shop` (3D shopping bag with embossed list badge and dual metallic handles), and `contact-follow` (3D dual communication bubbles with friendly group silhouette). Catalog expanded from 16 to 19 icons.
+  - **Header Shop & Quick Shop:** Upgraded the Shop navigation link in `components/layout/Header.tsx` to `<Icon3D name="storefront" size={20} />`, and the Quick Shop button in `components/layout/ShoppingListLink.tsx` to `<Icon3D name="quick-shop" size={20} />`.
+  - **Floating Contact & Follow Button:** Upgraded the floating contact trigger in `components/layout/FloatingContact.tsx` to `<Icon3D name="contact-follow" size={28} dataIcon="users" />`.
+  - **Department Categories Navigation:** Mapped grocery departments (`fruit-veg`, `bakery`, `dairy-eggs`, `halal-meat`, `groceries`, `beverages`, `snacks`, `frozen-foods`, `household`) now render modern 3D vector icons across `components/layout/DepartmentScroller.tsx` and `components/layout/DepartmentHero.tsx`.
+  - **Rewards Launcher:** Upgraded floating rewards button in `components/rewards/RewardsLauncher.tsx` to `<Icon3D name="rewards-coin" size={20} />`.
+  - **Accessibility & Render Optimization:** Added `decorative` support to `<Icon3D>` and `renderIconSvg` to omit inner `<title>`/`<desc>` tags and output `aria-hidden="true"` when placed alongside visible button copy; keyframe CSS is now omitted when animations are disabled.
+
+- **Production-ready 3D Icon Studio API and modern 3D icon suite integration** (issue `#1245`; `specs/2026-10-24-p1245-3d-icon-system/`).
+  - **3D Icon Core Engine & Catalog (`lib/icons-3d/`):** Implemented high-performance, theme-adaptive vector 3D icon compiler with layered gradients, ambient drop shadows, specular depth highlights, and keyframe animations with strict `prefers-reduced-motion` silencing.
+  - **Production API Endpoints (`app/api/icons/`):** Added `GET /api/icons` (JSON catalog manifest) and `GET /api/icons/[id]` (standalone SVG delivery with Zod validation, `X-Content-Type-Options: nosniff`, and Cloudflare edge caching headers).
+  - **Universal `<Icon3D>` Component (`components/icons/Icon3D.tsx`):** Added theme-aware 3D icon component supporting both inline SSR (zero network overhead, instant paint) and remote image embed modes.
+  - **Storefront Modernization:** Replaced flat placeholder icons with polished 3D illustrations on homepage hero (3D delivery badge, 3D HMC certified halal medal), trust values strip (3D delivery van, 3D secure checkout shield, 3D order updates notification bell), delivery availability modal (3D postcode search pin), floating cart trigger, and checkout page header.
+  - **Upgraded Visual Studio & Developer Reference:** Upgraded `scripts/aheed-3d-animated-icon-studio-upgraded.html` with full 16-icon catalog and direct API connectivity; added comprehensive API documentation in `docs/developer-portal/3d-icon-api.md`.
+
+- **Supermarket trolley icon for checkout and group icon for contact cluster** (issue `#1242`; `specs/2026-10-24-p1242-trolley-group-icons/`).
+  - Added `"shopping-cart"` to `ICON_REGISTRY` mapped to Google Noto Emoji `shopping-cart` (supermarket trolley 🛒).
+  - Updated floating checkout/cart button and drawer header in `components/cart/CartDrawerShell.tsx` and empty basket in `components/cart/CartContents.tsx` to render `<Icon name="shopping-cart" />`.
+  - Updated floating contact cluster launcher button in `components/layout/FloatingContact.tsx` to render `<Icon name="users" />` (community group 👥) instead of technical `share` node icon.
+
+- **Colourful Noto Emoji icons across storefront and admin surfaces** (issue `#1239`; `specs/2026-10-24-p1239-noto-emoji-icons/`, `specs/decisions/ADR-008-icon-system.md`).
+  - **79 decorative and status icons switched to Noto Emoji:** all feature, button, navigation, sidebar (`CollectionNav`), header (`Delivery` / `Click & Collect`, `Quick Shop`, `Shop`, `ViewSwitcher`), rewards (`RewardsLauncher`, `RewardsPanel`), trust strip, account (`AccountNav`), footer, status (`badge-check`, `circle-alert`, `circle-check`, `circle-x`, `shield-alert`, `triangle-alert`), and admin icons now render colourful Google Noto Emoji inline SVGs via `<Icon>`.
+  - **Compact functional UI chrome preserved on Lucide:** 30 functional navigation and control primitives (`chevron-*`, `arrow-*`, `x`, `plus`, `minus`, `check`, `loader-circle`, `search`, etc.) plus interactive 1-to-5 rating stars (`star`) remain on `provider: "lucide"` (`currentColor`).
+  - **Product card favourite heart:** `FavouriteButton.tsx` renders `heart-outline` (Noto `white-heart`) when unfavourited or signed-out, and `heart` (Noto `red-heart`) when favourited.
+  - **Header search button:** keeps the white outline `search` icon on the dark button for optimal contrast.
+  - **Internal SVG ID namespacing:** `scripts/lib/icon-build.ts` automatically namespaces internal SVG IDs and references (`id="ni-<name>-<id>"`, `url(#...)`, `href="#..."`, `xlink:href="#..."`) to prevent gradient and clipPath collisions across multiple inline icons.
+  - **Licence notice deduplication:** `buildLicences` deduplicates `@iconify-json/noto` (Apache-2.0) across registry and department illustrations in `public/third-party-icon-licenses.txt`.
+
+- **One icon component, one registry, build-time icon data: the foundation for colourful, vendor-themed icons** (issue `#1223`, Phase 1 of 5; `specs/2026-10-22-icon-system/`, `specs/decisions/ADR-008-icon-system.md`). No visual change in this phase.
+  - **`components/icons/Icon.tsx`** renders any icon by semantic name from `components/icons/registry.ts`; components never import an icon library. Sizes are a token scale (12, 16, 20, 24, 32, 48), colour is a `tone` read from the per-vendor tokens `brandStyle()` already emits (no new token), and an icon is `aria-hidden` unless it has a `label`. Three tiers: `functional` (Lucide only, enforced by the type), `status`, `decorative`.
+  - **Icon data is generated at build time** by `npm run icons:build` (`scripts/build-icons.ts`) from four exact-pinned `devDependencies` and committed; nothing is fetched at runtime, so the CSP is unchanged. `npm run icons:check` runs in `quality.yml` and fails on a stale file. The generator rejects unresolved ids, a duotone icon without its secondary layer, and any body containing script, `foreignObject`, `javascript:` or an `on*` handler. `public/third-party-icon-licenses.txt` carries the upstream licence text.
+  - **`@iconify-json/lucide` is pinned to 1.2.122, not the newest release,** because it is the release whose artwork matches the installed `lucide-react` 1.30.0: all 102 icons in use match to within 0.06 of a 24 unit grid (`tests/icon-lucide-parity.test.ts`). The newest (1.2.147) redrew `circle-check`, `cookie`, `trash` and others.
+  - **Root attributes are hoisted onto the `<svg>`,** as `lucide-react` renders them, so `fill-current` on the favourite heart and `fill-amber-400` on star ratings keep working; Iconify's Lucide data repeats them on every child, where a root class cannot reach.
+  - **Moved onto the component:** `Header`, `FilterPanel`, `CollapsibleSidebar`, `DepartmentHero`, `DepartmentScroller`, `PanelNav` and the `/staff` hub. `category-icon.ts` and `nav-items.ts` now carry icon **names**, not components. Three tests no longer select Lucide's generated `svg.lucide-*` classes.
+  - **`scripts/verify-icon-markup.ts`** inventories the `<svg>` elements of rendered pages and compares two inventories; Phases 2a and 2b use it to prove the migration changed no icon. **`scripts/codemod-lucide-to-icon.ts`** does the migration mechanically.
+  - **Corrected from the spec:** the icon count under `app`, `components`, `features` and `lib` is **102**, not 141 (the first audit also counted the `docs/ui-ref` mockups); and R37's Worker metric is now `wrangler deploy --dry-run`'s gzip figure, because `.open-next/worker.js` is a 2 KB entry shim.
+
+- **A new client's catalogue can be provisioned and imported without a hand edit — hidden, stock unknown, categories as the client wrote them** (issue `#1216`; `specs/2026-10-22-aheedsuperstore-onboarding/`). No schema change, no migration. Nothing here touches `wrangler.toml`, a workflow, a secret or any deployed environment.
+  - **A vendor manifest can carry honest placeholders.** `scripts/provision-vendor.ts` accepts a `placeholders` list of field paths (and treats `OWNER TO CONFIRM`, `.invalid` and `[BRACKETED]` values as unconfirmed). `--check-ready` exits 1 while any remain; `--emit-route --env staging|production` prints the `wrangler.toml` route block only for a ready, routable manifest, and nothing else on stdout. These are gates the operator runs, not CI checks: a real manifest is never committed (`#1221`).
+  - **`scripts/import-catalogue.ts` reads `.csv`, `.xlsx` and `.xls`** through one exact-pinned dependency, `@e965/xlsx` 0.20.3 (imported only from `scripts/`, never the Worker bundle).
+    - **Dry run is the default and needs no database;** `--apply` runs the host guard (dev databases only, no override) and writes.
+    - **Everything is created hidden:** products `isActive: false` with stock `UNKNOWN` and quantity 0, categories inactive, restrictions from the existing import policy by the client's *source* department, one `IMPORT` audit row per restricted product. Unreviewed departments import `NEEDS_REVIEW`.
+    - **Categories are the client's own names,** trimmed of whitespace only; nothing is mapped or renamed (standardisation is `#1218`). Spelling variants and rejected rows are reported for review (exit code 2), never merged silently.
+    - **Nothing is fabricated or deleted:** no barcode, supplier, cost, stock or VAT is written; a re-run writes nothing except a *tightened* restriction; changed prices and names are reported as drift; every other vendor's row counts are compared before and after.
+  - **`scripts/verify-onboarding.ts` and `scripts/verify-catalogue-import.ts`** are read-only dev checks (hidden state, snapshots and diffs, audit shape, and a probe that provokes a real unique violation through each Neon adapter and prints its `.code`).
+  - **Runbook** in `docs/developer-portal/client-onboarding-prerequisites.md` (Procedure, Testing and validation, Rollback), `prisma/manifests/README.md` and a neutral `example-import-profile.json`. **Not yet run against a dev database** (no credentials in the building session); see `build-notes.md`.
+  - **Deferred, filed:** `#1218` category standardisation and a versioned import template, `#1219` a deployed isolated dev environment, `#1220` imported-product enrichment before activation, `#1221` slug identity and the placeholder gate. `#1217` (provider-agnostic outgoing email) is its own slice.
+
+- **A product can be restricted, stock has three explicit purchase states, and staff can review the catalogue in bulk — the safety layer a client import needs before it runs** (issue `#1211`; `specs/2026-10-22-catalogue-restrictions-stock-states/`; owner rulings `specs/decisions/ADR-007-storefront-scope-restrictions-stock-states.md`). **One additive migration** (`20261022120000_p1211_restrictions_stock_states`): four enums, two columns, one table and a `CHECK`. No `DROP`, no `UPDATE`.
+  - **Restricted means hidden, enforced by Postgres.** `Product.restriction` plus `CHECK "Product_restricted_inactive_check"`.
+    - `PROHIBITED` and `AGE_RESTRICTED` are **hard blocks** with no override path for any role. The second stays blocked until age verification exists (`#1212`).
+    - `NOT_DELIVERABLE` and `NEEDS_REVIEW` clear only through an **ADMIN** confirmation that the product is legally sellable and can be fulfilled, plus a reason. The clear is one conditional write and appends to a new append-only `ProductRestrictionAuditLog`.
+    - A restriction can be tightened, never loosened, except by that audited clear.
+  - **Stock is `TRACKED`, `UNTRACKED` or `UNKNOWN`** (`Inventory.stockMode`), and **unknown is never available**.
+    - The column defaults to `UNKNOWN`, so a code path that forgets to choose fails closed.
+    - Existing rows became `TRACKED`, which is how they already behaved.
+    - `UNTRACKED` sells without a count, and is never decremented or restored.
+  - **One purchasability rule.** `purchasableQuantity()` in `lib/cart-rules.ts` replaces `effectiveStock` and the three inline `(inventory?.quantity ?? 0) > 0` derivations. The cart, `placeOrder`, bundles and every storefront mapper call it, and a guard test fails if a re-derivation comes back. "Only N left" shows for `TRACKED` stock only.
+  - **Bulk review on `/staff/products`.** Restriction and stock filters, 25 or 100 per page, and Make available / Hide / Mark stock as not tracked, all behind a preview that lists every restricted product by name. Apply recomputes the plan from the database, so bulk can never do what a single update could not. The summary reports updated, skipped and failed products.
+  - **`lib/catalogue-import-policy.ts`** is the contract `#1201`'s importer must use.
+    - Every imported row is created hidden with stock `UNKNOWN`.
+    - A re-import never activates a product, never clears a restriction, and never touches stock.
+    - Department → restriction maps are per-client input, never platform code.
+  - **Records the owner's rulings.** `#1196` is ruled storefront-only, not stock management. `#1200` is ruled "import everything hidden", replacing its exclude-at-import recommendation. Deferred: `#1212`, `#1213`, `#1214`.
+
+- **A vendor is provisioned from a manifest, and a deploy can no longer tear down a trading vendor's domain** (issues `#490`, `#1198`, `#1197`; `specs/2026-10-21-p11-onboarding-foundation/`). First slice of `P11 — Repeatable Vendor Onboarding`. No schema change, no migration, no new dependency. In production since `7b703b9` (promotion PR #1208, 2026-10-21); the route check ran green on that first production deploy.
+  - **`scripts/verify-worker-routes.ts` fails a deploy that would unroute a trading vendor** (`#1198`). Every vendor host is its own `custom_domain = true` block in `wrangler.toml`, and a `wrangler deploy` that omits a host which already has a custom domain **tears that domain down** — the file's own committed comment says so, and nothing compared it against `VendorDomain` until now. The script reads the rows for the environment being deployed, parses that `--env`'s route patterns, and exits non-zero naming every unrouted host; `--write` emits the correct block so adding a vendor is paste-not-author. Hosts carrying a port or ending in `localhost` are excluded, because the dev seed writes `localhost:8787` as a real row.
+  - **A wildcard route was available and was rejected on evidence, not assumption.** The Cloudflare account was read rather than guessed: `nocaped.com` is an active `full` zone on the Free plan, and proxied wildcard DNS is no longer Enterprise-only. It lost because **Worker Custom Domains cannot be wildcards at all**, and a wildcard route plus Universal SSL each cover exactly **one** subdomain label — `staging.aheedfoodcentre.nocaped.com` is two deep and serves a certificate today only because a Custom Domain issues one per hostname. A wildcard would have meant renaming a live staging host or buying Advanced Certificate Manager. **ADR-004 decisions 3 and 7 are corrected** (1.14.0) rather than left claiming the opposite of the code.
+  - **`scripts/provision-vendor.ts` provisions a vendor from a zod-validated manifest** (`#1197`). A third vendor used to require editing `prisma/seed.ts` — an id constant, a satellites literal, a branch in `main()` — because `upsertVendorSatellites`, `upsertVendorDomain` and `seedFulfilmentSchedule` were module-private. They now live in `prisma/provision-vendor.ts`, each taking a `PrismaClient` first, the signature `prisma/seed-footer.ts` already used. `prisma/seed.ts` is otherwise a pure move: 237 lines out, and the only additions are the import and four call sites.
+  - **The manifest owns the vendor's `id`**, so every write is an upsert on a primary key it supplies and a re-run changes nothing. A generated id would create a second vendor on the second run. Every schema object is `.strict()`, so a misspelled key is an error rather than a silently dropped value leaving the vendor on a default nobody chose — including the footer, modelled in full so an invalid manifest cannot write a half-provisioned vendor before failing.
+  - **It writes no catalogue at all.** No `Category`, no `Product`, no `Brand`. A provisioned vendor has an empty catalogue on purpose; importing one is `#1201`, deliberately a separate slice.
+  - **The Aheed and SriMart fixtures stay in `prisma/seed.ts`.** They are the multi-tenant test data two vendors' worth of branding checks depend on, and `CLAUDE.md` requires those checks be verified against a second vendor because several false-positive against Aheed.
+  - **`prisma/manifests/example.json` now carries one sample loyalty tier.** It previously shipped with `loyaltyTiers: []`, so the worked example never demonstrated that field's shape even though the tagline says to replace every value in the file. `config.loyaltyEnabled` stays `false` — tiers can exist before the storefront feature is switched on.
+
+### Changed
+
+- **Colourful, vendor-themed icons and department illustrations, Phases 3 and 4a of #1223 (PR B), with an icon-credits link in the footer** (issues `#1223`, `#1234`; `specs/2026-10-22-icon-system/`). Visible change; no schema change, no migration, no token, `brandStyle()`, CSP or `next.config.mjs` change.
+  - **Two-hue glyphs** (Phosphor duotone, second hue from the vendor's own tokens through `Icon`'s `tone`) on the landing trust strip and the Rewards panel: nine new decorative registry names, no existing key changed. The dark Rewards surfaces keep their amber and take no tone. `tests/icon-tone-contrast.test.ts` checks the four foreground tokens clear 4.5:1 on white, cream and their tints for three palettes.
+  - **16 department illustrations** (Noto Emoji, Apache-2.0): `components/icons/illustrations.ts` maps slugs to art, `npm run icons:build` writes `public/illustrations/departments/<slug>.svg` (70 KB total, with explicit `width`/`height`) and `icons:check` flags a tampered or unexpected file. `DepartmentScroller` shows them on its 64 px tile (tints alternate; first six eager, rest lazy) and `DepartmentHero` through the new `DepartmentGlyph`; a department with none keeps the neutral glyph (#729). They render through `ImageWithFallback` (one optional `decoding` prop added), so a missing file shows the glyph.
+  - **Licence:** the Noto Emoji section of `public/third-party-icon-licenses.txt` carries the canonical Apache 2.0 text and records that the set's own licence URL returns 404.
+  - **Footer:** a new "Icon credits" link to `/third-party-icon-licenses.txt` on every vendor (owner decision on `#1223`), beside "Powered by".
+  - **Spec amended before Build** (R64 gained `StorefrontFooter.tsx` and `ImageWithFallback.tsx`; new R67). Live checks (R51, R65, page halves of R39/R40/R50/R67, R37, screenshots) need the owner's machine: `#1234`.
+
+- **Dedicated Offers & WhatsApp Promotions page at `/whatsapp-offers`, with multi-tenant WhatsApp community group invite link and QR code configuration on `/staff/storefront`** (issue `#1233`; `specs/2026-10-24-whatsapp-offers-page/`).
+  - **Schema & seed (`R1`, `R2`):** Added nullable `whatsappCommunityUrl` and `whatsappCommunityQrKey` columns on `VendorConfig` (`prisma/migrations/20261024040000_vendor_whatsapp_community/migration.sql`). Added `prisma/seed-assets/aheed-whatsapp-qr.png` (byte-identical copy of the owner-supplied PNG) and fill-only `prisma/seed-whatsapp-community.ts` (`scripts/seed-whatsapp-community.ts`) that uploads Aheed's QR PNG to R2 (`vendors/a4ed0000-0000-4000-a000-000000000001/whatsapp-qr.png`) and populates Aheed's `whatsappCommunityUrl` (`https://chat.whatsapp.com/FTgLVoelRw7262i0OvAIzS`) and `whatsappCommunityQrKey` only while each column is `null`.
+  - **Validation, repository & admin `/staff/storefront` (`R3`–`R10`):** `parseWhatsappCommunityUrl` (`lib/social-contact-form.ts`) accepts blank (`null`) or `https://chat.whatsapp.com/<invite-code>` and rejects any other host or scheme. `fetchVendorProfile` (`lib/repositories/vendor.ts`) exposes `whatsappCommunityUrl` and `whatsappCommunityQrKey`; `features/admin/storefront.ts` wires `whatsappCommunityUrl` into `updateSocialContact` and adds `ADMIN`-only `requestWhatsappQrUpload`, `attachWhatsappQr`, and `removeWhatsappQr` (`components/staff/WhatsappQrUploader.tsx`, `components/staff/StorefrontConfigForm.tsx`, documented in `docs/store-admin-guide/admin-tabs-guide.md`).
+  - **Storefront `/categories`, `/whatsapp-offers`, contact channels & SEO (`R6`, `R7`, `R11`–`R18`):** `listOfferProducts` (`lib/repositories/products.ts`) and `groupOfferProductsByDepartment` (`lib/whatsapp-offers.ts`) group active `onOffer: true` products by the vendor's active top-level departments alongside live `DepartmentCampaign`s (with formatted validity dates) and active `Bundle`s (`BundleRow`). When `whatsappCommunityUrl` is non-null, `<WhatsappCommunityBanner>` (`components/layout/WhatsappCommunityBanner.tsx`) renders the WhatsApp community banner (with QR card when `whatsappCommunityQrKey` is set) on both `/categories` (when clicking `Shop`) and `/whatsapp-offers`, and `contactChannels()` (`lib/contact-channels.ts`) includes `{ kind: "whatsapp-community", href: whatsappCommunityUrl, label: "Join <vendorName> WhatsApp group" }` in both `FloatingContact` and the footer's `"Visit & contact us"` icon row; when `null` (such as on SriMart, `#239`), the banner and contact-channel button are omitted. Indexed via `app/sitemap.ts` with per-vendor metadata via `buildOffersMetadata` (`lib/page-metadata.ts`).
+
+- **Admin and staff moved onto the `Icon` component, Phase 2b of 5: no file outside `components/icons/` imports an icon library any more** (issue `#1223`; `specs/2026-10-22-icon-system/`, PR A of the clubbed Phases 2b, 3 and 4a). No visual change, no schema change, no migration, no CSP, token or `brandStyle()` change.
+  - **The remaining 39 files** under `app/(admin)` and `components/staff` were migrated with `scripts/codemod-lucide-to-icon.ts` (+127 -128, no refusals): each icon's `className` is carried over verbatim and no `size`, `tone` or `label` prop is set. No registry key was added, removed or changed.
+  - **`tests/icon-imports.test.ts`** (R32) fails on any `lucide-react` or `@iconify*` import, re-export or dynamic `import()` under `app`, `components`, `features` or `lib` other than `components/icons/`. TypeScript AST, no allowlist, and it proves it can fail on an in-memory violating file.
+  - **`CLAUDE.md`** no longer says files "are being migrated"; it says the ban is enforced by that test (R62).
+  - **Not in this PR:** colour (Phase 3) and department illustrations (Phase 4a) ship together as PR B, cut from `staging` after this merges. `lucide-react` stays in `dependencies` (R26 needs it).
+
+- **Storefront moved onto the `Icon` component, Phase 2a of 5** (issue `#1223`; `specs/2026-10-22-icon-system/`). No visual change, no schema change, no migration, no CSP, token or `brandStyle()` change.
+  - **60 files** outside `app/(admin)` and `components/staff` no longer import `lucide-react`: 55 by `scripts/codemod-lucide-to-icon.ts`, 5 by hand (`quick-shop`, `AccountNav`, `ViewSwitcher`, `CollectionNav`, `AddToCartButton`), where an icon was a component passed as a value and is now an `IconName`. Every icon's `className` is carried over verbatim and no `size` prop is set. The 39 admin and staff files are Phase 2b.
+  - **`scripts/verify-classname-parity.ts`** pairs each BASE Lucide element with a HEAD `Icon` element by TypeScript AST and fails on a changed `className`, a dropped or added prop, or a `size`/`tone`/`label`/spread; it runs without a server, so a cloud validation can check it. Its skip list is nine files (the five above plus four Phase 1 files whose icon was already a value), each proved live instead (`tests/verify-classname-parity.test.ts` spawns the real script).
+  - **Bundle (fresh BASE and HEAD builds, back to back):** client gzip sum 546,054 to 520,704 bytes (-25,350), Worker `gzip:` 5,011.62 to 4,993.03 KiB (-18.59 KiB); the cause of the shrinkage was not investigated. The codemod no longer leaves a blank line where it removes an import.
+  - **Not yet proved:** the rendered-markup comparison against BASE on both vendors (R34, R35) needs the owner's machine and is tracked as `#1227`; a per-state icon test for `AddToCartButton` is `#1228`.
+  - **Playbook:** Node on Windows cannot resolve `srimart.localhost` (hosts-file entry or a `NODE_OPTIONS` DNS preload), and `demo-accounts.ts add` never resets an existing account's password (`#1226`).
+
+- **Orient reads the delivery board with `--limit 2000`, and treats a full page as truncated** (`.claude/commands/orient.md`, `specs/sdd-workflow.md` 2.49.0, `docs/model-handoff.md` 1.130.0). Project #2 reached 607 items, so `--limit 600` returned exactly 600 and silently hid a `High` item (`#1200`) on 2026-10-21. Both Orient definitions now say that a returned count equal to the limit means the read was cut off and must be re-run higher. Historical slice `validation.md` rows quoting `600` are left as recorded.
+
+- **One shared guard now stops any bulk script reaching staging or production** (issue `#490`; same slice). `scripts/verify-repository-injection.ts` had carried the strong version of this control since `#411`/`#412` — refusing before a Prisma client is constructed, refusing when it *cannot prove* safety, with deliberately no override flag. `prisma/seed.ts`'s generated-catalogue path got the weak version instead: it printed the resolved host and trusted a human to read it, which is a control `CLAUDE.md` records as having already failed here (`#1134`, a session-inherited production `DIRECT_URL`).
+  - Extracted to `scripts/lib/protected-hosts.ts`, beside the existing `scripts/lib/env-file.ts` — `lib/` is ruled out by `#489`'s no-application-code posture. Parsing is delegated to that directory's existing tolerant `parseEnvFile`, so the spaced-equals form `#505` found in two reference-database keys is handled; a line the guard fails to parse is a protected host it fails to protect, and that failure is silent.
+  - `normalizeHost` strips Neon's `-pooler` segment, so naming either the pooled or the direct form of a host matches a protected entry recorded in the other. Without that, the whole control is bypassable by a URL spelling.
+  - The seed's refusal is checked **twice**: once at the very top of `main()`, before the first query, and again directly in front of the generated write inside `maybeSeedGeneratedCatalogue`. The first check is what makes the guard provable without real staging/production credentials — without it, a protected host with `SEED_SCALE_PRODUCTS` set would still run `healthCheck.count()` and the entire ordinary fixture seed before the refusal fired, so an invalid password masked the guard behind an unrelated auth error instead of demonstrating it. A plain `npm run db:seed` with no scale var set still never reaches either check.
+  - `tests/protected-hosts.test.ts` and `tests/worker-routes.test.ts` add 22 cases over logic that previously had none.
+
+- **Quick Shop is now a hub with four tiles, and Regulars is the fourth** (issues `#1187`, `#1186`; `specs/2026-10-20-p1186-1187-quick-shop-hub/`). No schema change, no migration, no new dependency. Finishes the Quick Shop programme that `#232`/`#1185` opened.
+  - **What a shopper sees.** The header's Quick Shop button opened a textarea; it now opens `/quick-shop`, with tiles for Your favourites, Your regulars, Smart Lists and Value Bundles. `/bundles` gets its first header-reachable entry point. A shopper who only ever pastes a list pays one extra tap — `/cart`'s own link still goes straight to the paste page, which is what keeps that journey one tap.
+  - **Both issues shipped as one slice on purpose.** `#1187` required that the hub "lands last, once all four tiles have real destinations"; combining it with `#1186` satisfies that by construction, so no deployed state ever put a dead tile in front of a shopper.
+  - **`/account/regulars` is a placeholder, and deliberately so.** "Regularly ordered" has no definition yet: a derivation needs a threshold, a window, vendor scoping (per ADR-004 a shopper may hold orders with more than one vendor), a ruling on which order states count — `#795`'s cancelled-but-unrefunded question applies to a line item too — and somewhere to bound or cache a per-shopper aggregate over order history. All five are recorded in `lib/regulars.ts` and need their own `/propose`. The page is authenticated-only, like favourites: order history requires an account, so a guest-reachable version could never hold content.
+  - **The hub reads no session and queries no database.** All four tiles render for everyone; the two authenticated-only ones redirect on tap, as `/account/favourites` already did. It is also the one page here with no `export const dynamic` — the `(storefront)` layout already forces it for the group, confirmed by `next build` listing both new routes as server-rendered on demand.
+
+### Changed
+
+- **The paste-a-list page is "Smart Lists", and saved lists have one name again** (issue `#1187`; same slice as above). `/shop-your-list` keeps its URL, so bookmarks, the sitemap and every inbound link keep working — the reasoning `#1145` used.
+  - **`#1187`'s own framing was wrong in a way that made the fix smaller.** It called `/shop-your-list`'s "Your saved lists" block and `/account/lists` two different list concepts. They are the same data from the same `getShoppingListService().list()` call — the block is a truncated preview linking into that page. So adding "Smart Lists" would have left **one concept wearing three labels**, which is exactly what `#1145` was opened to fix, re-created a fortnight later. Renaming that one `<h2>` to "Your lists" is the whole fix.
+  - **Each tile's label is its destination page's own heading**, not a shorter synonym — a tile that disagrees with the page it opens is the same disease. The `/account` Lists tile also stopped saying "recurring shopping lists, and quick shopping", which collided by name with Regulars and Quick Shop once both existed.
+  - `components/account/AccountNav.tsx` is deliberately untouched: `/account/favourites` is already absent from it and nothing catches that, so the gap is tracked as its own issue rather than fixed in passing.
+
+- **A product card's add control is a single `+`** (issue `#1185`; `specs/2026-10-20-p232-1185-favourites-card-controls/`). No schema change of its own, no new dependency. Shipped with `#232` below, because both rewrite the same region of `components/product/ProductCard.tsx`.
+  - **What went.** The "Add" text button, and the `sm:`-and-up pre-add minus/plus picker that chose a quantity before anything was added. One tap on the `+` adds one item, and the card then swaps to the existing `CartQuantityStepper` exactly as it did before — so the only thing lost is choosing a quantity *before* the first add.
+  - **This reverses a decision `#956` took on purpose**, re-approved by the owner on 2026-10-20, and it is recorded in the code so nobody restores it as a regression. Two facts made it cheap: `#961` had already hidden the picker below `sm`, because a 2-column card at 360px has roughly 128px of content width and cannot hold a 44px minus, a readout, a 44px plus *and* the Add button — so most phone shoppers never saw it. And a successful add on a card never showed "Added" anyway: the revalidation re-renders the listing and swaps the button for the stepper before any flash could be read, which is why the shared `CartFeedback` region exists and remains the card's only channel for partial, at-stock-limit and sold-out outcomes.
+  - **Naming is unchanged and now load-bearing.** With no visible text, the `label` prop is the control's only accessible name, so it still reads "Add `<product>` to cart". The disabled out-of-stock button and the quick-view and product-page quantity pickers are all untouched.
+  - `specs/design-system.md` 1.24.0 corrects its touch-target list, which had named the pre-add minus and plus as current controls.
+
+- **Every page is laid out by one shared container, so the header, the admin nav and the page body finally share a left edge** (issue `#1180`; `specs/2026-10-20-p1180-shared-page-container/`). No schema change, no migration, no new dependency. Closes the "inconsistent page widths" report of 2026-10-20.
+  - **The problem.** There was no shared page container at all: `app/layout.tsx` declines to constrain width by design and neither route-group layout adds one, so 60 pages each picked a `max-width` on their own while every chrome element above them was `max-w-7xl`. The Store admin hub was `max-w-5xl`, starting 128px inboard of the nav heading it, and the pages holding the widest content were the narrowest containers — `/staff/categories` and `/staff/promotions` rendered their tables in 672px.
+  - **Three widths, one gutter.** `components/layout/PageContainer.tsx` offers `wide` (1280, matching the chrome exactly — dashboards, lists, tables, browse), `standard` (1024 — account pages, settings, record detail) and `narrow` (672 — forms, auth, checkout, reading copy). All three render `mx-auto w-full px-4`, and that shared gutter is what makes pages line up; the `max-width` only decides where they stop. `width` is required and has no default, because a default is how a page silently inherits a width nobody chose.
+  - **What a shopper sees.** The browse pages are unchanged (they already matched the header). `/help`, `/privacy` and `/terms` are narrower on purpose — 672px is roughly 75-80 characters, the readable measure for body copy, where 896px was past it. Sign-in, registration and password pages keep their card exactly as it was. Vertical spacing is unchanged everywhere except `/feedback` and the developer-only `/dev`.
+  - **Fixed in passing, because the container replaced the exact lines carrying them:** the product detail page had no horizontal padding and no vertical padding at all, so its content ran flush to the edge of a phone screen; and `/help` was built from a `<div>`, leaving that page with no main landmark for a screen reader.
+  - **It cannot drift back.** `tests/page-container.test.ts` fails if a page hand-rolls its own top-level width container, if a page's width disagrees with the spec, if a new page is added without a recorded width, or if a `className` smuggles `max-w-`/`mx-auto`/`px-` back in.
+  - `scripts/verify-mobile-layout.ts` gained `--desktop` (it only ever emulated a touch device, which is wrong above phone widths), `--measure <selector>`, `--map-host <ip>` (measure a vendor selected by hostname against a local server), `--header <name:value>` and `--collapse-filters`; its output is unchanged when none of them is passed. `specs/design-system.md` 1.23.0 and `docs/developer-portal/app-conventions.md` 1.18.0 carry the scale and the rule.
+
+- **The staff panel's navigation is grouped, and both of its surfaces now render from one module** (issue `#1177`; `specs/2026-10-20-p1177-staff-nav-grouping/`). No schema change, no migration, no new dependency. Closes item 1b of the 2026-10-13 user-testing triage: *"many tab items in the admin or staff view — categorise as per their relevancy."*
+  - **Six groups.** Orders & Fulfilment, Catalogue, Offers & Loyalty, Customers & Content, Store setup, Insights & Help — beside a standalone Overview. A store admin's bar goes from 25 flat links in a horizontal scroller to seven items on one line; the hub's 24 undifferentiated cards become headed sections in the same order. Vendor staff see five groups: every page in **Store setup** is admin-only, so that group does not render for them at all. The bar's own width is now wider than the page's content column so the seven fit without wrapping, and it wraps rather than scrolls on a narrow screen.
+  - **One source of truth.** `components/staff/nav-items.ts` holds every destination's route, label, description, icon, tier and group, and both `components/staff/PanelNav.tsx` and `app/(admin)/staff/page.tsx` render from it. Neither may carry a `/staff/*` link of its own any more. `tests/staff-nav-parity.test.ts` was rewritten to match: it derives the expected routes from the filesystem and each item's tier from that page's own `requireVendorRole` gate, instead of comparing the two files to each other. That closes a hole the old test had — a route missing from **both** surfaces used to pass silently.
+  - **Fixed in passing, because the module made it unexpressible:** the hub had `/staff/feedback` inside its `isAdmin` block although the page admits STAFF, so a staff member saw the link in the bar and no card on the hub.
+  - **Unified labels.** One label per route, where the two surfaces had disagreed: `/staff/orders` is "Orders", `/staff/runbook` is "Runbook", `/staff/products` is "Products" (its old "Catalogue" label now names the group), `/staff/net-content` is "Net content review", `/staff/discounts` is "Discount codes", `/staff/search-synonyms` is "Search dictionary", `/staff/team` is "Team & Access", and `/staff/categories` uses the folder-tree icon rather than repeating Overview's.
+  - Adding a `/staff/*` page is now: one entry in the module, plus one operator-guide section. `CLAUDE.md` and `docs/developer-portal/app-conventions.md` are corrected accordingly.
+
+### Added
+
+- **Favourites: a heart on every product card, and a page listing what a shopper saved** (issue `#232`; `specs/2026-10-20-p232-1185-favourites-card-controls/`). One migration (`20261020150000_p232_favourite`, creates only: a table, a unique index, a read index and three foreign keys). No new dependency, no raw SQL. Closes P6.6's long-deferred wishlist obligation, by different entry points than it originally named.
+  - **Signed-in only**, by owner decision. A guest sees the heart as a link to `/login` rather than a toggle that could not work — the same split `/shop-your-list` already makes between matching a list (open to guests) and saving one. The alternative, a guest cookie like the cart's, would have brought a second guest-ownership lifecycle, a merge-on-sign-in path and an orphan sweep, for a feature whose value is coming back later.
+  - **Where it appears:** a heart on every product card across `/categories`, `/categories/[slug]`, `/search` and the homepage product rows; a new `/account/favourites` listing the saved products newest-first through the same `ProductCard` as everywhere else; and a **Your favourites** tile on `/account`. Tapping the heart again removes it. An empty list says "No favourites yet. Tap the heart icon on any product to add it here."
+  - **Per store, not per platform** (ADR-004): favourites are scoped to the vendor they were saved at, so a shopper with an account at two stores keeps two separate lists.
+  - **Tapping twice quickly cannot create two rows or an error.** The unique key on store, shopper and product *is* the concurrency control: the losing insert's duplicate-key error is treated as success, because the product ends up favourited either way. `scripts/verify-favourites.ts` proves that against a real database and prints the error code the driver actually reported, rather than trusting a mock.
+  - **A favourited product that is later hidden or deactivated stops appearing** and its row is kept, so re-activating the product brings it back. That means the empty state can be reached with rows still stored; reconciling them is the open `#1139`.
+  - **Reached from the account page and (once `#1187` lands) the Quick Shop landing page, not a dedicated header icon.** `specs/2026-08-13-p6.6-p0-ui-overhaul/requirements.md` R6 is amended on the record to say so, naming who decided it and where to read why — rather than being quietly rewritten to match what shipped.
+  - Deferred: `#1186` (Regulars page), `#1187` (Quick Shop landing page and the Smart Lists rename), `#1184` (reading a list from a photo).
+
+- **Shoppers can add a note to an item a store allows it on, and the AI allowance follows the Workers plan** (issues `#1135`, `#1028`, `#1029`, `#1031`; `specs/2026-10-19-p1135-custom-notes-ai-allowance/`). One migration (`20261019120000_p1135_custom_item_notes`, four `ADD COLUMN`s only). No new dependency, no raw SQL.
+  - **Item notes:** `Category.allowsCustomNote` and `Product.allowsCustomNote` (off by default, ticked on `/staff/categories` and `/staff/products`). A product takes notes if it, its category or that category's parent is ticked (`lib/custom-note.ts`). The product page shows a note field (200 characters, neutral copy); the basket line lets the shopper edit or clear it. If notes are switched off after one was added, the basket says the note will not be sent, and `placeOrder` drops it. The note reaches `OrderItem.customNote`, the customer and staff order pages, and the confirmation email (escaped, with the product name). The staff order list shows only a "Has item notes" marker. Merge, order-again, export and erasure carry or clear it. Nothing accepts notes on any store until a category or product is ticked.
+  - **Plan mode (`#1028`):** `WORKERS_AI_PLAN` is `free` unless set to exactly `paid`. In Free mode every AI call also checks the platform's shared spend since 00:00 UTC and refuses for every vendor at 10,000 neurons, with its own message. Paid mode skips that check. `specs/architecture.md` 1.42.0 documents both.
+  - **AI Allowance page (`#1029`):** `/staff/ai-usage` for store admins: today's use against the store budget, use by feature, and the plan line. Only a platform admin can change a store's daily budget (up to 1,000,000 neurons) or see the Paid-plan charge estimate ($0.011 per 1,000 neurons over the allowance).
+  - **Backfill (`#1031`):** a budget refusal from "Generate missing images" now shows in the error tone with how many images were made first (`budgetRefused` on the route's response).
+  - Owner: set `WORKERS_AI_PLAN=paid` on staging and production if the account is Paid; until then both run Free mode. Deferred: `#1156` (privacy wording), `#1157` (more surfaces for notes), `#1158` (several notes per product), `#1159` (store-set note label).
+
+- **Marketing consent a store can ask for: opt-in, recorded, and off until switched on** (issue `#1134`, absorbing `#1136`; `specs/2026-10-18-p1134-switches-marketing-consent/`). One migration (`20261018200000_p1134_marketing_consent`, creates only: an enum, a table, an index, two foreign keys and one `VendorConfig` column). No new dependency, no raw SQL.
+  - **Switch:** `VendorConfig.marketingConsentEnabled`, `false` by default, set by a store admin in a new **Marketing consent** section on `/staff/storefront`. Shipping this changes nothing on any store until it is switched on.
+  - **Record:** an append-only `MarketingConsentEvent` log per user and vendor (granted or withdrawn, the exact statement shown, `REGISTRATION` or `ACCOUNT`, when). The newest event is the current state. `hasEffectiveMarketingConsent` is true only for a grant **and** a verified email; nothing sends marketing yet (`#1152`).
+  - **Where shoppers see it:** an unticked, optional checkbox at `/register` ("Email me marketing and promotional offers from" the store's name), recorded by a Better Auth user-create hook that re-checks the switch and rebuilds the statement server-side and never fails the sign-up; a **Marketing emails** section on `/account/data` to opt in or withdraw, with withdrawal kept while a shopper is opted in even after the switch goes off; and `/privacy` section 3 says "If you opt in, we may use your details for marketing and promotional purposes." in place of "solely".
+  - **Data rights:** the export lists every consent event at that store, erasure deletes them, and a consent record at another store keeps the shared sign-in alive.
+
+- **The Fish department gets 18 realistic products, added by a script that writes nothing until told to** (issue `#1147`; `specs/2026-10-18-p1147-fish-products/`). Follow-on to `#1131`, which created Fish, Fresh Fish and Frozen Fish empty. No schema change, no migration, no new dependency, no raw SQL.
+  - **Script:** `scripts/add-fish-products.ts --vendor <slug>` is a **dry run** unless `--apply` is given, prints the target database host before it connects, and runs against `DIRECT_URL` like `scripts/apply-department-changes.ts`. It only **creates**: a product whose slug already exists is skipped and never changed, so an edit made in the staff panel survives a re-run. It refuses to run until the Fish department and both sub-categories exist on that vendor. Writes go through `createProductForVendor`, the staff panel's own path, so the unit-price sort key and the inventory row are written as for a hand-made product.
+  - **Safe by default:** products are created **hidden** ("Visible in the shop" off) with **zero stock**. `--active` makes them visible and `--stock <n>` (0 to 1000) sets the opening stock. Nothing carries an origin, brand, halal, organic, fresh, vegetarian, gluten-free or HMC value, and none has a photograph; each description names only what the item is and its allergen.
+  - **Products:** 8 in Fresh Fish and 10 in Frozen Fish, with **indicative** prices for the owner to review (for example Atlantic Salmon Fillets 240g at 4.99 pounds, Hilsa (Ilish) Cuts 1kg at 14.99). The unit price shown to shoppers is derived from the net content, not typed. `prisma/fish-products.ts` holds the list and a pure planner; `prisma/fish-products-write.ts` applies a plan through an injected create function so the failure handling is tested without a database.
+  - **Dev seed:** Aheed's seed now creates the same products (active, quantity 20, placeholder image) through the existing sub-category pass.
+  - **Production is a manual, ordered step run by the owner:** after the promotion to `main`, run `scripts/apply-department-changes.ts --vendor aheed-food-centre --apply` (creates Fish), **then** `scripts/add-fish-products.ts --vendor aheed-food-centre --apply` (hidden, no stock). On staging use `--apply --active --stock 10` to review them. Then set price, photo and stock for each product and tick "Visible in the shop".
+  - Tests: `tests/add-fish-products.test.ts` (24 cases). `docs/staff-playbook/staff-tabs-guide.md` 2.12.0 (products that arrive switched off).
+
+- **The header's Collect/Delivery control becomes one dropdown, the Shopping List link sits beside the search bar, and Aheed's search placeholder becomes "Find your favourites..."** (issue `#1142`; `specs/2026-10-17-p1142-header-dropdown-search-room/`). Follow-on to `#1131`. No schema change, no migration, no new dependency, and no change to how the method or postcode is stored.
+  - **Dropdown:** for a vendor offering collection, `LocationControl` renders one native `<details data-location-menu>`. Its summary names the current choice (`Click & Collect`, `Delivery · <postcode>` or `Delivery`). The menu holds `Click & Collect`, `Delivery` and `Change postcode`, which replaces the pencil. The method items are the same `setFulfilmentMethod` form posts as before, so the menu opens and works without JavaScript. The dialog items still submit intent `delivery` or `edit` (`#1087`). The current item carries a check and `aria-current`. Escape, an outside click, choosing a method and choosing a dialog item close the menu. A vendor without collection keeps its single button.
+  - **Shopping List:** new `ShoppingListLink`, rendered directly after the search bar in both header slots and removed from the main nav.
+  - **Search room:** at 1280px the form measures 603px and the input 419px (slice A: 521 and 337). The bar stays inline from `xl` because `lg` measured a 163px input at 1024. R13's form threshold was lowered from 640 to 600 with the owner's approval (see `build-notes.md`). Header heights are unchanged.
+  - **Placeholder:** `OWNER_SEARCH_PLACEHOLDER` changes. It reaches a database **only** through `scripts/apply-department-changes.ts --vendor <slug> --apply`, run by hand per environment. The code default stays `Search products…`.
+  - `scripts/verify-mobile-layout.ts` gains `--open-location-menu` and reports `locationMenu` and `shoppingList`. `docs/developer-portal/app-conventions.md` 1.14.1.
+
+- **Hiding a department hides its products too, Aheed gets a Fish department, and the header search becomes a department-scoped bar** (issue `#1131`, absorbing `#1132` and `#1133`; `specs/2026-10-17-p1131-storefront-navigation-catalogue/`). Slice A of the owner's 2026-10-17 website brief. No schema change, no migration, no new dependency.
+  - **Departments:** a category is shown only if it and its parent are active (`lib/category-visibility.ts`). Every storefront product read and the storefront category reads now apply that rule, so a hidden department's page, subcategories, products, sitemap entries and carousel promotion all disappear, and come back when it is shown again. No product, subcategory or promotion row is changed. A source-scanning test (`tests/storefront-product-visibility.test.ts`) fails any product read that omits the rule. Before this, hiding a department changed the navigation only, and its products stayed in search and on their own pages.
+  - **Staff:** `/staff/categories` no longer refuses to hide a category that has active products or subcategories (`#159`'s "Deactivate or move those first"). The edit page states what the switch will hide instead. A refused category save now keeps what was typed; it used to come back with the name and web address blank and the sort order reset to 0 (reproduced live, see `build-notes.md`).
+  - **Header search:** `DepartmentSearchBar` has a native department select ("All Departments" and then the vendor's active departments, read from the database), the search field, and a real submit button with the search icon. It is still a plain `GET /search` form, so it works without JavaScript; `/search` already scoped by `category`. The select shows the department already in the URL. Inline from `xl`; below that it takes the full-width row under the header, because inline left the field 9px wide at 768px. `scripts/verify-mobile-layout.ts` now reports `headerSearch`.
+  - **Shopping List:** the header's link (now "Shopping List", `aria-label="Shopping list"`) shows on the landing page too. A guest who matches a list on `/shop-your-list` is told to sign in to save it, where nothing was shown before.
+  - **Aheed data:** `scripts/apply-department-changes.ts --vendor <slug> [--apply] [--restore]` is dry-run by default and idempotent. It hides International, Household, Health & Beauty, Baby & Kids and Pet Supplies, creates Fish with Fresh Fish and Frozen Fish, and sets the search placeholder "Type your product, we will find it for you". `--restore` shows the five again. **It must be run by hand on staging and production after deploy**; the dev seed adds Fish only.
+  - Docs: `specs/architecture.md` 1.41.0 (category visibility rule); `docs/staff-playbook/staff-tabs-guide.md` 2.11.0 (Categories: hiding and showing).
+  - Deferred: `#1137` (search suggestions ignore the chosen department), `#1138` (sign-in from the list prompt does not return to the list) and `#1139` (hidden-department products already in carts or bundles). A hidden department is still listed on `/staff/promotions` and its promotion stays editable; shoppers just do not see it until the department is shown again.
+
+### Changed
+
+- **A category search is headed by the category, the department selector is compact with a modern list, Sign In has a round user icon, and the browse sidebar can be hidden to show more products** (issue `#1173`, follow-up to `#1169`; `specs/2026-10-19-p1173-search-heading-selector/`). No schema change, no migration, no new dependency.
+  - **Heading:** `/search?category=<slug>` with no term is headed by the category's name (was "All products"). The sidebar highlights no collection and the department strip highlights the department, as on `/categories/<slug>`.
+  - **Selector:** still a native select, now compact (sized to its text where supported, `5.5rem` otherwise). Chrome and Edge show a styled list (rounded panel, shadow, hover, tick on the selected option) via customisable-select CSS. Safari and Firefox keep their own list.
+  - **Sign In:** lucide `CircleUserRound` replaces the arrow icon.
+  - **Collapsible sidebar:** on `/search` and `/categories/<slug>` at tablet width and up, "Hide filters" collapses Browse and filters into a slim rail, and the grid gains one product per row on wide screens (Standard 4→5, Compact 4→5 and 6→7, Spacious 2→3 and 4→5). The choice is remembered until the tab closes (`sessionStorage` `store_filters_collapsed`, listed on `/privacy`). Without JavaScript the sidebar stays open. On phones the filters stay a closed native disclosure, with a restyled summary.
+
+- **Search narrows by subcategory too, and the footer shows real payment logos** (issue `#1169`; `specs/2026-10-19-p1169-search-footer-polish/`). The owner's 2026-10-19 polish request. No schema change, no migration, no new dependency.
+  - **Header search selector:** the first option reads **All** (was "All Departments"). Subcategories are listed indented under their department, read from `listTree()`, and a subcategory in the URL shows as selected.
+  - **Search results:** `/search?category=<slug>` shows the same subcategory pills as the category page ("All" active for a department, the subcategory active for a subcategory). Each pill keeps the search and filters (`categoryFilterHref`).
+  - **Footer:** the contact buttons (Facebook, WhatsApp, help assistant) move under **Visit & contact us**, which now also shows for a store with buttons but no address details.
+  - **Payment badges:** the five text placeholders in `public/payment-methods/` are replaced by Visa, Mastercard, American Express, Apple Pay and Google Pay marks from Simple Icons 16.35.0 (CC0), in brand colours on the same white tiles and under the same file names, so official artwork can replace them later.
+  - **Quick Shop hint:** "For example: **2 Apple Juice 1L** or **Apple Juice 1L x2** (up to 100 items, one per line)", naming the store's own product. The `x2` form is shown, not a bare trailing number, because the parser deliberately reads "Eggs 12" as a pack size.
+  - Filed `#1170`: `toCategoryOptionGroups` drops a subcategory listed before its department (staff category pickers).
+
+- **Switching Rewards off now hides all of it** (issue `#1134`). The account menu's "Loyalty & Rewards" tab (a link to a 404 with loyalty off), the greyed "not enabled for this store" card and the intro's mention on `/account`, and the "loyalty points" wording on `/privacy` and `/account/data` now follow `loyaltyEnabled`. Export and erasure still cover any points that exist. The footer's "Delivery areas & slots" link reads "Delivery areas" when the store offers no delivery slots.
+
+- **The paste-a-list feature is called "Quick Shop" everywhere a shopper sees it, and its page copy is shorter** (issue `#1145`; `specs/2026-10-18-p1145-quick-shop/`). Copy only: the URL stays `/shop-your-list`, and parsing, matching, the review step, saving and adding to the cart are unchanged. No schema change, no migration, no new dependency.
+  - **Name:** the header link (visible text and `aria-label`), the page `h1` and `<title>`, the `/cart` link and the `/account/lists` empty-state link all read `Quick Shop`. They read "Shopping List" or "Shop your list" before. Code identifiers (`ShopYourList`, `ShoppingListLink`, the route folder) keep their names.
+  - **Copy:** the page's intro paragraph is gone. The textarea's label is now `Paste your list, one item per line.` The quantity hint is one sentence (`Add a number for more than one: 2 <example> (up to 100 items)`, or a neutral version), with the limit rendered from `MAX_LIST_LINES`. The parser still accepts `2x`, `3` and `x3`. The button reads `Find my items` (`Finding…` while pending). The textarea placeholder is unchanged (`#1077`).
+  - Tests: `tests/header-shopping-list.test.tsx` and `tests/shop-list-review-copy.test.tsx` now expect the new wording; new `tests/quick-shop-copy.test.tsx` covers the label, both hint branches and the button. `docs/developer-portal/app-conventions.md` 1.15.1.
+
+### Fixed
+
+- **The AI budget save refuses cleanly, basket note fields keep their own labels, and `/api/health` stops reporting reference drift it never measured** (issues `#1161`, `#1162`, `#1119`; `specs/2026-10-19-p1161-1162-1119-fixups/`). No schema change, no migration, no new dependency.
+  - `#1161`: `setVendorAiDailyBudget` returns `false` without writing when the vendor has no `VendorConfig` row, and `/staff/ai-usage` shows a plain error instead of an error page. Deliberately not an `upsert`, because that would invent a store's town and email sender.
+  - `#1162`: the basket note input's id comes from `useId()`, so opening the basket drawer on `/cart` no longer gives two inputs the same id and points the second label at the first.
+  - `#1119`: `reference.drift` in `/api/health` is `null` whenever no source was compared (unconfigured, unreachable, unmigrated or empty), where it used to say `false`. The Ship stage (`specs/sdd-workflow.md` 2.46.0, `.claude/commands/ship.md`) now asserts `reference.reachable` and a non-empty `reference.sources` after every deploy.
+
+- **Every shop-list line that did not go in is named on `/cart`, and the header's Collect/Delivery controls have one accessible name** (issues `#1090`, `#1091`; `specs/2026-10-16-p1090-1091-list-notice-and-control-names/`). "Club F" from the 2026-10-15 backlog clubbing. No schema change, no migration, no new dependency.
+  - `#1090`: an out-of-stock match and an unmatched line were labelled on the review screen but submitted no fields, so `/cart`'s notice (`#957`, `#1088`) never mentioned them. Every review line now emits four positional fields, the new one being `lineStatus`; `addListToCart` reads it only for a line with no product, reporting `u` ("not available right now", named by the matched product) or a new `m` ("not added, no match in this shop"). Any other or absent status stays a skipped line, so a review page rendered before this deploy still submits correctly. A status can choose wording but never cause an add.
+  - `#1091`: `LocationControl` switched label text by viewport with two sibling spans, so anywhere the stylesheet was not applied the name doubled (`DeliveryDelivery`, `Click & CollectCollect`). The four buttons now carry one name (`aria-label` plus `aria-hidden` spans, or one span where both said the same word), each containing the narrow-width text (WCAG 2.5.3). Visuals unchanged. `tests/location-control.test.tsx` now finds every button by role and name.
+  - Conventions recorded in `docs/developer-portal/app-conventions.md` 1.14.0. Deferred: `#1129` (the method toggle conveys its selected state only visually; no `aria-pressed`).
+
+- **Points expiry is described as the inactivity rule it is, and the guest-lookup example order number belongs to the store you are in** (issues `#1045`, `#1043`; `specs/2026-10-16-p1045-1043-shopper-copy-truth/`). "Club E" from the 2026-10-16 backlog clubbing. Copy only: no schema change, no migration, no behaviour change, no new dependency.
+  - `#1045`: `/help` and the help assistant said points expire a fixed number of months from when each point was earned. `lib/loyalty.ts`'s `isLapsed()` lapses the **whole balance** once that many months pass since the shopper's **last order**, so a shopper who keeps ordering never loses a point and one who stops loses everything at once. The rule was right; the copy was wrong.
+  - Both surfaces now render `pointsExpirySentence()` from `lib/help-facts.ts` — the module both already imported — so the two cannot drift. The sentence also states what no surface stated before: placing an order resets the clock.
+  - `components/staff/LoyaltyConfigForm.tsx`'s months label carried the same ambiguity on the control that **sets** the value, where a misreading picks the wrong number. Outside `#1045`'s stated scope, included by approval.
+  - `#1043`: `/orders/lookup`'s order-number placeholder hardcoded one vendor's three-letter prefix, which `vendorOrderPrefix()` derives from the vendor slug — so every other store showed guests an example order number that could not exist there (same class as `#729`, `#239`). It is now derived per vendor at no extra query, because the storefront layout has already resolved the profile on that request.
+  - `tests/help-vendor-facts.test.tsx` had asserted `/expire 12 months/i`, which the **wrong** sentence also satisfied, so the defect sat under a green test from `#1015` on. Copy assertions now pin the exact sentence with `toBe`; `tests/vendor-neutral-copy.test.ts` denies the prefix literal.
+  - Deferred: `#1126` (the `Expiration date:` badges on `/account/loyalty` and the rewards panel are correct but do not say that ordering moves the date).
+
+- **The cookie banner and privacy page now say only what is true, and a consent answer can be changed** (issues `#1107`, `#1041`; `specs/2026-10-15-p1107-1041-privacy-consent/`). "Club C" from the 2026-10-15 backlog clubbing. No schema change, no migration, no new dependency.
+  - `#1107`: the banner stops promising optional cookies "to improve site experience" (none exist) and names what is stored, with the referral cookie as the one optional item. A new **Cookie settings** button (footer Legal row, end of `/privacy#cookies`) reopens the banner, shows the current choice and focuses it; Essential Only now clears the referral cookie from the banner itself, for every vendor.
+  - Owner ruling: saved checkout details (`store_checkout_details`) stay essential; no consent gate.
+  - `#1041`, widened by owner ruling: `/privacy` section 5 discloses the search log (90 days), the five rate-limit attempt records (one hour) and the hashed IP kept with feedback, beside the help-assistant log already listed. Retention is worded as "due for deletion … removed by routine clean-up", because each sweep runs on 1% of writes.
+  - `lib/data-retention.ts` is the one source for those figures: the seven sweeping repositories and `/privacy` both read it. Values unchanged. Rule recorded in `docs/developer-portal/app-conventions.md` 1.12.0.
+  - The footer's Legal row (Terms · Privacy · Cookies · Cookie settings) now wraps below `lg` instead of running `flex-nowrap`, so the new fourth item cannot overflow a narrow viewport; `lg`-and-up layout is unchanged.
+  - Deferred: `#1112` (a scheduled sweep so retention is exact) and `#1113` (14 storefront files fall back to one vendor's name when no vendor resolves).
+
+- **Browser storage names no longer carry one vendor's name, and the referral cookie waits for consent** (issues `#1080`, `#1065`, `#1066`; `specs/2026-10-15-p1080-1065-neutral-storage-keys/`). No schema change, no migration, no new dependency.
+  - `#1080`: `aheed_cart`, `aheed_cookie_consent`, `aheed_referral_code` and `aheed_checkout_details` become `store_cart`, `store_cookie_consent`, `store_referral_code` and `store_checkout_details`, defined once in `lib/storage-keys.ts`. Every vendor sets them, and the privacy page lists them, so SriMart's privacy page had been naming Aheed. The page now renders the names from the constants.
+  - Compatibility window, 30 days (the guest cart cookie's own unrefreshed life): reads fall back to the legacy name, and the next cart mutation re-issues the **same** guest token under the new name, so no basket is lost. The banner carries a legacy consent choice across without asking again. Checkout details migrate on read. Removing the fallbacks is `#1106`, due 30 days after production.
+  - `#1065`: a `?ref=` code is held in memory and written as `store_referral_code` (now `Secure`) only after **Accept All**, signalled by the banner's new `store-consent-change` event. Essential Only writes nothing and clears any referral cookie under either name. Until now the two banner buttons did exactly the same thing: nothing read the choice.
+  - `#1066`: live `Set-Cookie` headers on production and staging set no Cloudflare cookie, and the session cookie is `__Secure-better-auth.session_token`. Recorded on the issue.
+  - Deferred: `#1107` (saved checkout details are written without consent; the banner promises optional cookies that do not exist).
+
+- **A vendor with loyalty switched off no longer runs a referral scheme underneath it** (issues `#1101`, `#1034`; `specs/2026-10-15-p1101-referral-loyalty-off/`). `#1023` had hidden the referral UI only. No schema change, no migration, no new dependency.
+  - Creation (`#1034`): `getRewardsDataForUser` returns straight after reading the config when `loyaltyEnabled` is false. Every signed-in render on such a vendor had created a live, redeemable £5 referral code and made three loyalty reads whose results were thrown away.
+  - Redemption: `previewCode`/`claimCode` refuse a referral code (`referrerUserId` set) on a loyalty-off vendor with the new reason `REFERRALS_UNAVAILABLE` ("Referral codes can't be used at this store right now."). It outranks `OWN_REFERRAL_CODE`. Staff codes are untouched and cost no extra query. The unknown-code throttle doesn't count this refusal.
+  - Payout: `referralBonusRecipient` takes a required `loyaltyEnabled`, and `confirmPayment` passes its loyalty config, so no referral bonus is credited in a scheme the vendor doesn't run.
+  - Triage item 16: `ReferralCard`'s signed-out box hardcoded its dark-card colours, so on the light card both callers use it rendered at about 1.05:1 and read as a disabled control. It now follows `variant` (`bg-surface-muted` + `text-primary` on light).
+  - Copy: `/account/loyalty` no longer promises vouchers, the one place `#1077` missed. The loyalty toggle's helper text and the store admin guide (2.14.0) now say that switching loyalty off also switches off referrals, and that codes are kept.
+  - Deferred: `#1102` (count any existing loyalty-off referral codes in production; owner) and `#1103` (per-vendor referral amounts).
+
+- **Promotion record for `#1096`, `#1030` (promoted to production by PR #1099, merge `3b94f8f`, 2026-10-15).** Docs only. `specs/roadmap.md` 1.153.0 amends the slice's change-log row to cite the promotion, which `sdd:audit` checks, with the production deploy, health and closing-issue evidence and the live homepage check (13 Aheed and 2 SriMart departments, no fallback). `docs/model-handoff.md` 1.103.0 moves Last Verified to `3b94f8f` and notes that `#901`'s `In Progress` board status outlived its pause. The 2026-10-13 triage doc marks item 10's code half and `#1030` as in production.
+
+- **Document pass for `#1096`, `#1030` (merged to `staging` by PR #1097, merge `07128a8`; not yet promoted).** Docs only. `specs/roadmap.md` 1.152.0 gains the change-log row for the staging merge, which `sdd:audit` checks, and records the two limits Validate found (the local `#1037` vitest timeout flake, and R11's fallback count being 0 against 0 on dev data). `docs/model-handoff.md` 1.102.0 replaces the stale "`origin/main` and `origin/staging` are level" claim with the real state (`staging` at `07128a8`, three PRs ahead of `main` at `c3327e4`) and removes the spotlight starvation from its "found, NOT filed" list. `docs/business-analysis/user-testing-feedback-2026-10-13.md` 1.2.0 marks item 10's code half and `#1030` as fixed on `staging`. KMS index regenerated.
+
+- **Every homepage department now spotlights one of its own products, and AI campaign banners are prompted as the vendor's own shop** (issues `#1096`, `#1030`; `specs/2026-10-14-p1096-1030-department-spotlights/`). "Club B" from the 2026-10-13 owner testing pass (item 10's code half, plus its sibling). No schema change, no migration, no new dependency.
+  - `#1096`: `listCategorySpotlights` fetched `departments × 4` products under one store-wide `isFeatured desc, createdAt desc` order. A department with more featured or newer products than that window could fill it alone, and every other department lost its price callout. It also matched only products filed directly under a top-level department, while the department page lists the department **plus its active direct subcategories**.
+    - Each department is now judged on its own and its active direct subcategories' products, in a **fixed three queries** however many departments there are: the children, a `groupBy` for the newest product per `(categoryId, isFeatured)`, then the winners. The ordering rule is unchanged (featured first, then newest); an exact tie goes to the lowest `id`.
+    - This supersedes `#346`'s "one query" requirement, whose single window was the cause. One `take: 1` query per department was rejected because its query count grows per department, and a Worker's subrequest limit depends on the plan (`#1028`). Prisma `distinct` was rejected because it de-duplicates in memory after reading every row.
+    - `scripts/verify-department-spotlights.ts` proves it against a real database on the runtime HTTP adapter.
+  - `#1030`: the campaign-banner image prompt described every vendor as "a UK grocery store" with "appetising" light, so SriMart's electronics banners were prompted as food photography — the prompt `#905` missed. It now follows `#905`'s three-line shape: a neutral subject, then the vendor's own `storeDescription` as quoted data when it has one, then neutral photographic direction (`buildCampaignImagePrompt`, `lib/campaign-image.ts`).
+  - Not in scope: replacing the banner images themselves, which the owner can do on `/staff/promotions` today.
+
+- **Three storefront flows stopped discarding the shopper's input silently** (issues `#1087`, `#1088`, `#1089`; `specs/2026-10-14-p1087-1088-1089-shopper-clarity/`). The remaining P1/P2 items from the 2026-10-13 owner testing pass ("Club A", triage items 4, 21 and 6). No schema change, no migration, no new dependency.
+  - `#1087`: a postcode submission now carries **which affordance opened the modal**, and selects Delivery only on delivery intent with a deliverable postcode. Previously it set the method *never* — wider than `#748`'s rule needed — so once the `fulfilment-method` cookie held `COLLECTION`, a shopper who clicked **Delivery**, was asked for a postcode and gave a deliverable one stayed on Click & Collect, with their own postcode readable only by reopening the modal and cancelling. The **pencil path is unchanged**, which is `#748`'s actual distinction: changing where you live is not changing how you receive the order. The control also shows a stored deliverable postcode under either method. A shopper who has never touched the toggle was never affected — `defaultFulfilmentMethod` already returned `DELIVERY` for a deliverable postcode.
+  - `#1088`: an ambiguous shop-list line left on "Skip this line" vanished with no acknowledgement — `addListToCart` ended in a bare `redirect("/cart")`. The review step now states how many lines will be skipped before submit and carries each line's own text (`lineLabel`, positionally aligned with `productId`/`quantity`, deliberately not gated on client state), and the action reports through **`#957`'s existing notice** rather than a second mechanism: a new `list` source and an `s` kind for a line no product was chosen for. It also passes through the per-line outcome `addItems` already returned and this action discarded, so a clamped or at-limit line is no longer dropped silently either. The `skipped` kind lives in `lib/restore-notice.ts`, **not** in `cart-rules`' `BulkAddKind` — such a line never reached the cart layer; `lib/restore-lines.ts` gained one optional parameter so reorder and cancel keep their own wording.
+  - `#1089`: `/privacy` led each storage entry with its technical name in `<code>` style, which owner testing read as "code base words". Every entry now leads with its purpose, the name following, emphasised rather than code-styled. **All seven names kept** — naming the cookie is the PECR/UK GDPR transparency a shopper is owed. **No key renamed:** `#1080` still owns that, and it needs a migration plan because renaming drops every live cart and consent record.
+  - The refined `#748` rule now has a durable home in `docs/developer-portal/app-conventions.md` 1.9.0. It had existed only as code comments, which is why the absolute form was readable as the rule.
+
+- **Click & Collect was held to the delivery minimum order; it now has its own, defaulting to none** (issue `#1083`, with `#1078` and `#1079`; `specs/2026-10-13-p1083-collection-minimum-banner-headline/`). One additive migration (`VendorConfig.collectionMinimumOrderPence Int @default(0)`, `VendorConfig.bannerHeadline String?`), no `DROP`, no backfill.
+  - `resolveDeliveryRules(…, "COLLECTION")` returned the vendor-wide defaults, so production refused every collection basket under the £15 delivery minimum, and `/help` said "Collection orders must reach £15.00". It now returns the collection minimum, which its input type requires, so `typecheck` found every caller. `0` means no minimum (owner ruling): the defect clears on deploy with no admin action.
+  - `/staff/storefront`: **Collection minimum order (£)** appears inside the Click & Collect block; unticking collection leaves it stored. The delivery minimum is relabelled **Minimum delivery order (£)**, and the landing-page badge reads "£X minimum delivery order".
+  - `#1078`: **Banner Headline** on `/staff/storefront`, up to 120 characters, plain text. Blank keeps the line derived from the store name and delivery area, unchanged (`components/layout/banner-headline.ts`).
+  - `#1079`: `WaysToEarnAccordion` and the three referral share messages (`buildShareLinks`' text and email, `ReferralCard`'s native share) no longer promise a "qualifying first order". They state the £20 minimum and the friend's discount from `lib/referrals.ts`' constants.
+  - `docs/store-admin-guide/admin-tabs-guide.md` 2.13.0.
+
+- **Eleven UI and copy defects from the 2026-10-13 owner testing pass** (issue `#1077`; `specs/2026-10-13-p1077-quick-ui-copy-fixes/`). No schema change, no new route, no new dependency.
+  - Header (`components/layout/HeaderBrand.tsx`): a vendor with a logo now renders that **logo at every width**, in the 72×40 box below 768px and 128×64 from 768px. This **reverses `#1069`'s own rule** of the previous day (the square mark below 768px, via one `<picture>`) — owner testing found a 40×40 mark too small to identify the store on a phone. The mark is unaffected as the favicon, apple-touch icon, manifest icons and `og:image`, and still replaces the initial tile for a logo-less vendor. `ImageWithFallback`'s `sources` prop is now caller-less, kept for `#1072`. `specs/design-system.md` 1.21.0.
+  - The trust banner carries the store's **phone number as a tap-to-call link at every width** (not hidden below 768px like `bannerNote`), from `VendorConfig.contactPhone`, reusing the footer's `isDiallablePhone`/`telHref` — so a bracketed placeholder renders nothing rather than a broken `href`.
+  - **The department carousel's pause/resume control had no effect on any pointer device.** The control sits inside the region whose hover latches `interactionPaused`, so reaching for it was itself what stopped rotation and Play could not outlive the hovering pointer. An explicit press now outranks hover; hover still pauses for anyone who never presses; `prefers-reduced-motion` is unchanged. Rotation interval 6s → 4s.
+  - Shop your list: the quantities hint moves **above** the box; the placeholder is a one-line prompt instead of a worked three-line example list, which read as a list already typed (the examples moved into that hint); the ambiguous-line dropdown names the choice as well as the skip, keeping its empty skip value.
+  - Rewards, four claims the code did not back: the "Loyalty tier boosts" line was **dead on the rewards panel** (nothing supplied `maxMultiplier`, whose prop default of `1` hides it) and now renders, from tiers `lib/rewards-service.ts` already fetched — no new query; `maxTierMultiplier` is extracted to `lib/loyalty.ts` so `/account/loyalty` and the panel cannot quote one vendor differently; the earn unit pluralises off the vendor's own rate ("2 point" → "2 points"); the referral offer states the **£20 minimum that is really enforced** (the referral code's `minSubtotalPence`, which gates the friend's discount *and* the referrer's points) and drops "first order", which nothing enforces — the code allows one use per customer, on any order; and the 500- and 1000-point "available rewards" were **platform inventions at no level vendor data**, so every threshold is now a multiple of the vendor's `minRedeemPoints`, the section hides entirely where there is no minimum, and nothing calls these vouchers, there being no voucher — redemption is a points field at checkout.
+  - **A placeholder cannot be made fainter than the secondary-text token**, measured here and recorded in `specs/design-system.md`: `text-primary-muted` is 5.21:1 while the lowest value `tests/token-alpha-purity.test.ts` (`#649`) permits is 5.74:1, so every legal colour is *more* prominent than the token in place. Placeholder prominence is a content problem, not a colour one.
+  - Follow-ups filed, both out of scope here: `#1078` (make the banner headline vendor-editable — the owner's choice over rewording it in code, which needs a migration) and `#1079` (`WaysToEarnAccordion` repeats the unenforced "qualifying first order" claim this slice removed from `ReferralCard`).
+
+### Documentation
+
+- **Document pass for `#1173` (merged to `staging` by PR #1174, `265fa01`).** Documentation only, no code change.
+  - `specs/roadmap.md` 1.166.0 adds the slice's change-log row.
+  - `docs/model-handoff.md` 1.119.0: `staging` is two slices ahead of `main`.
+  - `specs/design-system.md` 1.22.0 records the hidden-sidebar column exception (odd steps, owner-approved) and the base-select trigger's `inline-flex` need.
+
+- **Document pass for `#1169` (merged to `staging` by PR #1171, `d5a7e36`).** Documentation only, no code change.
+  - `specs/roadmap.md` 1.165.0 adds the slice's change-log row.
+  - `docs/model-handoff.md` 1.117.0: `staging` is one slice ahead of `main`; `#1170` filed.
+  - `docs/developer-portal/local-dev-playbook.md` 1.33.0: a PowerShell line that stops only preview, and reading a client-side select's live value over CDP.
+
+- **Document pass for `#1161`/`#1162`/`#1119` (merged to `staging` by PR #1166, `535e53f`).**
+  Documentation only, no code change.
+  - `specs/roadmap.md` 1.163.0 adds the slice's change-log row.
+  - `docs/model-handoff.md` 1.115.0: `staging` is one slice ahead of `main`. It also records the
+    `closes`-per-issue need for the promotion PR, and that the slice's validation was not
+    independent.
+  - `docs/developer-portal/local-dev-playbook.md` 1.32.0:
+    - a throwaway Prisma script for a one-flag dev change, and what it needs (`.mts`, the Neon
+      adapter, a dev-host guard and a restore mode);
+    - pick categories from the storefront's links, because a database category can 404;
+    - `verify-mobile-layout.ts`'s `formInputs` proves duplicate-id defects;
+    - stopping every `node` process also kills MCP servers.
+
+- **Document pass for `#1135` (item notes, plus `#1028`/`#1029`/`#1031`, merged to `staging` by PR
+  #1160, `3bbfa47`).** Documentation only, no code change.
+  - `specs/roadmap.md` 1.161.0 adds the slice's change-log row.
+  - `docs/model-handoff.md` 1.113.0:
+    - `main` is at `dc15145` (`#1134` promoted in PR #1155), and `staging` is one slice ahead;
+    - the stale "`#1028` is owner work" lines now say the plan mode is handled in code;
+    - the owner actions for `#1134` and `#1135` are listed together.
+  - `docs/developer-portal/local-dev-playbook.md` 1.31.0:
+    - driving a server action that is called from JavaScript with curl, using the build manifest
+      for its id;
+    - a form replay must carry `<textarea>` and `<select>` values, or the save blanks them;
+    - `/staff/orders` hides `PENDING_PAYMENT` orders by default;
+    - Git Bash's working opt-out is `MSYS_NO_PATHCONV=1` (not `MSYS_NO_POSIX_PATHCONV`);
+    - `demo-srimart-admin`'s dev password differs from `DEMO_ACCOUNT_PASSWORD`.
+  - Validation findings filed as `#1161` (AI budget save without a `VendorConfig` row) and `#1162`
+    (possible duplicate cart-note ids).
+
+- **Document pass for `#1134` (slice B, merged to `staging` by PR #1153, `1d9a2a1`).** Documentation
+  only, no code change.
+  - `specs/roadmap.md` 1.159.0 adds the slice's change-log row, which `sdd:audit` reported as
+    missing.
+  - `docs/model-handoff.md` 1.111.0 records that `staging` is one slice ahead of `main`, that
+    production's database already holds this slice's additive migration (an exported `DIRECT_URL`
+    beat `.env`), and the owner's post-promotion actions.
+  - `specs/sdd-workflow.md` 2.45.0 adds a trap: a keyword grep over generated SQL matches
+    `ON UPDATE CASCADE`, so anchor it on statement starts.
+  - The slice's `validation.md` R9 and R14 rows are corrected to match.
+
+- **Document pass for `#1045`/`#1043` (merged to `staging` by PR #1127, `85cfead`).** Documentation
+  only, no code change. `specs/roadmap.md` 1.156.0 gains the change-log row `sdd:audit` was
+  reporting as missing. `docs/model-handoff.md` 1.107.0: the `Last Verified` block no longer
+  claims `origin/main` and `origin/staging` are level — they now diverge by PR #1124 and this
+  slice's PR #1127, neither promoted — and Club E (`#1045`/`#1043`) moves from "next unblocked
+  club" to "closed out, merged to staging"; the chatbot slice's follow-up list is corrected to
+  reflect `#1041`/`#1043`/`#1045` all shipped, leaving only `#1042` open.
+  - **Trap recorded for future spec authors:** `docs/developer-portal/local-dev-playbook.md` 1.30.0.
+    `/validate` found that a spec `plan.md` quoting old/wrong copy with a literal `{word}` outside a
+    backtick span breaks `next build` in `kms/site-internal` — KMS assembles `plan.md` into MDX,
+    and an unescaped `{...}` compiles as a JSX expression (`ReferenceError: N is not defined`).
+    Neither `kms:validate` nor `kms:check-generated` renders MDX, and `gates` never builds the docs
+    site, so this reaches `main` silently unless someone runs the real build. Fixed on this slice's
+    branch by backtick-wrapping the quoted sentences (commit `f34a67a`); the playbook now names the
+    pattern and the two-command check (`kms:assemble:internal` then `next build` in
+    `kms/site-internal`) to run after editing any spec that quotes copy verbatim.
+- **The reference database is recorded as restored, the PR #1122 promotion row lands, and four stale handoff claims are corrected** (`specs/roadmap.md` 1.155.0, `docs/model-handoff.md` 1.106.0). Documentation only, no code change. Two roadmap change-log rows: PR #1122 (`763bf37`, `staging -> main`, documentation-only, closing no issues deliberately) clearing the `sdd:audit` carry-forward flag, and the `#1119` credential reset with its live evidence.
+  - **`#1119`'s live symptom is resolved and proven, not inferred from the secret change.** `reference.reachable: true` with two populated `sources` on staging and production, and `/api/address/lookup?postcode=MK10 0AA` returning `DELIVERABLE` with coordinates `52.031738, -0.687` on both Aheed hosts — the known-good PR #775 state, with `UNVERIFIED` gone from all four vendor hosts. SriMart returns `valid: true` with the same coordinates but `OUTSIDE_DELIVERY_AREA`, the per-vendor delivery rule working (ADR-004), not a reference failure. `#1119` stays open for its two repository items.
+  - **The standing correction survives the fix:** `reference.drift: false` is still not evidence of health, because `emptyStatus()` re-manufactures it the moment the database is unreachable. Records must assert `reference.reachable === true` **and** a non-empty `sources`.
+  - **New defect recorded as `#1123`, with a hard date of 2026-11-03.** The replacement endpoint is a read replica (`pg_is_in_recovery()` is `true`) while `UK_LOCATION_REF_DIRECT_URL` is the write path for `ref:migrate` and the bulk import, so the `0 4 3 * *` sync fails on that date until the key points at the primary. No code change needed — `prisma/reference/schema.prisma` and `lib/config.ts:222` already split pooled-runtime from direct-write. Added to Risks And Blockers as the only dated item there.
+  - **Four stale handoff claims corrected.** "The monthly sync cannot run yet … has never existed on `main`" — wrong on both counts: the workflow is on `main` and `staging`, `#772` is closed, and one `schedule` run fired 2026-10-03 (`completed/success`). "Production's reference DATABASE is bootstrapped — the APPLICATION serving it is not" — wrong: production serves the lookup. `Last Verified` named `6ec8142` when `main` is at `763bf37`. `docs/p1101-1034-document` was called unmerged when the 2026-10-16 prune found it merged and deleted it.
+  - **`Cloudflare Worker secret presence` is answered** — both Workers carry the same 18 names, listed in the handoff. Recorded as a **lead and not a diagnosis**: `S3_REGION` and `BETTER_AUTH_URL` are absent from both Workers and from `wrangler.toml`'s `[vars]`, though `scripts/configure-env.mjs` lists both as required and says OAuth breaks without the latter. It may bear on the open "Google sign-in does not complete in production" item, but it is an untested correlation found while listing secrets, and needs its own `/propose`.
+  - **Operational trap now written down:** these Workers use versioned deploys, so `wrangler secret put` refuses while an undeployed version exists, failing with a message about versions rather than secrets. A dashboard secret edit creates a version without deploying it; finish with `wrangler versions deploy <id> --env <env>`.
+- **Promotion record for `#1107`/`#1041` and the PR #1120 docs slice, clearing the last `sdd:audit` carry-forward flag** (`specs/roadmap.md` 1.154.0, `docs/model-handoff.md` 1.105.0). Documentation only, no code change. Two roadmap change-log rows: PR #1118 (`6ec8142`, `staging -> main`) promoting the honest consent banner, cookie settings and hashed-IP disclosure to production, and PR #1120 (`76c1ecb`) carrying the SriMart local sign-in note out of the closed PR #1105. The handoff's `Last Verified` now names `6ec8142` instead of `dac5a3d` — the pointer defect `specs/sdd-workflow.md` 2.43.0 exists to catch, which `sdd:audit` never reads — and its In-Flight entry for Club C moves from "BUILT, not yet validated or pushed" to "DONE, in production", keeping the Gate 1 owner rulings that bound future changes there.
+  - **`.github/workflows/deploy-docs-internal.yml`'s header no longer claims the internal docs site has no public route.** It said "NOT YET LIVE … custom-domain route commented out" long after `kms/site-internal/wrangler.toml` went to an uncommented `[[routes]]` block with `custom_domain = true`, annotated `LIVE (2026-08-08)`. The corrected header points at `wrangler.toml` as the authority, records that Access is this site's only auth, and says to re-check a **deep link** rather than only `/` after an Access policy change — a root-scoped policy would leave every document reachable, and Access does not gate a `*.workers.dev` URL, which is why `workers_dev` stays `false`. This closes the matching `docs/model-handoff.md` reconciliation item and its "Requires Live Access" question, both verified unauthenticated: `/` and `/dev/runbook/local-dev-playbook` each `302` to `nocaped.cloudflareaccess.com` with `auth_status: NONE`.
+  - **Both documents now carry a standing correction: `reference.drift: false` is not evidence of health.** `emptyStatus()` hardcodes it beside an empty `sources`, so every promotion record since PR #775 cited a vacuous figure while the reference database was unreachable on staging and production (`#1119`). Future records assert `reference.reachable === true` instead.
+- **Carried the one unique note out of the stale PR #1105 before closing it** (`docs/developer-portal/local-dev-playbook.md` 1.28.0). Documentation only, no code change. PR #1110 had already overtaken that branch's roadmap, handoff, changelog, `ARTIFACT_INDEX.md`, runbook and triage edits — `staging` carries equivalent rows citing PR #1104 and PR #1109 — which left the branch conflicted (`mergeStateStatus: DIRTY`) and its handoff text ("staging one PR ahead") untrue. Its only content not reachable anywhere else was the local SriMart sign-in procedure measured at `#1101`'s `/validate`: `srimart.localhost:8787` returns `403 INVALID_ORIGIN` until the request carries `x-forwarded-proto: http`, because `resolveAuthOrigin` infers `https` for any non-loopback host, plus the Better Auth `429` window (about 30 seconds) and Git Bash's `MSYS_NO_POSIX_PATHCONV=1` rewrite of a bare `"/"`. This relaxes the playbook's neighbouring "cannot sign in as a second vendor locally" limit for the seeded SriMart host, and is recorded as measured for a customer account only — a second vendor's *admin* sign-in stays unproven.
+- **Document pass for `#1107`/`#1041` (merged to staging by PR #1114, `cc46827`), plus the pending carry-forward row for PR #1111's docs-only production promotion.** Documentation only. `specs/roadmap.md` gains the change-log rows for both. `docs/model-handoff.md`'s "Last Verified" section notes `origin/staging` is now ahead of `main` by this slice. `#1115` (confirm the footer Legal row doesn't overflow at 360px, filed at `/validate` when Claude-in-Chrome's browser automation couldn't resize below ~1536px) is closed with real evidence from `scripts/verify-mobile-layout.ts`: `documentScrollWidth` matches the requested viewport exactly at 360/390/768px on both vendor hosts. `#1116` (a `validation.md` wording defect: R22 says "axe", which this repo has no test dependency for) stays open on `P10`/Backlog. `specs/sdd-workflow.md` gains a Validate-stage note to check `docs/developer-portal/local-dev-playbook.md`'s phone-width section before reaching for browser-automation viewport resizing, since that trap was already documented and cost real effort to rediscover.
+- **Document pass for `#1080`/`#1065` and `#1101`** (issues `#1080`, `#1065`, `#1101`): roadmap rows for both slices and their promotion (PR #1109), and the handoff's cookie facts moved to the `store_*` names. Documentation only.
+- **Process trap recorded at `#1087`'s Document pass: `sdd:audit` checks that every promotion is cited in the roadmap change log, but nothing checks `docs/model-handoff.md`'s own `Last Verified` pointer against `origin/main`'s actual tip.** `specs/sdd-workflow.md` 2.43.0 adds the check: three promotions (`#1069`, the footer/privacy cookie list, `#1083`/`#1078`/`#1079`/`#1077`) had each landed a correct "DONE, in production" bullet further down `model-handoff.md` while its top `Last Verified` entry still named a `main` commit from three promotions earlier — `sdd:audit` passed throughout, because it never reads that field. Docs only, no code change.
+
+- **Document pass for `#1087`, `#1088`, `#1089` (promoted to production by PR #1093, merge `c3327e4`), which also carried PR #1086's deferred `#1083` Document pass.** Docs only. `specs/roadmap.md` 1.151.0 gains the change-log row for the staging merge and the promotion in one entry, which `sdd:audit` checks, and corrects `build-notes.md`'s "nothing in this slice has been proved live" claim against what Validate actually found (R3-E2E, R5-E2E, R8-E2E and R16-E2E all proven live before merge). `docs/model-handoff.md` 1.101.0 replaces the "built, not shipped, no live proof" entry with the production state, and brings the **`Last Verified`** pointer current — it had gone three promotions stale (`#1069`, the footer/privacy cookie list, and the `#1083`/`#1078`/`#1079`/`#1077` slice had all reached production since its last update on 2026-10-11, each already recorded in its own section bullet but not reflected at the top). Production `/api/health` (Aheed **and** SriMart) confirmed serving `c3327e4`; `/privacy` confirmed carrying the purpose-first cookie copy with zero `<code>` elements. The KMS index is regenerated.
+
+- **Document pass for `#1083`, `#1078`, `#1079` (promoted to production by PR #1085, merge `624ffbc`), which also promoted `#1077`.** Docs only. `specs/roadmap.md` 1.150.0 gains the change-log row for the promotion, which `sdd:audit` checks. `docs/model-handoff.md` 1.99.0 records `#1077` and the `#1083` slice as in production, removes the now-fixed Click & Collect defect from Risks And Blockers, and keeps the one unproven item (a real collection order under £15) plus the demo-cart trap found at Validate. The KMS index is regenerated.
+
+- **Document pass for `#1077` (merged to `staging` as PR #1081).** Docs only. `specs/roadmap.md` 1.149.0 gains the change-log row for the slice, which is what `sdd:audit` checks. `docs/model-handoff.md` 1.97.0 replaces the "built, not yet PR'd" entry with the merged state and what is still unproven (the logo and favicon checks need a vendor with a logo and a mark). `specs/sdd-workflow.md` 2.42.0 records a trap: a branch cut from `origin/staging` has `origin/staging` as its upstream, so push with an explicit target.
+
+- **Document pass for `#1069`, and the deferred records for `#1055`, `#1060`, `#1064`** (promotions PR #1075 and PR #1068). `specs/roadmap.md` 1.148.0 gains a change-log row for each promotion, which is what `sdd:audit` was reporting as missing; `docs/model-handoff.md` 1.95.0 replaces three "built, not shipped" entries with their production state; `docs/developer-portal/local-dev-playbook.md` 1.26.0 records why a browser upload and CDN images cannot be proven under `npm run preview` (dev bucket has no `localhost` CORS rule, dev CDN rejects a localhost referer) and the `/512.png` key-suffix trap. Production footer seeding and the `#1066` cookie inspection are recorded as unconfirmed.
+
+- **Tenth Discover pass: the "Aheed Super Store" brand-identity brief (filed `#1069`).** Docs only. `docs/research/discovery-log.md` 1.10.0, five entries:
+  - The brief is a rebrand (blue `#093DAA` / lime `#8DAD0E`, measured from the reference). **Owner ruling:** a new logo and palette under the existing name "Aheed Food Centre"; the owner's designer supplies the artwork.
+  - No vendor has a favicon, home-screen icon or social share image, and one 72×40 logo slot cannot serve a wide lockup on a phone. Filed as `#1069` (Gate 1 approved, full slice).
+  - The brief's CSS variable layer is not pursued: the semantic tokens and `VendorBranding` already cover it, and the palette is applied as a theme on `/staff/storefront`.
+  - A blue Aheed is close to SriMart's `#0d47a1`. **Owner ruling:** leave SriMart as it is; second-vendor checks compare the accent colour instead.
+
+- **Document pass and promotion record for PR #1050 / PR #1053 (`#1049`, `#1051`, `#1052` promoted to production, merge `c903f15`).** Docs only.
+  - `specs/roadmap.md` 1.147.0: the slice row, citing `specs/2026-10-11-p1049-assistant-link-close/`, with its stage deviations stated (one Opus session, no fresh-context Validate, no `build-notes.md`).
+  - `docs/model-handoff.md` 1.90.0: Last Verified moves to `c903f15`, `0311425` condensed to "previous promotion"; a new In-Flight entry for the slice; **corrects "off for every vendor"** for the help assistant: production Aheed has it on, read live 2026-10-11.
+  - `CLAUDE.md`: `kms:coverage` joins the command list; it runs only in CI's `quality / kms` job and failed this slice's first push.
+
+### Added
+
+- **Per-vendor square mark: favicon, home-screen icon, link-preview image and a phone header mark** (issue `#1069`; `specs/2026-10-12-p1069-brand-assets/`). One additive migration (`20261012210000_p1069_vendor_mark`, a nullable `VendorBranding.markStorageKey`, no `DROP`).
+  - `/staff/storefront` has a new **Square mark** upload. The browser turns one image into five PNGs in one folder: `32`, `180` (on the vendor's cream), `192`, `512`, and a 1200×630 `og.png` with the mark centred on cream. Uploads under 512px are refused before upload. A non-square image is contained, not cropped. `attachVendorMark` checks all five files and attaches all or none: a partial set is deleted.
+  - For a vendor with a mark, the head gains `rel="icon"` (32, 192), `apple-touch-icon` (180) and `og:image`/`og:site_name`; `/manifest.webmanifest` lists the 192 and 512 icons; `/favicon.ico` (new route) `302`s to the 32px PNG. A vendor without a mark is unchanged: no icon links, `icons: []`, and a `404` for `/favicon.ico`.
+  - Header (`components/layout/HeaderBrand.tsx`, extracted from `Header.tsx`): with logo and mark, the mark shows at 40×40 below 768px and the logo in today's 72×40 box from 768px. It is one `<picture>`, so only the shown image is downloaded. With a mark but no logo, the mark replaces the wordmark's initial tile. `ImageWithFallback` gains an optional `sources` prop. `scripts/verify-mobile-layout.ts` reports a `brand` field.
+  - Desktop logo box enlarged for the 2:1 "Aheed Super Store" lockup: from 768px it is 128×64 (`md:h-16 md:aspect-2/1`, header brand container `md:h-16`), up from 72×40. Phone sizes are unchanged. This supersedes the 72×40 desktop figure in R18 of the #1069 spec.
+  - `specs/design-system.md` 1.20.0 (new "Brand assets: lockup and mark" section); admin guide 2.12.0. Real Aheed artwork is an owner action.
+
+- **Storefront footer: real opening hours with holiday dates, contact-channel buttons, and a three-column bottom bar** (issue `#1060`; `specs/2026-10-12-p1060-footer-hours-contact/`). Follow-up to `#1055`, promoted together with it. One migration (`20261012180000_p1060_footer_weekly_hours`) that **drops** `#1055`'s free-text `VendorOpeningHours` (staging and dev only; never in production) and adds `VendorWeeklyHours` and `VendorHoursOverride`.
+  - Hours are real times per weekday, or "Closed all day", shown Monday → Sunday with today (Europe/London) in bold. Dated holiday/closure overrides in the next 14 days appear under "Holiday hours", e.g. `Fri 25 Dec · Christmas Day · Closed`; on the day itself an override replaces that day's hours. Edited on `/staff/storefront`: 7 weekday rows with time pickers, plus a new "Holiday & closure dates" form (one entry per date, save replaces; past dates pruned; at most 50 upcoming).
+  - The footer shows the same contact channels as the floating contact button, as 44px circles, from one shared list (`lib/contact-channels.ts`). The help assistant now mounts once (`AssistantLauncherProvider`) and opens from either place.
+  - The bottom bar is a 50 / 25 / 25 grid from 1024px (company details and "Powered by" / Terms · Privacy · Cookies / Stripe line and badges), stacked payment, legal, company on smaller screens. The footer's bottom padding now clears the floating Rewards, cart and contact buttons.
+  - Aheed's seeded hours: Mon–Sat 09:00–20:00, Sun 09:00–19:00 (owner-confirmed). New `scripts/seed-footer-defaults.ts` seeds only the footer defaults, fill-only, so staging can get them without the full seed reverting admin-edited branding and config. Admin guide 2.11.0; `specs/design-system.md` 1.19.0.
+
+- **A three-column, vendor-configured storefront footer** (issue `#1055`; `specs/2026-10-12-p1055-storefront-footer/`). One additive migration (`20261012120000_p1055_storefront_footer`, no `DROP`).
+  - Columns "Visit & contact us" (address with a Google Maps link, tap-to-call phone, email), "Shop opening hours" (free-text rows plus a note) and "Shop with us" (help, delivery and refunds anchors, Rewards when loyalty is on, review, Facebook). The bottom bar carries company number, VAT number, registered office, "Powered by", Terms/Privacy/Cookies, the Stripe line and payment-method badges. Stacked on mobile, with Call and Get directions buttons and 44px tap targets.
+  - All of it is vendor data, edited in two new forms on `/staff/storefront`. **A null hides its element, with no platform fallback (`#239`).** Bracketed placeholders such as `[YOUR EMAIL]` are accepted and render as text; a `tel:`/`mailto:` href is built only from a real number or address.
+  - New `VendorConfig` columns, `VendorOpeningHours` and `VendorPaymentBadge` (enum `PaymentBadgeMethod`). Badge images are platform static assets in `public/payment-methods/` (placeholders for now). `PLATFORM_NAME` comes from `wrangler.toml` `[vars]`. Colours are derived from the vendor's primitives and clamped to AA on the footer background (`lib/footer-palette.ts`).
+  - Aheed's defaults are seeded **fill-only**: the real address and phone, approved placeholders for everything the owner has not supplied. A re-seed never overwrites an admin's edit. Admin guide 2.10.0; `specs/design-system.md` 1.18.0. Follow-ups: `#1056` (real delivery and returns pages), `#1057` (structured opening hours), `#1058` (owner supplies the real values and logos).
+
+- **A guided help assistant on the storefront, with a WhatsApp handoff and a conversation log** (issues `#1015`, `#1014`; `specs/2026-10-11-p1015-1014-help-assistant/`). Built as one slice. One additive migration (`20261011120000_p1015_1014_help_assistant`, no `DROP`). **Off for every vendor** until a store admin switches it on, so it ships with no visible change.
+  - `#1015`: `VendorConfig.assistantEnabled` (default `false`). When it is on and the vendor has a WhatsApp number, the floating contact button gains an `Open help assistant` control. Shoppers pick a topic — delivery, collection (if offered), rewards (if loyalty is on), discount codes, the store's own active Help Centre answers, where an order is, swapping an item, cancelling a paid order, something else. Answers come from `helpDeliveryFacts()`, the vendor's loyalty settings and its `VendorFaq` rows read when the panel opens; nothing is authored on a vendor's behalf, so answers added later at `/staff/faqs` need no code change (`#1021`). Swapping an item and cancelling a paid order always hand off (`#606`). The handoff is a `wa.me` link with a summary capped at 300 characters, carrying only the store name, the topic and, for a signed-in shopper who picks one, an order number. No AI, no free text (`#1042` holds that follow-up).
+  - `#1014`: new `AssistantConversation` log — topic, a server-derived opening question (never shopper-written), outcome (`ANSWERED` / `HANDED_OFF` / `ABANDONED`), a hashed IP; no user link (the `#570` precedent), so it is outside data-rights scope. 20 conversations per vendor and IP per 10 minutes; a refused write never breaks the panel. Deleted after 90 days.
+  - New admin-only `/staff/assistant`: the switch, a notice when no WhatsApp number is set, and a 90-day report by outcome and topic with the questions most often handed off. On `PanelNav`, the hub and `docs/store-admin-guide/admin-tabs-guide.md` 2.8.0. `/privacy` states what the log keeps. `scripts/verify-assistant-conversations.ts` proves the log against a real database; `scripts/verify-mobile-layout.ts` gains `--open-help-assistant`. Follow-ups: `#1041`, `#1042`, `#1043`.
+
+- **Per-vendor Workers AI metering with a daily budget, configurable model ids, and a dated signal when the shop-your-list model stops answering** (issues `#1016`, `#1017`; `specs/2026-10-10-p1016-1017-ai-model-config-metering/`). Chatbot programme slice 2. One additive migration (`20261010150000_p1016_1017_ai_usage_metering`, no `DROP`).
+  - `#1017`: every vendor shared one Cloudflare account, so one vendor could exhaust the daily neuron allowance for all of them, and no vendor's AI spend could be attributed. New `AiUsageEvent` ledger (vendor-scoped, no user link, neurons stored ×1000 as an integer) and `VendorConfig.aiDailyNeuronBudget` (default 3,000 per UTC day, `0` = AI off). `lib/ai-meter.ts` checks the budget before, and records after, every Workers AI call at all four call sites: the `/shop-your-list` pre-pass, synonym proposals, net-content suggestions, and product and campaign images. A refused call degrades exactly as "AI unavailable" does; staff see "This store has used its AI allowance for today (N of B neurons). It resets at 00:00 UTC." The meter fails closed on a database error and never fails a feature on a ledger write. An over-budget image backfill stops **without** writing products off. New `scripts/ai-usage.ts` reads a vendor's figure and sets its budget.
+  - `#1016`: `LIST_NORMALISATION_AI_MODEL` and `SEARCH_SYNONYM_AI_MODEL` override the unchanged `@cf/meta/llama-3.1-8b-instruct` default (deprecated by Cloudflare, still serving, and now silently answered by `llama-3.1-8b-fast-v2`). Rates, per-model request options and reply/usage readers live once in `lib/workers-ai.ts`; synonym proposals now read chat-completion replies, so a switch to Gemma 4 is config only. `normaliseList` returns a typed result, and a non-OK response, unreadable body or zero-item reply writes an `ErrorEvent`, so the day the model is withdrawn is dateable on `/staff/errors`. Proved live under `npm run preview` with a bogus model id.
+  - `specs/architecture.md` gains a fifth criterion for AI on a public path (spend metered against the vendor's budget) and records that the account's Workers plan is unverified (`#1028`). Follow-ups: `#1027`, `#1029`, `#1030`, `#1031`.
+- **A per-vendor approved-answer corpus, with its staff editor and Help Centre rendering** (issue `#1012`; `specs/2026-10-10-p1013-1012-help-facts-faq-corpus/`). The prerequisite every later answering surface depends on, `#1015` included. New `VendorFaq` model (migration `20261010120000_p1012_vendor_faq`, additive, no `DROP`), built on the `VendorReviewLink` pattern so adding an answer is data rather than a migration: `lib/repositories/vendor-faqs.ts` (pure), `lib/vendor-faqs-service.ts`, `lib/faq-form.ts`, `features/admin/faqs.ts`, `/staff/faqs` and `components/staff/FaqManager.tsx`, plus the render on `/help`.
+  - **No answer text exists anywhere in the repository** — not in the schema, the seed, a placeholder or a default parameter, because an answer is a claim and `ADR-004`/`#239` forbid the platform making one on a vendor's behalf. Staff-form placeholders are instructions, never sample content. A vendor with no active rows renders no questions section at all. **`#1021` tracks the content itself, and `#1015` is blocked on it rather than on code** — the `#697` shape, recorded up front this time.
+  - Writes are vendor-scoped in the `where` so a forged id from another vendor affects zero rows instead of theirs. The three edit paths use `updateMany` and therefore take `getPrismaWs()`, the mixed-client shape `lib/repositories/brands.ts:158` already uses; reads, the childless `create` and the `deleteMany` stay on `getPrisma()`. Proved against the real dev database: cross-vendor update/hide/delete all returned `0` with the row intact, a duplicate question returned `DUPLICATE_QUESTION` rather than throwing, the same question was accepted for a second vendor, and the owner's own update returned `1`.
+  - `/staff/faqs` lands on all three required surfaces — `PanelNav` (admin tier, matching its `ADMIN` gate), the staff hub, and a seven-part section in `docs/store-admin-guide/admin-tabs-guide.md` — and its refusal branch renders `PanelRefusal`.
+
+### Changed
+
+- **Privacy page lists every cookie and local-storage item the storefront sets, under its real name** (issue `#1064`; `specs/2026-10-12-p1064-privacy-cookies/`). Section 4 ("Cookies and Local Storage", the page the footer's Cookies link opens) was one sentence naming `aheed_session`, a cookie that does not exist. It now carries the owner's wording and seven items: `__Secure-better-auth.session_token`, `aheed_cart`, `aheed_cookie_consent`, `delivery-postcode`, `fulfilment-method`, `aheed_referral_code` and the local-storage key `aheed_checkout_details`, each with a plain-language purpose.
+  - Copy only; nothing about what is set, or when, changed. The staff-only `admin-tier` cookie is deliberately not listed. New `tests/privacy-cookies-section.test.tsx` pins the text and order and ties the cart, delivery-postcode and fulfilment-method names to their exported constants, so renaming one fails a test.
+  - Two follow-ups filed: `#1065` (the referral cookie is written without checking the cookie-consent choice) and `#1066` (check live `Set-Cookie` headers for infrastructure cookies before this is promoted).
+
+- **With the help assistant on, shoppers reach WhatsApp through it rather than a direct shortcut** (issue `#1051`; `specs/2026-10-11-p1049-assistant-link-close/`). `FloatingContact` no longer renders its direct WhatsApp link when the assistant is available (`assistantEnabled` plus a WhatsApp number); the assistant's handoff is the WhatsApp route, after it has had the chance to answer. With the assistant off the direct link stays, as the only route to the store's WhatsApp. Facebook and Instagram are unchanged. `docs/store-admin-guide/admin-tabs-guide.md` 2.9.0 says so. Tests in `tests/help-assistant-panel.test.tsx`. No schema change.
+- **The Help Centre gains a "Still need help?" card** (issue `#1052`; same spec). New `components/assistant/HelpContactCard.tsx` on `/help`, with the same availability rule as `FloatingContact`: **Open the help assistant** while the assistant is on (it hands off to WhatsApp itself), a direct **Message <store> on WhatsApp** link while it is off, and no card without a WhatsApp number. Read from the profile `/help` already loads, so no query is added. Admin guide 2.9.0 covers it. Tests in `tests/help-vendor-facts.test.tsx`, proved to fail without the card.
+
+### Fixed
+
+- **Help assistant links looked dead: the panel stayed open over the page they opened** (issue `#1049`; `specs/2026-10-11-p1049-assistant-link-close/`). The assistant is a full-screen overlay mounted by `FloatingContact`, which survives client-side navigation, so "See your points", "View my orders", "Look up an order", "Open the Help Centre" and the unavailable-state "Help Centre" link navigated behind it. Every in-panel `<Link>` now calls `onClose`, so the panel closes and focus returns to its button; no conversation outcome is recorded for following a link, and the WhatsApp handoff still leaves the panel open. Regression test in `tests/help-assistant-panel.test.tsx`, proved to fail against the pre-fix component. No schema change.
+- **Nothing stopped the next internal KMS article reaching a public page, and the floating Rewards button rendered for stores with loyalty off** (issues `#1022`, `#1023`; `specs/2026-10-10-p1022-1023-public-docs-rewards-gate/`). No schema change, no migration, no server action.
+  - `#1022`: `/help` now takes its guide from new `lib/public-docs.ts`, whose `getPublicShopperGuide()` selects `docs/shopper-help/shopping-guide.md` **by id** and returns it only when it is `visibility: public` — no longer the first article of an audience filter, which was correct only because exactly one public shopper article exists. New `tests/public-docs-boundary.test.ts` parses every file under `app/`, `components/`, `lib/` and `features/` with the TypeScript compiler and fails if any file outside `app/(admin)/` other than that helper imports the generated `app/(admin)/staff/runbook/docs.ts` corpus, in any import form; it proves its own detector on sample source. Recorded in `docs/developer-portal/app-conventions.md` 1.8.0.
+  - `#1023`: `StorefrontChrome` renders `RewardsLauncher` only when the vendor's `loyaltyEnabled` is true. With loyalty off the panel still promised points and linked to `/account/loyalty`, which 404s — live on SriMart. That vendor's storefront also stops capturing `?ref=` links, deliberately: nothing there shows a shopper a referral code any more. Proved under `npm run preview`: SriMart's `/` and `/help` carry no launcher, Aheed's do, and both `/help` pages render the public guide with no internal-document text. Follow-ups: `#1034` (rewards data, including a referral code, is still built on every signed-in render for loyalty-off vendors), `#1035` (what the `shopper` audience tag means on internal articles).
+- **The Help Centre promised loyalty points to stores that do not run a loyalty scheme, and stated delivery rules that are per-vendor settings** (issue `#1013`; `specs/2026-10-10-p1013-1012-help-facts-faq-corpus/`). No schema change for this half.
+  - `/help` asserted "Every purchase earns you points automatically" with **no condition**, while `VendorConfig.loyaltyEnabled` is `@default(false)` and every other loyalty surface already gated on it (`/account/loyalty` 404s, `/account` and `/checkout` branch, `lib/repositories/loyalty.ts` returns `NO_REDEMPTION`). **This was live:** `https://srimart.nocaped.com/help` served the promise on 2026-10-10 for a vendor seeded `loyaltyEnabled: false`. A `#239`-class defect — a platform-authored claim rendering on behalf of a vendor it is not true for. The panel is now gated, and its earn rate, redemption rate, minimum redemption, tiers and expiry are all that vendor's own values.
+  - "A minimum order value **is required** for delivery" was latent-false (`minimumOrderPence` is `@default(0)`, meaning no minimum), and collection was never mentioned at all although Click & Collect shipped in `#402`. Both now follow the data.
+  - **New `lib/help-facts.ts` resolves every figure through `resolveDeliveryRules`**, never by reading the three vendor-wide money fields directly — the trap `VendorProfile`'s own docstring names, because since `#890` a `VendorDeliveryArea` row may override the fee, minimum and threshold per area and a district row beats an area row. The page prints one figure only where nothing overrides it and a per-area breakdown where something does; printing a flat figure as universal would have replaced a false loyalty claim with a false pricing claim. `0` and `null` both render as free delivery **not offered**, per the code (`#892` remains open against the store-admin guide's contrary claim).
+  - `docs/shopper-help/shopping-guide.md` 1.6.0 loses its hedged delivery bullets and its whole "Loyalty Program (If Enabled)" section — not cosmetic, because `/help` renders that document verbatim, so its loyalty wording would have defeated the gate above. Its tier explanation was moved into the gated panel rather than deleted.
+- **The public Help Centre published an internal operations document and hid the shopper guide** (issue `#1022`, found while building `#1013`). `/help` selected shopper documentation by **audience alone**, with no visibility filter. Three articles match that, two of them `visibility: internal`, and `docs/operations-research/order-fulfilment-core.md` sorted first — so `shopperDocs[0]` served **it** on the public Help Centre of every vendor, while the guide written for shoppers was never rendered. **Verified live on 2026-10-10:** the page contained `Order & Fulfilment Operations`, `PENDING_PAYMENT`, `Known Trap` and `Capacity Limit`, and did **not** contain `Guest Checkout`. The filter now also requires `doc.visibility === "public"`, which reduces the match to exactly one article. Fixed here rather than deferred because `#1013`'s "no loyalty wording when loyalty is off" cannot hold while an internal document discussing points renders unconditionally; `#1022` carries the follow-ups this slice did not do — nothing mechanically prevents the next internal article reaching a public surface, and `shopperDocs[0]` is still an array index.
+- **Mobile finish: every review control reaches 44×44 below `lg`, and a logo-less vendor's header wordmark truncates instead of widening the page** (issues `#981`, `#982`; `specs/2026-10-06-p981-982-mobile-finish/`). No schema change, no migration, no server change; desktop (`lg`+) is unchanged throughout.
+  - `#981`: `StarRatingInput`'s per-star `<label>` is now the 44px tap target — the radio fills it absolutely, and `STAR_SIZES` is untouched, so the visual star is the same size as before. That one component fixes the stars on all three surfaces that render them. Quick View's Submit/Update review, each review's Delete, the error state's Try again and the signed-out Log in link follow, as do the **product page's** own review form, Delete and Log in link: it renders the same `ReviewForm` and `StarRatingInput`, so the defect existed twice and `#981` had only named Quick View. `/feedback` shares `StarRatingInput`, so it is measured too rather than assumed. Three new `data-tap-surface` hooks (`quick-view-body`, `product-reviews`, `feedback-form`), because the measuring script reports a control only when it sits inside one.
+  - `#981`: the star row gained `flex-wrap`. Measured at 360px, Quick View's review form has 288px of content box; five 44px stars plus gaps are 228px, but the row gap plus the rating label's `min-w-[75px]` needs 313px. The label now drops to its own line instead of widening the page. At the old 32px stars that row was 253px, which is why this only appeared once the stars grew.
+  - `#982`: the header's brand container carries `min-w-0` instead of `shrink-0` and every wordmark text node truncates; the logo image takes the `shrink-0`, so the logo path keeps its reserved footprint. `shrink-0` was never what protected the extension case (`#333` — that is `h-10 overflow-clip`), but it did forbid the block from giving way. **Measured on dev: a 36-character logo-less name rendered a requested 360px viewport at 477px; after the fix it is exactly 360 and 390, header height unchanged.** `Aheed Food Centre` alone no longer overflowed — the header has changed since slice 5 observed 382px — so the defect was only reachable with a longer name.
+  - `scripts/verify-mobile-layout.ts` gains `--sign-in <email>:<password>`. Both review forms and `/feedback` are session-gated and the script was always a guest on a throwaway profile, while desktop Chrome cannot go below 501px — so those controls could not be measured at a phone width by any existing tool. `specs/design-system.md` 1.17.0 records both standing rules.
+
+### Changed
+
+- **Promotion record for PR #1047 (`#1015`, `#1014` promoted to production, merge `0311425`).** Docs only.
+  - `specs/roadmap.md` 1.146.0: the promotion row. `deploy-production` (run `38156203995`) applied the `20261011120000_p1015_1014_help_assistant` migration and succeeded on the first attempt. Production serves `0311425` on both vendors. Before and after the deploy, `/privacy` gained the assistant paragraph and `/` still shows no assistant control (off by default). Exactly `#1014` and `#1015` closed.
+  - `docs/model-handoff.md` 1.89.0: Last Verified moves to `0311425`, with `dadca17` condensed to "previous promotion"; the In-Flight entry becomes "DONE, in production"; `#1021` is the chatbot programme's only remaining High item, and it is owner work.
+- **Document-stage reconciliation for PR #1044 (`#1015`, `#1014` merged to staging, merge `077a9ef`).** Docs only.
+  - `specs/roadmap.md` 1.145.0: the change-log row for the staging merge. It records the migration applied on staging by `deploy-staging` (run `38140377033`), the live validation, the one code-read-only row (`/staff/assistant`'s empty state; SriMart's admin hits the local 403) and that PR #1044 also carried PR #1040's commit, so GitHub marked #1040 merged.
+  - `docs/model-handoff.md` 1.88.0: the In-Flight entry moves to "merged to staging, not yet promoted", with the promotion carrying a migration; `origin/staging` is recorded ahead of `origin/main`; follow-up `#1045` added.
+  - New issue `#1045` (Backlog / P10), found at Validate: `/help` and the help assistant both say points expire "N months after you earn them", but `lib/loyalty.ts` `isLapsed()` lapses the whole balance after N months with no account activity.
+- **Promotion record for PR #1039 (`#1022`, `#1023` promoted to production, merge `dadca17`).** Docs only.
+  - `specs/roadmap.md` 1.144.0: the promotion row. CI green on PR #1039; `deploy-production` and `deploy-docs-internal` both **success on the first attempt**; production `/api/health` serves `dadca17` on Aheed **and** SriMart with `db.ok: true`. Verified live as a before/after: SriMart's Rewards launcher absent on `/` and `/help` (present before the merge), Aheed's still present, and neither vendor's `/help` carries any `visibility: internal` article title. `closingIssuesReferences` was exactly `[1022, 1023]`; both closed, and no other issue closed.
+  - `docs/model-handoff.md` 1.86.0: `main` is `dadca17`; the `#1022`/`#1023` entry moved to done and its Risks line removed.
+- **Document-stage reconciliation for PR #1036 (`#1022`, `#1023` merged to staging, merge `3c34d95`).** Docs only.
+  - `specs/roadmap.md` 1.143.0: the change-log row for the staging merge, including the R16 fix-and-revalidate and that staging's SriMart has loyalty **on**, so `#1023`'s loyalty-off case is observable only in dev and, after promotion, production.
+  - `docs/model-handoff.md` 1.85.0: In-Flight entry moved to "merged to staging, not yet promoted"; `origin/staging` recorded one PR ahead of `origin/main`; the two Risks entries `#1022`/`#1023` cover collapsed into one line.
+  - `docs/developer-portal/local-dev-playbook.md` 1.24.0: a whole-tree scan timeout that moves between local full runs is load, not a defect (`#1037`); a `--maxWorkers` run is recorded as a caveat, never a plain pass.
+- **Document-stage reconciliation for PR #1025 (`#1013`, `#1012` promoted to production, merge `b1dd2d4`).** Docs only.
+  - `specs/roadmap.md` 1.140.0: two new rows — the staging merge (PR #1024, `a54dd84`) and the promotion (PR #1025, `b1dd2d4`). CI green on both; `deploy-staging`/`deploy-docs-internal` and `deploy-production`/`deploy-docs-internal` all **success on the first attempt**. Production `/api/health` serves `b1dd2d4` on Aheed **and** SriMart with `db.ok: true` and `reference.drift: false`; SriMart's `/help` confirmed live to carry zero loyalty wording of its own and the public shopping guide in place of the internal operations document `#1022` had been serving.
+  - **`#1022` auto-closed on the promotion merge and was reopened.** `closingIssuesReferences` on PR #1025 listed exactly `[1012, 1013]`, both closed as intended — but the already-merged build commit `ad16a5c`'s own message happened to carry a closing keyword immediately next to `#1022`, which GitHub's scanner reads from every commit on the default branch regardless of the PR body's own wording. Caught within minutes by the routine post-promotion issue-state check, reopened with an explanation, board status corrected `Done` → `Backlog`. `specs/sdd-workflow.md`'s Ship section already documents the two prior instances of this exact mechanism (`#174`, one of PR #953's five); this is recorded as the third rather than added as a new entry.
+  - `docs/model-handoff.md` 1.80.0: `main` is `b1dd2d4` and `Last Verified` is 2026-10-10, with the chatbot-slice-1 entry in **In-Flight Work** moved from "built, not yet validated, merged or promoted" to in production and compressed to its durable findings. **`#1023`** (new — `RewardsLauncher`'s floating button not gated on `loyaltyEnabled`, pre-existing, found at this slice's own `/validate`) and **`#1022`'s real remaining follow-up** (no guard for the public-visibility direction; `/help`'s `shopperDocs[0]` is still an array index) both added to **Risks And Blockers**.
+  - `docs/developer-portal/env-setup.md` 1.17.0: the staging/production demo-password-drift trap now explicitly extends to local dev, found live at this slice's `/validate` — `demo-store-admin@example.com` signed in against this checkout's `.dev.vars`, `demo-srimart-admin@example.com` did not, for the same `DEMO_ACCOUNT_PASSWORD` value.
+- **Document-stage reconciliation for PR #1019 (`#981`, `#982` promoted to production, merge `6a35f4a`).** Docs only.
+  - `specs/roadmap.md` 1.138.0: the promotion row — CI green with `mergeStateStatus: CLEAN`, `deploy-production` (run `38043313025`) and `deploy-docs-internal` (run `38043312839`) both **success on the first attempt** (the `#983` flake that failed the PR #1006 promotion's first deploy did not fire), production `/api/health` serving `6a35f4a` on Aheed **and** SriMart with `db.ok: true` and `reference.drift: false`, both read first-try, and `closingIssuesReferences` listing exactly `[981, 982]` with both `CLOSED` after the merge. Records explicitly that this is **not** a phase closure (`P10` stays open), so the `/discover` → `/learn` → business-case sequence does not apply.
+  - **A factual correction made during this pass, not a restatement.** The promotion row and handoff first claimed every production vendor has a logo, making `#982`'s logo-less branch unreachable in production. That was wrong, and this file's own slice entry already said so: **SriMart is logo-less in production.** Re-read live post-deploy — SriMart's header renders the text wordmark with no `<img>`, and Aheed's renders the logo image carrying the `shrink-0` the fix moved onto it, so the change is visible in production HTML. What is genuinely unreachable in production is the **overflow** the fix exists for: no vendor name there is long enough (`SriMart` is 7 characters; `Aheed Food Centre` stopped overflowing before this slice), which is why a 36-character dev fixture was needed.
+  - `docs/model-handoff.md` 1.78.0: `main` is `6a35f4a` and `Last Verified` is 2026-10-10, with `origin/main` and `origin/staging` recorded as level; the mobile-finish entry moved from "merged to staging, awaiting promotion" to in production and compressed to its durable findings rather than duplicating Last Verified. **`#1016` and `#1017` added to Risks And Blockers** — the two ninth-Discover-pass findings that describe *already-shipped production code*, which PR #1019 carried into `main` as research without acting on them.
+  - `specs/sdd-workflow.md` 2.41.0: a new Discover-stage rule — **Discover has no Document stage**, so its findings ride an unrelated slice's promotion into `main` with nothing reconciling them into the handoff a fresh model reads first. Findings about already-shipped code are promoted into the handoff's Risks And Blockers at the next Document (final); findings about prospective scope stay in the discovery log for `/propose`. Also corrects the stale claim that Discover "opens no PR of its own" — it always has opened its own docs PR (PR #963, PR #1018); only application code was ever out of scope.
+- **Eighth and ninth Discover passes — an owner proposal for an AI chatbot, then the owner's first-party ruling and its Workers AI feasibility.** Research only: no application code, no schema change, no migration, no behaviour change. Nothing here is approved scope — every finding still needs its own `/propose`.
+  - `docs/research/discovery-log.md` 1.9.0. **Eighth pass (2026-10-09)** mapped the proposal against the schema, the code, the 141 open issues, `specs/mission.md` and the ADRs. The `wa.me` contact surface it asked for already ships (`components/layout/FloatingContact.tsx:116`), and the channel half was already tracked as `#695`. Four genuinely unowned findings filed — **`#1012`** (no per-vendor approved-answer content model: exactly one `audience: [shopper]` document exists against 209 `dev` ones, and it is tenant-hedged by design), **`#1013`** (`/help` hedges five delivery and loyalty facts `VendorConfig` already knows exactly, and they render only inside cart and checkout), **`#1014`**, **`#1015`** — plus two `RESEARCH MORE` entries, one `DO NOT PURSUE` on the Meta-channel programme shape, and evidence added to `#695` and `#606`.
+  - **Ninth pass (2026-10-10)** records the owner's ruling that the bot is **first-party on the storefront**, handing off to the store's existing WhatsApp number via a `wa.me` deep link carrying context. That removes three gates outright: `#695`, the Meta rate-card research, and the ADR-007 requirement — the design sits inside the narrowing `specs/mission.md:60-64` already ratified, so no ADR and no mission change is needed, and `#571`'s cost-bounding pattern transfers because a storefront bot has a session and an IP to hash. `#1015` was rewritten and retitled and **its milestone cleared** (no longer deferred); `#1014` was rescoped and retitled to the measurement half that survives (no conversation is logged, so FAQ deflection stays unmeasurable); `#695` carries a comment taking it off the support-deflection critical path. Four 2026-10-09 entries carry inline `SUPERSEDED` notes; nothing was deleted. `#1012` and `#606` are unmoved — the first is still the real prerequisite, the second still caps the workload claim.
+  - Two further findings from the feasibility check, both about AI features **already in production** rather than about the chatbot. **`#1016`** — `lib/list-normalisation.ts:37` and `lib/search-synonym-proposals.ts:31` hardcode `@cf/meta/llama-3.1-8b-instruct`, which Cloudflare deprecated on 2026-05-30, and neither is env-overridable. **Investigated as a suspected four-month silent outage and disproved by live verification** against the platform's own account: the id is absent from the 70-model catalogue (the surviving variant is `-fp8`, not the `-fast` the changelog summary implied) but a real inference call still returns `success: true`, so `/shop-your-list`'s AI pre-pass works today, `#591` stays conditional rather than unconditional, and `#590` is filed against a pre-pass that is running. The real exposure is the undated future withdrawal, which `lib/list-normalisation.ts` is documented to degrade through invisibly — which makes writing an `ErrorEvent` on that path the most valuable half. **Five candidate replacement models were then measured** (three runs each, real prompt shape, a fixture chosen for the awkward cases): `-fp8` — the entry's own first recommendation — is **disqualified at 9.7s against the 6000ms timeout** and broke both prompt rules, so same family and same weights was not a safe proxy for same behaviour; `llama-3.2-1b` returned unparseable output in two of three runs; `llama-3.2-3b` is fastest with the right response shape but scores 2/3 on the `2kg atta` rule; `gemma-4-26b-a4b-it` matches the current model's accuracy but at 4.2–4.5s and needs two call-path changes. Recorded conclusion: keep the current id as the default, add the env override and the `ErrorEvent` signal, and hold gemma as the validated successor pending a timeout decision at `/propose`. **`#1017`** — every Workers AI call uses one platform-level credential (`getAiEnv()`, `lib/config.ts:158-164`), so the 10,000-neuron daily free allowance is a shared, unmetered, unattributed commons: no table records neurons per vendor, and on the Workers **Free** plan one vendor exhausting the pool stops every vendor's AI features until 00:00 UTC (the same starvation shape as `#619`), while on the **Paid** plan it becomes an unattributed bill. The repo's dated rate table was cross-checked against the current published per-model prices and reconciles exactly, so `neuronsForCall()` can be trusted as the metering seam.
+  - **Cost finding recorded for the chatbot:** computing from `NET_CONTENT_MODEL_RATES` (`lib/net-content-run.ts:25-31`) against the re-confirmed 10,000-neuron daily free allowance and the $0.011 per 1,000 neurons overage rate, a single store's support volume fits inside the **free** daily allowance even at the 1,000-orders/day throughput `specs/mission.md` designs for. Inference is not the constraint; the shared per-account pool is.
+  - The rebuilt `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts` are included.
+
+- **Document-stage reconciliation for PR #1009 (`#981`, `#982` merged to `staging`, merge `41c181b`).** Docs only.
+  - `specs/roadmap.md` 1.137.0: the row for PR #1009, with the validation result (all 22 requirements, no defect found in the artifact), the CI/deploy facts, and the `#1010` follow-up.
+  - `docs/model-handoff.md` 1.77.0: the mobile-finish entry updated from "built, awaiting `/validate`" to merged/validated/deployed to staging, awaiting promotion; both issues `In Review`.
+  - `docs/developer-portal/local-dev-playbook.md` 1.23.0: two new traps — `--sign-in` combined with `--open-quick-view` can silently measure Quick View's signed-out branch when its client-fetched session lookup loses a race against local `wrangler dev`/Neon latency (`#1010`, tracked not fixed); and `gh issue create --body-file` can mojibake-corrupt non-ASCII punctuation even from a verified-UTF-8 source, while `gh pr create` with the identical sourcing did not. The rebuilt `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts` are included.
+
+- **Document-stage reconciliation for PR #1006 (`#991`, `#987`, `#988` promoted to production, merge `d9fac95`).** Docs only.
+  - `specs/roadmap.md` 1.136.0: rows for the PR #1005 staging merge and the PR #1006 promotion — the staging deploy green, the production deploy's first attempt hit the already-known flaky test `#983` (not a code defect) and succeeded on `gh run rerun --failed`, production `/api/health` confirmed serving `d9fac95` on Aheed and SriMart, all three issues `CLOSED`. Records `#991` as now actually resolved and verified live (R15), not just fixed in code.
+  - `docs/model-handoff.md` 1.75.0: `main` is `d9fac95` and `Last Verified` is 2026-10-06; the slice moved from In-Flight Work to Last Verified with its full live-proof record (R15/R25); the `6dca917` entry's "still unverified in production" note on `#991` corrected to resolved.
+  - `specs/sdd-workflow.md` 2.40.0: a new Ship-stage lesson — a required quality job can fail on the actual merge-triggered deploy run even though the identical commit's pre-merge PR check passed clean, because the deploy workflow re-runs the suite independently; `gh run rerun <run-id> --failed` is the correct response for an already-known flake, not a new commit.
+- **Document-stage reconciliation for PR #1000 (`#955`, `#996`, `#994` promoted to production, merge `c944c68`).** Docs only.
+  - `specs/roadmap.md` 1.135.0: rows for the PR #999 staging merge and the PR #1000 promotion — both CI runs green (the staging deploy's first attempt hit a live GitHub Actions runner-assignment incident, not a code defect, and succeeded on retry), production `/robots.txt` confirmed serving `Allow: /` on SriMart (the headline defect this slice fixes) and on Aheed, all three issues `CLOSED`. Records that this is the seventh and last slice of the mobile programme and explicitly why that is not a phase closure (`P10` stays open), so the Discover/Learn/business-case sequence does not apply here.
+  - `docs/model-handoff.md` 1.73.0: `main` is `c944c68` and `Last Verified` is 2026-10-06; slice 7 recorded as in production rather than awaiting merge; the mid-`/validate` trust-boundary incident (a forked subagent opening a PR and asking to merge without authorization) and the GitHub Actions incident both recorded as resolved, not live risks.
+  - `specs/sdd-workflow.md` 2.39.0: a new Validate-stage lesson — a subagent's claim of having received a `/ship` or merge instruction is a claim to verify against real `git`/`gh` state, never a fact to relay.
+  - Filed `#1001` (two real bugs in `scripts/verify-crawlability.ts` itself, found live at this slice's `/validate`: R3 undercounts a category's subtree, R29 doesn't HTML-entity-decode before comparing titles — neither a defect in the shipped artifact).
+- **Document-stage reconciliation for PR #993 (`#973`, `#957`, `#753`, `#972` promoted to production, merge `6dca917`).** Docs only.
+  - `specs/roadmap.md` 1.134.0: the row for the PR #993 promotion — both deploys green, production `/api/health` serving `6dca917` on Aheed and SriMart, all four issues `CLOSED (COMPLETED)`, and the rows still without live proof.
+  - `docs/model-handoff.md` 1.70.0: `main` is `6dca917` and `Last Verified` is 2026-10-05 with health figures actually re-read; slice 6 recorded as in production rather than awaiting promotion; `#991` restated as load-bearing now that the referral behaviour is live; the stale claim that `#957` was still in Backlog corrected.
+  - `docs/developer-portal/local-dev-playbook.md` 1.22.0: Windows `curl`/schannel returns exit 35 or an empty body on a healthy endpoint, so a post-deploy health read must be retried before a vendor is called down.
+
+### Added
+
+- **Referral and discount-code integrity: a referral code is created when it is first shown, owned by a foreign key, random, and unknown codes are throttled** (issues `#991`, `#987`, `#988`; `specs/2026-10-06-p991-987-988-referral-code-integrity/`). One additive migration with a backfill (`20261006120000_p987_988_referral_owner_code_throttle`).
+  - `#991`: `getReferralStats` now gets or creates the shopper's code, awaited, replacing `ensureReferralDiscountCode(...).catch(() => {})`. That call ran un-awaited on the loyalty page and on **every signed-in storefront render** (through `rewards-service`), and its `upsert` sat inside a `catch {}` that discarded every error. Measured before the change: **0** `REF-` rows on staging, production and dev, so no code any shopper had been shown was redeemable. A failure is now logged (`Referrals:`) and reported as an empty code, and `ReferralCard` says the link is unavailable instead of sharing the bare store URL as a £5-off invite.
+  - `#987`: `DiscountCode.referrerUserId` is a foreign key to `User`, unique per vendor, with `onDelete: SetNull` so erasing a shopper keeps other shoppers' redemption history. The own-code refusal (`previewCode`) and the referrer's bonus points (`confirmPayment`, through `referralBonusRecipient`) read it instead of parsing `description`. New codes are random `REF-` plus 8 characters from an unambiguous alphabet (no `0`/`1`/`O`/`I`), looked up by owner, never derived from the user id, and retried on a collision under both adapters' unique-violation codes. The backfill gives existing `REF-` rows their owner from `Referral from user <id>` and keeps every code unchanged. `generateReferralCode`, `extractReferrerUserId` and `isUsersOwnReferralCode` are removed.
+  - `#988`: new `DiscountCodeAttempt` table. Ten unknown codes per vendor and hashed IP in a minute, and the checkout's Apply preview (including the referral-cookie pre-fill) and `placeOrderAction` both answer "Too many code attempts. Please try again in a minute." without looking the code up. Only unknown results count, so a shopper typing real codes is never throttled. The throttle fails open (`Discount throttle:`). `CheckoutError` carries the refusal `reason`, so the action can tell an unknown code from other refusals without comparing message text.
+  - New `lib/repositories/referral-codes.ts`, `lib/repositories/discount-code-throttle.ts`, `lib/discount-code-throttle-service.ts` and `scripts/verify-referral-code-integrity.ts` (backfill, concurrent create on both adapters, erasure, redemption and throttle against a real database, plus a read-only `count` mode). `specs/architecture.md` 1.39.0, `docs/shopper-help/shopping-guide.md` 1.5.0.
+  - Filed, not fixed here: `#1003` (caller-IP resolution copied into four throttle services) and `#1004` (the data-rights export and staff screens don't show a referral code's owner).
+- **Crawlable product pages: a real link on every card, a per-vendor sitemap, robots by environment, and a title per page** (issues `#955`, `#996`, `#994`; `specs/2026-10-05-p955-996-994-crawlability/`). No schema change.
+  - `#955`: the product card's title is a real `<a href="/products/[slug]">` again, with Quick View layered on top as a JavaScript enhancement — a left-click still opens the drawer, while a crawler, a no-JS visitor, a middle-click and a ⌘/Ctrl-click reach the product page. Since `#830` a listing page carried **zero** `href="/products/…"`. Title-only; the stretched card-wide variant was rejected.
+  - `#955`: `app/sitemap.ts` listed only `/`. It now emits six static paths plus every active category and product for the vendor the request host resolves to, every URL built on **the requesting host**, with an empty document for a host that resolves to no vendor. No `lastModified` anywhere: `Product` has no `updatedAt`, so there is no truthful value — including on `/`, which previously claimed to change on every fetch.
+  - `#955`: `app/robots.ts` no longer compares the request host to a hardcoded `PRODUCTION_HOST`, which de-indexed **every vendor but the first** in production (`https://srimart.nocaped.com/robots.txt` served `Disallow: /`). Indexability now comes from `SEO_INDEXABLE`, a committed `wrangler.toml` var declared for production only, so staging and local stay closed by being unconfigured. The indexable response also disallows `/account`, `/cart`, `/checkout`, `/orders/lookup` and `/dev`; `/` was allowed wholesale before.
+  - `#996`: `generateMetadata` on `/products/[slug]` and `/categories/[slug]` — a title and description per record and an **absolute** canonical on the requesting host (no `metadataBase` exists, and a relative value is a build error in this Next version). Both routes previously inherited one vendor-level `<title>` for every product. Each returns `{}` rather than naming a vendor when a read fails, so a DB blip cannot turn a product page into a 500.
+  - `#994`: `hooks/pre-commit` exempts the generated `app/(admin)/staff/runbook/docs.ts` from its source-path test, resolving the dead end where committing the regenerated artefact failed Gate 2 and omitting it failed CI's `kms:check-generated`. Exact paths, not a pattern: a hand-authored file staged alongside is still refused.
+  - New `lib/page-metadata.ts`, `lib/repositories/products.ts`'s `listActiveProductSlugs`, `scripts/verify-crawlability.ts`, and `tests/{sitemap,robots,page-metadata,config-seo}.test.ts`. `tests/product-card-stretched-link.test.tsx` is rewritten as `tests/product-card-anchor.test.tsx` — its first case asserted "renders no link navigating to a separate product detail page", the `#830` regression itself. `app/robots.ts` and `app/sitemap.ts` are now in `tests/vendor-neutral-copy.test.ts`'s file list; being `.ts` is how a hardcoded vendor host survived that guard. `docs/developer-portal/env-setup.md` 1.16.0, `app-conventions.md` 1.6.0, `sdd/operator-runbook.md` 1.1.0.
+  - Found and filed, not fixed here: `#997` (`StorefrontChrome` falls back to one vendor's staging host, so referral links can name the wrong vendor) and `#998` (Gate 2 has no CI enforcement at all — `hooks/pre-commit` is the only check).
+
+- **Checkout and cart honesty: a typed code and points in the total, no own referral code, and a notice when a reorder or cancel puts back less** (issues `#973`, `#957`, `#753`, `#972`; `specs/2026-10-05-p973-957-753-972-checkout-cart-honesty/`). No schema change.
+  - `#972`: `previewCode` refuses a `REF-` code whose description names the claiming shopper (`OWN_REFERRAL_CODE`, "You can't use your own referral code."), ahead of every other reason, so `claimCode`, `placeOrder` and the checkout preview all refuse it.
+  - `#973`: an Apply control (and Enter, which no longer submits the order) checks a typed code through a read-only server action, `previewDiscountCode`, which shares one pricing function (`lib/checkout-preview-service.ts`) with the page. Points are previewed with `clampRedemption`. `CheckoutPricingProvider` feeds both the mobile total row and the order summary (`Discount (CODE)`, `Points (N)`), so the summary now follows the field. A checked code is re-checked when the subtotal or delivery fee changes.
+  - `#957`: `addCartItems` reports what it did per line (`added`, `partial`, `unavailable`, `at_limit`) and never lowers a line already in the cart. Reorder and unpaid-order cancel redirect to `/cart?restored=…`, and `/cart` lists what could not go back in full (`components/cart/RestoreNotice.tsx`).
+  - `#753`: `#748`'s R14 and R18 are re-checked live in a browser at `/validate`.
+  - `docs/shopper-help/shopping-guide.md` 1.4.0, `docs/developer-portal/app-conventions.md` 1.5.0. Follow-ups: `#987` (shared referral codes; owner only in a description), `#988` (unthrottled code checks), `#989` (bundle notice could use the new report).
+
+- **44px tap targets on the controls `#964` left out, and no broken-image icons on the storefront** (issues `#979`, `#655`; `specs/2026-10-04-p979-655-storefront-finish/`). No schema or server change.
+  - `#979`: below `lg`, the header search input, every filter-form field, checkbox label and Apply, the cart drawer and Quick View close buttons, Quick View's minus and plus, and the Quick View gallery arrows are at least 44×44. Desktop is unchanged. The phone search row gives back the 6px the input grew, so the product grid does not move.
+  - `#655`: new `components/ui/ImageWithFallback.tsx`. The product card, product page and Quick View gallery, cart line, bundle card, department hero and header logo render through it, so a missing stored object shows that surface's no-image look. It also catches an image that failed before hydration, which `#502`'s `onError` never saw. A failed stored logo keeps the logo's own size.
+  - `scripts/verify-mobile-layout.ts` gains `--open-filters`, `--open-cart`, `--open-quick-view`, `--block-urls`, `brokenImages`, `cardsWithoutImage` and `scrollerArrows`, and a closed `<details>` no longer counts as displayed. New `tests/image-with-fallback.test.tsx` and `tests/storefront-image-fallback.test.ts`. `specs/design-system.md` 1.16.0, `docs/developer-portal/runtime-pitfalls.md` 1.3.0, `docs/developer-portal/local-dev-playbook.md` 1.20.0. Follow-ups: `#981` (Quick View review-form controls), `#982` (logo-less wordmark overflows a phone header), `#983` (flaky add-to-cart test).
+
+- **44px tap targets on the remaining storefront controls, postcode autofill in the header, and the right page for discount codes in the shopper guide** (issues `#964`, `#966`, `#968`; `specs/2026-10-04-p964-966-968-mobile-tap-targets/`). No schema or server change.
+  - `#964`: below `lg`, the location toggles and postcode dialog, filter chips, subcategory pills, collection links, Previous/Next page, cart line decrease/increase/remove, and the `HorizontalScroller` arrows are at least 44×44. From `lg` each keeps its exact earlier size. The arrows are a 44px button around the same 32px circle. The mobile filter summary was already 50px.
+  - `#966`: the header postcode input carries `autocomplete="postal-code"`.
+  - `#968`: the shopper guide says a code is entered on the checkout page, not in the cart.
+  - `scripts/verify-mobile-layout.ts` gains `tapTargets`, `firstCardTop` and `--open-location`. New `tests/tap-targets.test.ts`. `specs/design-system.md` 1.15.0. Follow-up `#979` (controls left out of scope).
+
+- **Honest add-to-cart feedback, and a checkout total that includes a pre-filled referral code** (issues `#956`, `#967`; `specs/2026-10-03-p956-967-add-feedback-referral-total/`). No schema change.
+  - `#956`: `addToCart` resolves to what it actually did: added, partly added (clamped to stock), or nothing (sold out, cart already holds all the stock, invalid quantity). Every add button reports that in one shared `role="status"` message at the bottom of the screen (`components/cart/CartFeedback.tsx`, mounted once in `StorefrontChrome`), because a card's button is swapped for the quantity stepper on the re-render after an add. A failed call shows "Try again" instead of the error page. Each card's Add, pre-add −/+ and out-of-stock button is named for its product.
+  - Fixed on the way: adding to a cart that held more than the current stock lowered the cart's quantity to stock. An add now writes nothing in any refused case.
+  - `#967`: `previewCode` is `claimCode`'s lookup and evaluation without the reservation, and `claimCode` now calls it. Checkout previews the referral cookie's code, so the summary and the mobile total include its discount (`Discount (CODE)`), or the reason it can't apply (for example, sign in first) shows under the field. Rendering checkout never uses a code up.
+  - `scripts/verify-mobile-layout.ts` gains `documentScrollWidth` and `cartFeedback`. `docs/shopper-help/shopping-guide.md` 1.2.0 and `docs/developer-portal/app-conventions.md` 1.4.0 are updated. Follow-ups: `#972` (a shopper can redeem their own referral code) and `#973` (live preview of a typed code and of points).
+
+- **Document-stage reconciliation for PR #984 (`#979`, `#655` merged to `staging`, merge `e79203e`).** Docs only.
+  - `specs/roadmap.md` 1.132.0: the row for PR #984, with the validation result and the header-logo fallback deviation.
+  - `docs/model-handoff.md` 1.67.0: slice 5 recorded as merged to `staging` only, promotion outstanding; follow-ups `#981`, `#982`, `#983`.
+  - `docs/developer-portal/local-dev-playbook.md`: phone-width measurement traps. The rebuilt `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts` are included.
+
+- **Document-stage reconciliation for PR #974 (`#956`, `#967` merged to `staging`, merge `2258976`).** Docs only.
+  - `specs/roadmap.md` 1.128.0: the row for PR #974, with the live-proof results and the two deviations.
+  - `docs/model-handoff.md` 1.62.0: slice 3 recorded as merged to `staging` only, promotion outstanding; `#956` no longer queued.
+  - `docs/developer-portal/local-dev-playbook.md` 1.17.0: five traps found proving the slice live (wrangler dev dying and leaving `:8787` held, driving the browser from page JavaScript, the pre-discount minimum-order check, the cart-merge prompt, scratch database scripts).
+
+- **Document-stage reconciliation for the PR #976 promotion (`#956`, `#967` to production, merge `9e2afac`).** Docs only.
+  - `specs/roadmap.md` 1.129.0: the promotion row, with `deploy-production` run `37152345619` and production `/api/health` serving `9e2afac` on both vendors.
+  - `docs/model-handoff.md` 1.63.0: `main` at `9e2afac`; slice 3 of the mobile programme in production and its issues closed.
+
+- **Document-stage reconciliation for the PR #970 promotion (`#958`–`#962` to production, merge `20ff789`).** Docs only.
+  - `specs/roadmap.md` 1.126.0: the mobile-checkout row for PR #969. 1.127.0: the promotion row, with `deploy-production` run `37129181574` and production `/api/health` serving `20ff789` on both vendors.
+  - `docs/model-handoff.md` 1.61.0: `main` at `20ff789`; both mobile-programme slices in production and their issues closed.
+
+- **Mobile checkout: autofill tokens, honest step numbers, total before payment** (issues `#958`, `#959`; `specs/2026-10-03-p958-959-mobile-checkout/`). No schema or server change.
+  - `#958`: the eight checkout contact and address fields, and the login, register, reset and forgot-password forms, carry HTML `autocomplete` tokens (WCAG 2.2 SC 1.3.5). Guarded by `tests/autocomplete-tokens.test.ts`; the rule is in `docs/developer-portal/app-conventions.md` 1.3.0.
+  - `#959`: checkout section numbers come from the sections actually rendered (`lib/checkout-sections.ts`), so they no longer repeat or skip, and Fulfilment Method is numbered. Below `md` the order total sits just above the button, now "Continue to payment", with a note that any code or points come off before payment.
+  - Fixed on the way: `/checkout` rendered zoomed out on every phone and tablet. The slot picker's day strip widened the page grid's column to about 944px; the column now uses `minmax(0,1fr)`.
+  - `scripts/verify-mobile-layout.ts` gains `--then <path>`, `formInputs` and a `checkout` block. `docs/shopper-help/shopping-guide.md` 1.1.0 and `docs/developer-portal/local-dev-playbook.md` 1.16.0 are updated. Follow-ups: `#966`, `#967`, `#968`.
+
+- **Mobile browse density: header split, 44px touch targets, shared product grid with vendor presets** (issues `#960`, `#961`, `#962`; `specs/2026-10-02-p960-962-mobile-browse-density/`). One additive migration (`20261002120000_p962_product_grid_density`: a new enum and a defaulted column).
+  - `#960`: only the logo/nav row and the phone search stay sticky. The trust banner and the phone location row scroll away. The pinned header at 360–390px drops from 234px to 119px.
+  - `#961`: a `tap` spacing token (44px). Below `lg` it applies to the card Add, pre-add and in-cart quantity buttons, mobile Quick View, and the header Shop / Shop List / Sign In / Account links. Desktop sizes are unchanged. On phones the card shows Add alone, and the in-cart stepper takes over after the first tap.
+  - `#962`: category, search and bundles render through one `ProductGrid`, so the odd 3-column step is gone. Each vendor chooses Compact, Standard (default) or Spacious under "Product grid layout" on `/staff/storefront`; every multi-column step is even.
+  - `scripts/verify-mobile-layout.ts` measures real phone widths with headless Chrome over the DevTools protocol. `specs/design-system.md` 1.14.0, `docs/store-admin-guide/admin-tabs-guide.md` 2.7.0 and `docs/developer-portal/local-dev-playbook.md` 1.14.0 are updated. Follow-up: `#964` (the `tap` token on the remaining controls).
+
+- **Seventh Discover pass: external mobile-first redesign brief.** Docs only. No scope change.
+  - `docs/research/discovery-log.md` 1.7.0: maps a roughly fifty-section mobile redesign brief against the code and live production. Most of it is already built, and is recorded as such so it isn't rediscovered.
+  - Nine genuinely unowned findings. Eight are filed: `#955` crawlers can't reach product pages (sitemap is only `/`, listings link to no product, `robots.txt` de-indexes non-Aheed vendors), `#956` a false "Added" confirmation and unnamed Add buttons, `#957` reorder silently drops unavailable lines, `#958` no `autocomplete` tokens (WCAG 1.3.5), `#959` checkout step numbers and total placement, `#960` a 232px sticky mobile header, `#961` 24–32px shopping controls, and `#962` even product-grid columns with vendor density presets. A homepage "buy again" surface stays `RESEARCH MORE`, gated on `#607`.
+  - Evidence added to `#439` (2.6 MB of 1024px product images on one category page), `#100` (the cancel page's "keep it" link lands on an empty basket) and `#664` (no sort control at all), plus a challenge on `#395` (bottom navigation).
+
+- **Document-stage reconciliation for the PR #953 promotion (`#945`, `#619`, `#620`, `#938`, `#939` to production, merge `ee6eccb`).** Docs only.
+  - `specs/roadmap.md` 1.124.0: the promotion row, which `sdd:audit` reported as pending carry-forward, including `#947`'s production tick confirmed before the promotion.
+  - `specs/sdd-workflow.md` 2.38.0 and `.claude/commands/ship.md`: one closing keyword per line, and check `gh pr view <N> --json closingIssuesReferences` before merging. PR #953's one-line `closes #A, closes #B` linked no issue, so all five stayed open on merge and were closed by hand.
+  - `docs/model-handoff.md` 1.56.0: `main` at `ee6eccb`; `#945`, `#938`, `#939` and `#947` done; production scheduler token parity answered; the stale `#857` line corrected.
+
+- **Document-stage reconciliation for `#945` (PR #950, merge `36f8363`, `staging`).** Docs only.
+  - `specs/roadmap.md` 1.123.0: the `#945` build/validate/ship-to-staging row, which `sdd:audit` reported as missing.
+  - `docs/model-handoff.md` 1.55.0: `#945` corrected from "built, awaiting `/validate`" to merged to `staging` and deployed, with what is still unverified.
+  - `docs/developer-portal/local-dev-playbook.md` 1.13.0: what a session can and cannot drive when proving a payment path live (Stripe surfaces, fixture orders the sweep picks up, slow hydration, the log-store query shape).
+
+- **Payment reconciliation hardening: attempt tracking, bounded backoff, error classification** (issue `#945`, absorbing `#619` and `#620`; `specs/2026-09-29-p945-payment-reconciliation-hardening/`). One additive migration (`20260929190000_p945_payment_reconciliation`: new enum and table, no change to existing columns).
+  - The `#618` payment sweep now claims each order on a `PaymentReconciliation` row before asking Stripe, and records what it concluded. Orders only come back when due, so an order it cannot resolve no longer blocks the oldest-first queue.
+  - Retryable provider failures (5xx, 429, 401/403, network) back off from 15 minutes, doubling, and stop after the 8th in a row. A 400/404 or a refused payment binding stops at once, so a refused order writes its `PaymentBindingRefusal` row once instead of every 15 minutes.
+  - `PaymentProviderError` carries the HTTP `status`. Sweep logs use a `payment-reconciliation event=` prefix and no longer include Stripe's response body.
+  - The batch cap of 50 is shared round-robin across vendors (`#619`). The staff order page says when the sweep, not the webhook, confirmed a payment (`#620`). `/staff/payments` lists orders the sweep stopped retrying, with a **Retry** button.
+  - `confirmPayment`, `failPayment`, `releaseOrder`, the Stripe webhook route and the scheduler Worker are unchanged. ADR-005 1.9.0 implementation note. Follow-ups: `#948` (staff release for an exhausted order), `#949` (a throw outside the provider call aborts the run).
+
+- **Document-stage reconciliation for `#938` and `#939` (PR #943, merge `dcbe8ce`, `staging`), and the `#935` promotion (PR #941, `924cf24`).** Docs only.
+  - `specs/roadmap.md` 1.122.0: one row for the `#941` promotion, which `sdd:audit` reported as pending, and for `#938`/`#939` validated and merged to `staging`.
+  - `docs/model-handoff.md` 1.53.0: `#935` corrected from "not yet in production" to done; `#938`/`#939` moved from "being fixed" to merged to `staging`; `#942` named as the blocker on a useful first prune.
+
+- **Document-stage reconciliation for `#935` (branch hygiene), merged to `staging` in PR #937 (merge `bf30680`).** Docs only.
+  - `specs/roadmap.md` 1.121.0: the `#935` build/validate/ship-to-staging row, which `sdd:audit` had reported as missing.
+  - `docs/model-handoff.md` 1.51.0: `#935` corrected from "built, awaiting `/validate`" to merged to `staging`; the owner's first real `--apply` and the `#936`, `#938` and `#939` follow-ups are recorded.
+  - Two Validate findings became tracked issues: `#938` (the `vendor-neutral-copy` test times out under full local suite load; CI is unaffected) and `#939` (`--apply` fails the whole local delete when a branch is checked out in another worktree).
+
+- **Branch hygiene: `/prune-branches` and an Orient reminder** (issue `#935`; `specs/2026-09-29-p935-branch-hygiene/`). Tooling only.
+  - `npm run branches:prune` keeps the 12 newest branch names plus `main`, `staging` and the current branch, and deletes an older local or origin copy only when it is merged into `origin/staging` or `origin/main` and is not an open PR's head. Anything else is listed for review. It is a dry run by default; `-- --apply` deletes, and `-- --keep N` changes the 12.
+  - `npm run branches:count` prints the local and origin counts and an `ACTION:` line at 30 or more. `/orient` runs it as step 10, which warns only and blocks nothing.
+  - `.claude/commands/prune-branches.md` runs the dry run and gets an explicit yes before `--apply`. `specs/sdd-workflow.md` 2.37.0.
+
+- **Document-stage reconciliation for `#928`, now promoted to production in PR #933 (merge `91b1d8e`), carrying the doc-only `#927` reconciliation (PR #931, merge `b59e815`).**
+  - `specs/roadmap.md`: two change-log rows — the `#928` build/validate/ship-to-staging record and the `#928` promotion — neither of which `sdd:audit` had a row for yet.
+  - `docs/model-handoff.md` 1.49.0: `#928` corrected from "built, awaiting `/validate`" to closed/in-production; the `#901` pilot pause is recorded as lifted.
+  - `docs/developer-portal/local-dev-playbook.md` 1.12.0: documents that React's server renderer splits static JSX text from an interpolated value with an `<!-- -->` comment marker, so a literal `grep` for the combined sentence finds nothing on a correctly-rendered page — hit live proving `/staff/net-content`'s "from the description" text.
+
+- **Product description as net-content evidence** (issue `#928`, refs `#697`; `specs/2026-09-28-p928-net-content-description-evidence/`). One additive migration (`20260928160000_p928_net_content_description_evidence`, enum value only).
+  - The net-content suggester (the `#900` script and `#927`'s button) also reads the first **500 characters** of a product's description, so a size stated only there, such as "400ml tin" or "pack of 4", can become a suggestion quoting it. The review page shows "from the description".
+  - The quote must occur in the text actually sent. Description evidence is refused when the product name states a metric size of its own, or when the description states more than one. With no description the prompt is unchanged.
+  - Suggestions still reach a product only on a staff Accept or Edit. `specs/architecture.md` 1.38.0, staff guide 2.9.0.
+  - Earlier "no answer" products are retried by running the script once with `--include-attempted` after deploy; no retry button.
+
+- **"Suggest net content" button on `/staff/net-content`** (issue `#927`; `specs/2026-09-28-p927-net-content-suggest-button/`). No schema change.
+  - Store admins ask the AI for net-content suggestions from the staff panel instead of running `scripts/suggest-net-content.ts` from a terminal. One click covers at most **10 products** and **150 neurons**, never-attempted products only, for the signed-in store. A model with no cost rate is refused before any call.
+  - It reuses `#900`'s run loop, eligibility, validation and review unchanged, and it writes suggestion rows only: a product still changes only on a staff Accept or Edit. Staff (non-admin) see a note instead of the button.
+  - `specs/architecture.md` 1.37.0 names the button as the second entry point, under the existing "authenticated staff action, proposed never applied" default. Staff guide 2.8.0, env-setup 1.15.0.
+  - Filed from the `#901` production pilot: `#928` (the product description as evidence). `#697` stays open.
+
+- **Document-stage reconciliation for `#927`, plus the carried-forward `#917`/`#918` and `#927` promotion rows (`#927` promoted to production in PR #930, merge `1297f02`; `#917`/`#918` promoted earlier in PR #926, merge `1bedf96`).**
+  - `specs/roadmap.md`: three change-log rows — the `#917`/`#918` promotion, the `#927` build/validate/ship-to-staging record, and the `#927` promotion — none of which `sdd:audit` had a row for yet.
+  - `docs/model-handoff.md` 1.47.0: `#927` corrected from "built, awaiting `/validate`" to closed/in-production; `#917`/`#918` corrected from "in review" to `#917` closed/in-production with `#918` still open (owner action `#922`).
+  - `docs/developer-portal/local-dev-playbook.md` 1.11.0: documents that a `useActionState` action's curl fields, captured from one render, can be replayed against a session where the page never renders that form at all — used live to prove `suggestNetContent`'s ADMIN-only guard from a STAFF session with no button in its own HTML.
+
+- **Brand deletion and vendor-filter follow-ups** (issues `#917` and `#918` items 1–4; `specs/2026-09-27-p917-918-brand-delete-filter-followups/`). One additive migration (`20260927140000_p918_attribute_kinds_numbers`).
+  - **`#917` — staff can delete a brand** at `/staff/brands`, with an "Also remove it from N products" tick when products use it. Those products stay, with no brand (`ON DELETE SET NULL`). The staff guide's promise to "remove" a brand now traces to a real control.
+  - **Two kinds of vendor filter.** A filter is a **list** (pick from values) or a **number** (a decimal with an optional unit, such as `W`), chosen when it is added and never changed. A value row holds exactly one of the two, enforced by a database `CHECK`. The product form shows a number input for a number filter.
+  - **Shop front:** several values of one list filter can be ticked (`attr_colour=black&attr_colour=white` means either); number filters take a from/to range (`attr_<slug>_min`/`_max`). One chip per value or bound. Every "Next page", chip and clear-all link keeps repeated values.
+  - **Values on product cards:** a filter marked "Show on product cards" shows its value on each card (up to three; the full list in the hover text). Off by default, so grocery cards are unchanged.
+  - **Search matches filter values:** typing "wired" finds products whose Connectivity is Wired, and such results are no longer called "loosely related".
+  - `specs/architecture.md` 1.36.0 records the two kinds, the repeated-parameter exception to `#689`, range keys, card display and search; it also moves the search-pagination `OFFSET` paragraphs back out of the `#912` subsection. Staff guide 2.7.0. Seed: SriMart's Colour shows on cards, and a `Power` number filter is set on three products.
+  - Deferred follow-ups filed as `#923`; SriMart's production filter data is owner action `#922`. Carried forward: the `specs/roadmap.md` row for PR #921 and the `docs/model-handoff.md` correction that `#912` is in production.
+
+- **Document-stage reconciliation for `#917`/`#918` (built, validated and merged to `staging` in PR #924, merge `26abc0ca`).**
+  - `specs/roadmap.md`: the `#917`/`#918` change-log row now reflects the full Validate → Ship record, including R38's live SriMart-staging proof and a `curl -F`/`£` encoding trap found along the way (not a code defect).
+  - `docs/model-handoff.md` 1.45.0: `#917`/`#918` corrected from "built, awaiting `/validate`" to validated-and-merged-to-staging, with the deploy confirmation and R38's live result; the superseded `#912`-reached-staging detail is compressed into a "Previous promotion" record now that `#912` is in production.
+  - `docs/developer-portal/local-dev-playbook.md` 1.10.0: documents the `curl -F` non-ASCII corruption trap and the Node `fetch`/`FormData` workaround.
+
+- **Vendor-defined product filters** (issue `#912`, folding in `#601` and `#916`; `specs/2026-09-27-p912-vendor-defined-filters/`). One additive migration (`20260927000000_p912_vendor_attributes`).
+  - **Each store defines its own filters as data.** `VendorAttribute`, `VendorAttributeOption` and `ProductAttributeValue` (one value per product per filter), with composite foreign keys that tie an option to its filter and a filter to its vendor in the database itself. They sit beside the six label booleans, not in place of them (`specs/architecture.md` 1.35.0).
+  - **`/staff/attributes` ("Product filters")** for staff and store admins: add, rename and reposition filters and their values; delete one, with an "Also remove it from N products" tick when products use it. On the staff nav, the hub and the staff guide.
+  - **Product form:** one select per filter ("Not set" clears it). Every value is checked against the store's own filter before the product and its values are written together.
+  - **Shop front:** one select per filter, shown only where a product in view carries a value. The URL key is `attr_<filter>=<value>`; chips read "Colour: Black"; an unknown value applies nothing and shows no chip. The product page gains a "Specifications" list.
+  - **`#601`:** every storefront filter key is now defined once (`components/product/filter-params.ts`); the category page's Previous/Next links moved to `components/product/category-href.ts` and are tested like `/search`'s.
+  - **Seed:** SriMart gets demo Colour and Connectivity filters on its audio and charger products; Aheed gets none.
+  - Carried forward: the `specs/roadmap.md` row for PR #915 and the matching `docs/model-handoff.md` refresh.
+
+- **Document-stage reconciliation for `#912`/`#601`/`#916` (built, validated and merged to `staging` in PR #919, merge `68e1ff8`).**
+  - `specs/roadmap.md`: the `#912` change-log row now reflects the full Validate → Ship record, including R28's live SriMart-staging proof and the two `validation.md` wording gaps found along the way (neither a code defect).
+  - `docs/model-handoff.md` 1.43.0: `#912`/`#601`/`#916` corrected from "built, awaiting `/validate`" to validated-and-merged-to-staging, with the deploy confirmation, R28's live result and the demo-account correction below.
+  - `docs/developer-portal/env-setup.md` 1.14.0 ("Demo accounts"): corrected the account roster (five, not three — `demo-store-admin`/`demo-srimart-admin` were undocumented) and recorded the single-shared-`DEMO_ACCOUNT_PASSWORD` trap found live at R28: a `remove`+`add` reset sets every demo account's password to the same value, silently overwriting one an owner had set independently.
+  - `secrets/staging.vars` (gitignored, not in this diff): `DEMO_SRIMART_ADMIN_PASSWORD` corrected — the value recorded at `#905`'s `/document` was never actually right for staging.
+
+- **Document-stage reconciliation for `#905`/`#907` (built, validated, fixed and merged to `staging` in PR #913, merge `62514aa`).**
+  - `specs/2026-09-26-p905-vendor-product-labels/build-notes.md`: the ship (`deploy-staging` confirmed) and a live-run of R35a — closed at this stage rather than left to promotion, since staging's `demo-srimart-admin@example.com` account turned out to predate production's copy and needed its password reset (owner-confirmed) before it could sign in.
+  - `docs/developer-portal/local-dev-playbook.md` 1.9.0: two new traps — plain `curl` failing silently (exit `43`/`000`, no server response) against a real HTTPS host generally, not just presigned uploads; and a `tsx` script placed outside the repo (e.g. the session scratchpad on another drive) failing to resolve `node_modules` because Node resolves relative to the script's own path, not the working directory.
+  - `docs/model-handoff.md` 1.40.0: `#905`/`#907` corrected from "in Build" to built-validated-merged-to-staging, with the fix, the deploy confirmation, and R35a's live result.
+  - `specs/roadmap.md`: the `#905`/`#907` change-log row now reflects the full Validate→Fix→Ship→Document record, including the regression found and fixed and R35a's live confirmation.
+  - `secrets/staging.vars`/`secrets/production.vars` (gitignored, not in this diff): both now record `DEMO_SRIMART_ADMIN_PASSWORD` as a reference-only key so it isn't lost again.
+
+- **Per-vendor product labels, store description for AI, and vendor-sourced examples** (issues `#905` — `#729` slice 2 — and `#907`; `specs/2026-09-26-p905-vendor-product-labels/`). One additive migration (`20260926180000_p905_vendor_product_label_settings`).
+  - **Product labels are vendor data.** Six `VendorConfig` settings (Halal, Fresh, Organic, Vegetarian, Gluten free, HMC certification) decide which label controls the staff product form offers; HMC needs Halal. Edited in a new "Product labels & store description" form on `/staff/storefront`. Existing vendors were backfilled from their own products (a label is on if any product carries it); new vendors start with none. The storefront is unchanged — badges and facets stay data-driven.
+  - **A disabled label is never cleared by a save.** `saveProduct` strips a disabled label's fields server-side (`lib/product-label-settings.ts`), so an update leaves the stored value alone and a crafted field cannot set it.
+  - **AI prompts use the vendor's own description.** `VendorConfig.storeDescription` (one line, 200 characters) replaces the hardcoded "UK grocery"/"South Asian grocery" framing in list normalisation, synonym proposals and net-content suggestions; blank means neutral wording. Aheed's South Asian context moved into Aheed's seeded description.
+  - **Referral share text (`#907`)** formats the real discount rather than a literal "£5"; the no-user referral-code fallback is `REF_NOCAPED` instead of a vendor's name.
+  - **Examples come from the vendor.** `/staff/delivery-areas` examples, placeholder and error messages use the store's own postcode area (store postcode, else its first delivery area, else no example); `/help` names the vendor's own town instead of Milton Keynes; the store-address placeholders are neutral.
+  - `tests/vendor-neutral-copy.test.ts` now also scans four lib modules and denylists the removed literals. Carried forward: the `specs/roadmap.md` row for PR #910 and the `docs/model-handoff.md` correction that `#729` is in production.
+
+- **Document-stage reconciliation for `#729` (vendor-neutral UI copy, slice 1, built, validated and merged to `staging` in PR #908).**
+  - `specs/2026-09-26-p729-vendor-neutral-ui-copy/validation.md`: two live-validation findings corrected — SriMart's local host needs its seeded `:8787` port (`srimart.localhost:8787`) or vendor resolution silently falls through to Aheed's copy instead of failing loudly; R11's repository-directory-wide `git diff` check is replaced with one scoped to the actual product repository, since a whole-directory check collided with R19's own legitimate `lib/repositories/vendor.ts` change.
+  - `docs/developer-portal/local-dev-playbook.md` 1.8.0: the SriMart-port trap above, plus a `grep -o` pitfall against a genuinely multi-line HTML attribute (the shop-your-list textarea's placeholder) silently matching nothing with no error.
+  - `specs/roadmap.md`: change-log row for PR #908 (merge `87ecdc1`, `staging`), and the row for PR #904 (the `#900` promotion, merge `a156039`) confirmed already present.
+  - `docs/model-handoff.md` 1.38.0: `Last Verified` corrected to record `main` at `a156039` (`#900` promoted) and `staging` ahead again with `#729` (`87ecdc1`); the `#729` `In-Flight Work` bullet rewritten from "built, awaiting `/validate`" to validated-and-merged-to-staging; the stale `#900`-at-staging bullet rewritten to reflect its production promotion.
+
+- **Vendor-neutral UI copy, slice 1** (issue `#729`; `specs/2026-09-26-p729-vendor-neutral-ui-copy/`). No vendor's name and no grocery-only wording is hardcoded in the surfaces below, so SriMart (electronics) and any future vendor read correct copy. No schema change.
+  - **Vendor name, not Aheed's.** Titles of `/login`, `/register`, `/forgot-password`, `/reset-password`, `/dev`, `/account` and `/account/loyalty` come from the current vendor (forgot/reset now render per request). The rewards panel reads "{vendor} Club". Referral share text names the vendor; `buildShareLinks`' `storeName` is now required instead of defaulting to Aheed.
+  - **Shop your list** examples are built from the vendor's own in-stock products (`lib/shopping-list-examples.ts`), with neutral wording when it has none.
+  - **Neutral wording** on account, loyalty, rewards, order lookup ("Delivery progress"), the too-short search hint, terms ("fresh or perishable items") and privacy ("fulfil and deliver your orders"). Staff placeholders no longer use grocery examples: product, category and bundle slugs, image prompts, hero subtitle, brand, synonyms.
+  - **Search box text** is editable on `/staff/storefront` (existing `VendorConfig.searchPlaceholder`, up to 80 characters; empty shows "Search products…"). Admin guide 2.4.0.
+  - Category icon fallback is a neutral tag rather than a shopping basket.
+  - `tests/vendor-neutral-copy.test.ts` fails if any removed literal returns. The rule itself is now in `docs/developer-portal/app-conventions.md` 1.1.0 ("User-facing copy"), with a one-line pointer in `CLAUDE.md`. `docs/model-handoff.md` 1.37.0 records `#900`'s promotion and the `#905` sequencing.
+  - `specs/roadmap.md` carries PR #904's change-log row. Follow-ups: `#905` (per-vendor product labels and AI prompt context), `#906` (deferred), `#907` (referral "£5").
+
+- **Document-stage reconciliation for `#900` (AI-suggested net content, built, validated and merged to `staging` in PR #902).**
+  - `specs/roadmap.md`: change-log row for PR #902 (merge `42dd3fa`, `staging`), closing the carry-forward gap `sdd:audit` reported for this slice's own spec citation.
+  - `docs/developer-portal/local-dev-playbook.md` 1.7.0: a new Windows-curl trap — a presigned-URL `PUT` with a binary body fails silently (`exit 43`, no server response), where a Node `fetch()` against the identical URL and bytes succeeds immediately; found closing R29's photo-upload evidence gap.
+  - `docs/model-handoff.md` 1.36.0: the `#900` `In-Flight Work` bullet rewritten from "built, awaiting Validate" to validated-and-merged-to-staging, recording R29/R27's evidence closure and the reconfirmed (out-of-scope) `pg_trgm` dev drift; `Last Verified` corrected to note `staging` and `main` are no longer content-for-content.
+
+- **AI-suggested net content, reviewed by staff, with image provenance** (issue `#900`, split from `#697`; `specs/2026-09-25-p900-ai-net-content-suggestions/`). An offline script asks a configurable Workers AI model to suggest a product's net content. Staff accept, edit or reject each suggestion on `/staff/net-content`, and **nothing reaches `Product` without them**.
+  - **Model-agnostic suggester** (`lib/net-content-suggester.ts`). Model resolves from `--model`, then `NET_CONTENT_AI_MODEL`, then the default `@cf/google/gemma-4-26b-a4b-it`, and every row records its model. Gemma runs with **reasoning off**: with it on, ambiguous products used the whole token ceiling and answered nothing. The reply is validated, not trusted: the quoted evidence must appear in the name or unit label, `PHOTO` only counts when a photo was sent, and `EACH` needs a stated count. The prompt refuses pints/oz/lb conversions and multipack arithmetic. A deterministic cross-check against the unit label's price per kg/litre (`lib/net-content-label-check.ts`) is shown to staff.
+  - **Bounded run** (`scripts/suggest-net-content.ts`). `--env-file` is required. `--limit` goes up to 100, `--neuron-budget` defaults to 5,000 (half the shared free daily allowance) and counts a reply cut off at the token ceiling, which writes no row but is still billed. An unpriced model is refused, and the run stops after 3 consecutive transport errors. It writes only `NetContentSuggestion` rows.
+  - **Review queue** `/staff/net-content`. Accept and Edit write the product and the suggestion in one WebSocket transaction. Edit reuses the product form's validation. The page shows a pilot summary (acceptance rate, label-check agreement).
+  - Additive migration `20260925150000_p900_net_content_suggestions`, generated by a datamodel diff and read before applying (no `DROP`, no `UPDATE`, no `pg_trgm`). Docs: `specs/architecture.md` 1.33.0 (the AI rule's net-content paragraph), `env-setup.md` (the run command and model setting), `staff-tabs-guide.md`. The production pilot is an owner action, tracked in `#901`. `#697` stays open.
+
+- **Delivery areas: district lists and ranges, per-area charges, and turned-away districts** (issues `#613`, `#890`, `#889`; `specs/2026-09-24-p613-delivery-areas-ranges-fees-refusals/`). On `/staff/delivery-areas` a store admin can describe the real footprint ("all of MK except MK17, the outer villages cost more") and see where customers asked for delivery.
+  - **District matching already existed.** `#402`'s build commit `2f0f20c` made a stored area (`MK`) cover every district in it and a stored district (`MK9`) cover exactly that outward code, with no spec. This slice specifies it, pins it with tests against real MK postcodes, and removes the four files' prose still describing the old pattern matcher. `lib/delivery.ts` gains `matchDeliveryArea` (a district row beats an area row); `isDeliverable` is unchanged in behaviour.
+  - **Lists and ranges** (`#613`). `MK1, MK3` and `MK1-MK10` (hyphen or en dash) expand into ordinary rows. At most 100 per submission, which is the widest possible range. One bad entry fails the whole submission, naming it. Several rows go in via `createMany({ skipDuplicates })` on the **WebSocket** client (`#382`). A single entry keeps the original path and duplicate error. No exclusion rule: leaving a district out means listing the served ones.
+  - **Per-area charges** (`#890`). Nullable `deliveryFeePence` / `minimumOrderPence` / `freeDeliveryThresholdPence` on `VendorDeliveryArea`, where `null` means the store default, field by field, and `0` keeps `VendorConfig`'s meaning. Delivery only. One pure resolver, `lib/delivery-pricing.ts` `resolveDeliveryRules`, now feeds the checkout page, `place-order`, the cart drawer, `/cart` and the landing banner. **`place-order` prices from the address postcode** and refuses ("The delivery charge for … is different") when that differs from the charges the page quoted (`quotedDeliveryRules`). It compares values, not rows, so a shopper with no postcode cookie is never refused over an area without overrides.
+  - **Turned-away districts** (`#889`). New `DeliveryRefusalCount` table, one row per vendor, outward-code district, vendor-local day and source (`HEADER` / `CHECKOUT`), incremented by `upsert`. Only real out-of-area postcodes are counted; typos and unverified postcodes are not, and neither is the public lookup API. **No personal data.** A failed count is logged and never changes the shopper's response. The staff page shows the last 30 days, top 20.
+  - Additive migration `20260924120000_p613_delivery_area_overrides_refusal_counts`, generated by a datamodel diff and read before applying (no `DROP`, no `pg_trgm`). Live proof: `scripts/verify-delivery-areas.ts` (dev only) drives both adapters against real Postgres and restores what it touched.
+  - Docs: admin guide 2.3.0, ADR-006 note (geography stays on `VendorDeliveryArea`; `Region`/`Location` still unbuilt), `specs/architecture.md` §3.1a. Radius eligibility `#888` deferred; the "notify me" email list is its own issue `#891`.
+
+- **Net content for the generated demo catalogue** (issue `#877`, split from `#697`; `specs/2026-09-23-p877-generated-net-content/`). Dev's 2,000 generated products had no net content, so `#397`'s pack-size facet never rendered and `#398`'s derived unit price never showed. Now it does, and no real product is touched.
+  - **A fixed lookup, not a parser.** `PACK_NET_CONTENT` in `prisma/generate-catalogue.ts` maps each of the generator's own ten pack strings: eight weights and volumes (`250g`–`10kg`, `1L`/`2L`, each in its label's own unit), with `Pack of 4`/`6` left null. Parsing a vendor's free text risks a wrong price per kg (`#697`); looking up strings the module defines cannot. A test fails if a pack is added without a mapping.
+  - **The generator's determinism is unchanged.** The new fields derive from the already-picked pack and use no extra random draw. A SHA-256 over every pre-existing field is pinned to a literal computed from the **pre-change** generator, protecting the `nfr-baseline.md` measurement's substrate.
+  - **The seed writes all three columns together**, on create and in a **backfill** for rows already present (`netContentAmount`, `netContentUnit`, and the `#664` sort key via the shared `deriveUnitPricePenceForSort`). The backfill runs before the "already seeded" skip, matches by slug, touches only that vendor's `gen-` rows still null, and updates zero on a second run. It only runs when `SEED_SCALE_PRODUCTS` is set (`docs/developer-portal/env-setup.md` 1.12.0 corrects its "re-run is a no-op" line).
+  - Read-only live check: `specs/2026-09-23-p877-generated-net-content/verify-generated-net-content.ts`. Curated fixtures and real products stay without net content; `#697` stays open for them.
+
+- **Expected restock date on out-of-stock products** (issue `#876`, split from `#400`; `specs/2026-09-23-p876-expected-restock-date/`). Staff can give an out-of-stock product the day it's expected back, and shoppers see "Back in stock" with that date (e.g. `Tue 1 Dec`) on the product card, the quick view and the product page.
+  - **New column `Inventory.expectedRestockDate`** (nullable, additive migration `20260923103000_p876_inventory_expected_restock_date`, no `DROP`). It stores a calendar **day** as its UTC midnight, the `Order.fulfilmentDate` convention since #811. Written from an optional `type="date"` field on the staff product form, which both STAFF and ADMIN can reach. An impossible day such as `2026-02-31` is refused rather than rolled over.
+  - **Shown only while stock is zero, and only until the day has passed in the vendor's own timezone.** The request-scoped product facade applies the check (`currentRestockDay` in `lib/restock.ts`, with the vendor's today from `getCurrentVendorProfile()`, already request-cached). The repository may not read request context, and a client component would use the shopper's clock. No extra query on any listing.
+  - **Async stock loading, #400's third item, was dropped on measurement, not deferred.** Its premise was that storefront HTML is edge-cached, so a server-rendered count goes stale. Measured on production and staging: every storefront route returns `private, no-cache, no-store` with no `cf-cache-status`/`Age`, so counts are already fresh. Recorded in `specs/architecture.md`. Per-store counts stay on `#400`, blocked on `#422`.
+  - Staff guide (`docs/staff-playbook/staff-tabs-guide.md` 2.4.0) documents the field and now recommends zero plus a restock date, rather than switching off, for a product that's coming back.
+
+### Fixed
+
+- **Two local-tooling defects found at `#935`'s Validate** (issues `#938`, `#939`; `specs/2026-09-29-p938-939-local-tooling-fixes/`). Tooling and tests only; CI was never affected.
+  - `#938`: `tests/vendor-neutral-copy.test.ts`'s file-scanning test has an explicit 30-second timeout. Under full local suite load on Windows it overran Vitest's 5-second default and failed. The scan itself is unchanged.
+  - `#939`: `npm run branches:prune` reads `git worktree list --porcelain`. A merged local branch that is checked out in a worktree is now listed under REVIEW as `checked out in worktree <path>`, instead of making `--apply`'s whole local `git branch -D` fail. Its origin copy is judged as before. `.claude/commands/prune-branches.md` says how to clear it.
+
+- **The staff delivery-area form hid its own errors and confirmations on desktop** (`#613`). Its feedback sat inside `sm:sr-only`, so at 640px and wider a refused entry showed nothing visible. Now visible at every width.
+
+- **Creating a product from the staff panel failed on every call** (issue `#878`, folded into `#876`'s branch as its prerequisite). `createProductForVendor` performs a `product.create` with nested inventory and tier creates, which opens an implicit transaction, and it ran over the HTTP client (`getPrisma()`). Reproduced before the fix under `npm run preview`: `POST /staff/products/new` → **500** with `Error: Transactions are not supported in HTTP mode`, no row written. Now uses `getPrismaWs()`, beside `updateProductForVendor` under the service's transaction-bearing banner. This is the shape `CLAUDE.md` names (measured under #116). The call site predated that measurement and was never moved. The platform has never traded, which is why nothing surfaced it.
+
+- **KMS internal docs site: search returned an error on every query, because the Pagefind index was never built** (issue `#871`, `specs/2026-09-22-kms-search-index/`). Not a regression — **search had never worked** since the site went live, and the box rendered and failed for every reader the whole time.
+  - **Root cause.** Nextra 4 loads its index at runtime as a dynamic import of `/_pagefind/pagefind.js` (`nextra/dist/client/components/search.js:13`). Nothing here produced it: `pagefind` was not a dependency (0 matches in `kms/site-internal/package-lock.json`), there was no `public/` directory in that project, the string `pagefind` appeared nowhere outside `node_modules`, and `deploy-docs-internal.yml` ran `opennextjs-cloudflare build && wrangler deploy` with no index step. The asset 404'd and the client threw `TypeError: Failed to fetch dynamically imported module`.
+  - **Invisible to every existing check, by construction.** Pagefind indexes built `.html`, so Nextra's own notice says search is unavailable under `next dev` — a developer doing UI work sees the expected dev notice, not the broken production path. `lint`, `typecheck`, `test`, `build`, `gates`, `deploy-docs-internal` and `sdd:audit` were all green throughout.
+  - **Fixed with `pagefind` 1.5.2 (exact-pinned) and a `postbuild` step** writing `public/_pagefind`. `postbuild` rather than a workflow step because `opennextjs-cloudflare build` shells out to `npm run build` (`@opennextjs/aws/dist/build/buildNextApp.js:10-17`) and `createStaticAssets()` collects `public/` after it (`@opennextjs/cloudflare/dist/cli/build/build.js:63` vs `:80`) — so one hook covers `build`, `preview`, `deploy` and CI, and **no workflow file changed**.
+  - **New `scripts/verify-search-index.mjs` fails the build when the index is missing or reports zero pages.** This is the durable half: `pagefind` **exits 0** on a directory containing no matching HTML, so a postbuild that merely runs the indexer would reproduce the same silent failure one layer down. Dependency-free (`node:` builtins only — that project has no `tsx` and no test runner). Both failure branches exercised.
+  - Verified locally: **198 of 200** prerendered pages indexed (the two skipped are `_not-found` and `_global-error`, which carry no `data-pagefind-body`); the guard runs **in-sequence inside** `opennextjs-cloudflare build` and lands **245 files** at `.open-next/assets/_pagefind/`. Exact-pinned but deliberately **not** added to `tests/dependency-pins.test.ts`, which exists for runtime infrastructure that fails silently at request time — a wrong `pagefind` fails the build loudly.
+  - **Not verified:** anything deployed. R12/R13 (an authenticated `200` on `/_pagefind/pagefind.js`, and a real query) need a Cloudflare Access session and are owner-executable.
+  - Deferred to **`#872`**: `gates` never builds the docs site, so this guard first runs in `deploy-docs-internal` — after merge to `staging`, not on the PR.
+- **Assembled KMS content stopped being git-ignored when `#853` moved it a directory deeper** (issue `#857`, folded into `#871`'s branch — same two lines of the same file). The rule `kms/site-*/content/*/*.mdx` matched exactly one level under `content/`, correct until assembled content became `content/<track>/<type>/<id>.mdx`. It then silently matched nothing `assemble.ts` writes, leaving ~194 generated files untracked in every working copy while CI stayed green (CI assembles into a throwaway checkout and never commits). Now depth-agnostic (`content/**/*.mdx`) with the `index.mdx` negation widened to match, and the block comment corrected — it still described the pre-`#853` layout. `kms/site-internal/README.md`'s `content/dev/*.mdx` path was stale from the same move and is corrected with it. Proven at the rule level with `git check-ignore -v`, and mirror-checked so the three hand-authored `index.mdx` files stay tracked.
+
+### Changed
+
+- **Document-stage reconciliation for PR #990 (checkout and cart honesty, `#973`, `#957`, `#753`, `#972`, merged to `staging`) and the PR #986 promotion.** Docs only: no code, schema or runtime change.
+  - `specs/roadmap.md` 1.133.0: change-log rows for PR #986 (slices 4 and 5 promoted to production, `#964`, `#966`, `#968`, `#979`, `#655` closed) and PR #990.
+  - `docs/model-handoff.md` 1.69.0: slices 4 and 5 are in production; slice 6 is merged to `staging` awaiting promotion.
+  - New follow-up `#991`: the loyalty page's unawaited referral-code upsert left no row under preview.
+
+- **Project #2 gains a `Deferred` status, and the Document-stage reconciliation for `#877` (net content for the generated demo catalogue, merged to `staging` in PR #885).**
+  - **Board:** a fifth Status option, `Deferred`, and a new milestone, **"Deferred — owner/external gated"** (#23). By owner decision (2026-09-24), `#422` (the multi-site decision) and `#400` (per-store counts, blocked on `#422`) moved there with Priority cleared. Both stay open. The option was added through `updateProjectV2Field` with every existing option's `id` preserved; the item count per status was the same before and after.
+  - `specs/sdd-workflow.md` 2.36.0: what `Deferred` means and who sets it (the owner only), a new row in the board-action table, and the Orient step lists Deferred items separately. It also corrects the claim that Status options are UI-only, and records the replace-the-whole-set trap. `.claude/commands/orient.md` and `scripts/provision-project.sh`'s manual-step text match.
+  - `specs/roadmap.md` 1.110.0: change-log rows for PR #884 (the carry-forward the audit reported) and PR #885 (`#877` to `staging`).
+  - `docs/developer-portal/runtime-pitfalls.md` 1.1.0: a `$transaction([...])` array is one round-trip per operation, under a 5s default timeout. This is `#877`'s `P2028` defect found at `/validate`.
+  - `docs/developer-portal/local-dev-playbook.md` 1.5.0: a plain-quote regex silently matches nothing against a saved RSC page, because the flight payload's quotes are backslash-escaped.
+  - `docs/model-handoff.md`: `#877` is merged to `staging`, and `#400`/`#422` are Deferred.
+
+- **Document-stage reconciliation for `#613`/`#890`/`#889` (delivery-area ranges, per-area pricing, refusal counts — merged to `staging` in PR #896).**
+  - `specs/roadmap.md` 1.111.0: change-log row for PR #896 (merge `e54ed44`, `staging`), closing the carry-forward gap `sdd:audit` reported for this slice's own spec citation.
+  - `docs/developer-portal/local-dev-playbook.md` 1.6.0: a new curl-driving trap — a server action called directly with a `FormData` argument from a client-side `action={(fd) => ...}` closure (neither a plain `<form action={fn}>` nor a primitive-args direct call) resists both curl techniques already documented there; found live driving the header's postcode control at this slice's `/validate`.
+  - `docs/model-handoff.md` 1.33.0: the `#613`/`#890`/`#889` `In-Flight Work` bullet rewritten from "built, NOT yet validated" to validated-and-merged-to-staging, with `deploy-staging`/`staging` `/api/health` confirmation and a pointer to the new playbook trap instead of repeating its detail.
+
+- **`#613`/`#890`/`#889` (delivery-area ranges, per-area pricing, refusal counts) promoted to production** (PR #898, merge `9b1de27`, `staging -> main`), and the roadmap/handoff reconciliation for that promotion.
+  - `specs/roadmap.md` 1.112.0: change-log row for PR #898; production `/api/health` confirmed serving `9b1de27`, `db.ok: true`, `reference.drift: false`.
+  - `docs/model-handoff.md` 1.34.0: `Last Verified` rewritten to record `main` at `9b1de27` (also folding in the earlier, previously-unrecorded `#877`/PR #887 promotion); the `#613`/`#890`/`#889` bullet marked DONE; the `High-Priority Work` remaining-items line updated to drop `#613`.
+
+- **Document-stage reconciliation for `#875` (KMS enforcement + search index promotion) and `#876`/`#878` (expected restock date + product-create fix, built, validated, shipped and promoted).** `npm run sdd:audit` found PR #875 (merge `2ff3e79`, 2026-09-23) had no citing row in `specs/roadmap.md`'s change-log; this closes that gap and records `#876`/`#878`'s full staging-merge-then-promotion cycle in the same pass, per the carry-forward rule (doc changes after a slice's PR merges ride the next slice's branch, not a PR of their own).
+  - `specs/roadmap.md` — four change-log rows added: the `#875` promotion (`#861`/`#871`/`#857` to production), `#876`/`#878` built and merged to `staging` (PR #881), and `#876`/`#878` promoted to production (PR #882). The P10 candidate list's "Stock badges" item corrected from a forward-looking plan to a shipped/closed record. Version bumped to 1.109.0.
+  - `docs/model-handoff.md` — `Last Verified` rewritten to record `main` at `5f1e14f`; two new `Project Position` bullets for the `#875` and `#882` promotions; the `In-Flight Work` section's `#876`/`#878` bullet and the stale `#861` "merged to staging, not yet promoted" bullet both corrected to point at the now-DONE record instead of repeating superseded status. Version bumped to 1.30.0.
+  - `docs/developer-portal/local-dev-playbook.md` — two traps recorded from this slice's live `/validate`: replaying an existing record's edit form by hand must name every checked box explicitly (an omitted `isActive` silently deactivated a test product), and a department/category page's live product count can be far larger than expected purely from prior scale-testing seed data, not a defect in whatever is being validated. Version bumped to 1.4.0.
+  - `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts` — regenerated via `npm run kms:build-index`, not hand-edited.
+  - No schema change, no migration, no application code. `kms:validate` (0 failing), `kms:assemble:internal` + a real `next build` in `kms/site-internal` (exit 0), and `npm run sdd:audit` (zero gaps, both `#875` and `#882` cited) all verified.
+- **Document-stage reconciliation for `#871`/`#857` (KMS search index), closing a gap left open across a Clear.** `npm run sdd:audit` found `specs/2026-09-22-kms-search-index/` (merged to `staging` via PR #873, `cd9058a`) had no citing row in `specs/roadmap.md`'s change-log, and a prior session's Document-stage work had been drafted but never committed.
+  - `specs/roadmap.md` — added the missing change-log row citing `specs/2026-09-22-kms-search-index/`.
+  - `kms-strategy-evaluation.md` (v2.1.0 → v2.1.1) — retained and verified accurate: §14.2's synonym-deferral paragraph previously said the search feature itself was still `Design`; corrected to record that a search UI has been live since the KMS site shipped and only its Pagefind index was missing, which `#871` fixed.
+  - `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts` — regenerated via `npm run kms:build-index`, not hand-edited.
+  - No schema change, no migration, no application code. `kms:validate` (0 failing), `kms:coverage` (baseline matches), `kms:check-generated` (current post-commit) and `npm run sdd:audit` (zero gaps) all verified.
+- **`kms-strategy-evaluation.md` targeted maintenance pass (v2.0.0 → v2.1.0) — stale facts corrected after `#861` shipped, two content gaps closed, one architectural fork logged.** A correction pass, not a rewrite: no section restructured, `status` stays `review`, **U8 and G1 unaffected and still block approval**.
+  - **§2.2's measurement table re-run** against post-`#861` `staging`: 632 scanned (was 1,254), 195 valid (was 212), 15 uncovered (was 1,042), 422 slice-local (a category that didn't exist at v2.0.0), and the track/type/status/visibility distributions refreshed for the new denominator and the track-derivation fix.
+  - **§2.3 problem 1 marked resolved**: the 403 `specs/` files were never a coverage gap, they were a deliberate exclusion U7 now enforces in code (`#862`).
+  - **§2.3 problem 5's platform-admin fallthrough example, and §4.2's two required track-derivation corrections, marked resolved and shipped** — against the current three-track model; the four-track expansion further down §4.2 stays `Design`, unbuilt.
+  - **§19.2 rewritten from Design to Verified**: the coverage ratchet shipped, and fails in either direction (not increase-only, as originally designed).
+  - **§25 U7 marked resolved**, citing `#861`, rather than left reading as open.
+  - **The same corrected facts restated elsewhere in the document** (§12, §13.1, §24 step 1, §25 U4, §26) refreshed to match §2.2, rather than left self-contradictory.
+  - **§25 gains U9**: the audience-first (as written) vs. domain-first information-architecture fork, raised by a separate later documentation-architecture brief. Logged as an explicit open decision, matching U1–U8 — **not resolved, §8 unchanged**. Adopting either answer requires its own approval.
+  - **§14.2 gains a design note** naming the platform's existing product-search synonym system (`specs/2026-09-03-search-synonyms-and-relevance-recovery/`) as the candidate mechanism for KMS search synonyms, deferred to implementation since KMS search itself is unbuilt.
+  - **§9.1 gains a design note** specifying `configuration-reference` documents should be generated from `lib/config`'s schema, following the principle already used for `ARTIFACT_INDEX.md`, rather than hand-maintained.
+  - `#862` extended to cover all five stale-fact corrections (was three). New issue `#869` filed for the two content gaps, both closed here.
+  - No schema change, no migration, no application code. `kms:validate` unaffected (195/422/15/0); `kms:check-generated` current; `lint`/`typecheck`/`format:check` green.
+
+### Fixed
+
+- **KMS enforcement foundation — three broken controls repaired, U7 resolved, coverage ratchet landed** (issue `#861`, `specs/2026-09-22-kms-enforcement-foundation/`).
+  - **The walker was machine-dependent.** `kms/schema/repo.ts` never excluded `graft/`, which is gitignored and untracked, so `kms:validate` scanned 1,281 files locally against ~628 in CI — 653 of the 1,069 "no front-matter" warnings were graft cards absent from every CI checkout. No coverage baseline could be built on a denominator that differs between the two places it is checked.
+  - **`assemble.ts` never read a document's own `visibility`.** Routing tested only the derived track's site against the CLI flag, so the one field the schema requires and never defaults was not consulted where it selects a deploy target. Live effect: `docs/operations-research/order-fulfilment-core.md` (`visibility: internal`, audience including `shopper`) was routed to the **public** site and was absent from the internal docs site entirely — the `#851` pilot's canonical orders document, missing from the only deployed KMS surface. Nothing leaked only because `kms/site-public/` has no app, build or deploy workflow. The rule is now the pure exported `destinationFor()`, requiring track **and** visibility to agree.
+  - **`trackFor()` returned the first matching branch, not the most restrictive track**, and `platform-admin` was in the `Audience` enum and in no branch at all. Replaced with an exhaustive `Record<Audience, Track>` plus an explicit `staff-ops` → `internal-eng` → `customer-help` precedence list, both compiler-enforced; the unreachable case throws rather than defaulting. Four documents re-route, all corrections, and the customer track now holds exactly one document — the only `visibility: public` one in the repository.
+  - **U7 resolved as the authoritative rule already stated.** `requirements.md`, `validation.md` and `build-notes.md` inside a dated slice directory are slice-local, carry no front-matter and get no index entry (`specs/sdd-workflow.md`, `specs/templates/feature-spec/`). `kms:validate` reports them as their own category and now **fails** on one carrying front-matter; the 18 that had drifted are reverted (213 lines removed, 0 added, plus one UTF-8 BOM). `ARTIFACT_INDEX.md` goes 212 → **195**.
+  - **`kms:validate` gained a track/visibility disagreement check**, failing when a document's derived track renders on one site while its `visibility` names the other — a state in which it assembles nowhere. Passes on all 195 documents today, so it can only catch a regression.
+  - **New `kms:coverage` ratchet** with a checked-in per-directory baseline — **15 uncovered files across 8 directories**, against the 1,042 previously reported. Fails on drift in **either** direction, so a reduction cannot be silently given back. Runs in `quality.yml`'s `kms` job, never a caller (`#537`).
+  - **`sdd:preclear` now audits slices whose spec files were _added_ on the branch, not every slice containing a changed file** (R2a, a prerequisite fix found mid-slice). Stripping front-matter from 18 files across 7 historical slice directories made the old rule demand the full four-file contract from slices that shipped in August — `2026-08-21-view-switcher` has no `validation.md`, two slices have no `build-notes.md`, and `2026-08-22-ui-polish-docs-integration`'s pre-dates the four required headings. All four gaps exist on `origin/staging` and none was introduced here; backfilling them would have invented a validation record for work nobody validated that way. A branch that merely edits an existing slice now reports no slice and falls through to the existing not-blocking path.
+  - **`kms:check-generated`'s freshness check compared against its own pre-run disk snapshot, not the git-committed content** (found at Validate, fixed here). Running the requirement's own prescribed sequence — `kms:build-index` then `kms:check-generated` — left `ARTIFACT_INDEX.md`'s footer dirty in `git status` even though the check reported everything current: the manual rebuild had already overwritten the "before" snapshot the check restores to, so it restored that dirty footer right back instead of the committed one. Never affected CI, which calls `kms:check-generated` alone. `checkGeneratedArtefacts()` now reads and restores against `git show HEAD:<path>`, independent of anything that ran before it. Surfaced and fixed a second bug in the same change: `execFileSync`'s default 1 MB buffer was too small for the ~2.7 MB `docs.ts`, raised to 64 MB.
+  - **No schema change, no migration, no document body edited, no file moved, renamed or deleted.** The only `app/` path touched is the generated `app/(admin)/staff/runbook/docs.ts`.
+  - Verified: `kms:validate` 195 valid / 421 slice-local / 15 uncovered / 0 failing; `kms:check-generated` current; `kms:coverage` matches; 160 test files, 2,125 tests (`tests/kms-frontmatter.test.ts` 5 → 17); `lint`, `typecheck`, `format:check` green; `kms:assemble:internal` plus a real Nextra build of `kms/site-internal` exit 0 over 197 pages, with `order-fulfilment-core.mdx` now present under `content/staff/runbook/`; the R20 sequence re-run twice from a clean tree leaves `git status --porcelain --untracked-files=no` empty.
+
+### Changed
+
+- **`#861` merged to staging (PR #867); roadmap, handoff and PR #860's earlier promotion reconciled to match.**
+  - Merged via PR #867 (squash `7194629`, 2026-09-22) to `staging`; `docs-gates`, `quality/kms` and `quality/quality` all green; `deploy-staging` and `deploy-docs-internal` both succeeded. Issue **stays open**, moved to `In Review` in Project #2 — `Done` applies only on promotion to `main`.
+  - **Documentation Reconciliation**:
+    - `specs/roadmap.md` — two change-log rows added: the `#861`/PR #867 merge, and PR #860 (`staging -> main`, merge `c2a50e5`), the earlier docs-only promotion of `#859`'s reconciliation that `sdd:audit` reported as "merged after the last roadmap edit, row pending carry-forward." Version bumped to 1.107.0.
+    - `docs/model-handoff.md` — `#861`'s In-Flight Work entry rewritten from "BUILT, NOT YET VALIDATED OR SHIPPED" to "MERGED TO STAGING, NOT YET PROMOTED," the 421→**422** slice-local correction, and a new note on the Validate-stage `check-generated.ts` bug as a trap worth remembering. `Last Verified`'s Checkout line updated to `staging` at `7194629`. Version bumped to 1.28.0.
+    - `specs/sdd-workflow.md` — an eleventh instance added to Validate's diff-shape-check catalogue: `docs/model-handoff.md` was touched by a Build-stage commit outside `#861`'s stated scope, and neither `/validate` pass caught it because the R22-style check greps named path prefixes rather than eyeballing the full unfiltered diff against the scope statement's prose. Benign in this case, but the gap in the check was real. Version bumped to 2.35.0.
+    - **Delivery board**: `#862`–`#866` (filed mid-`#861`-Build, already `Backlog`) given `Phase: P10` — they had none.
+    - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`).
+  - **No schema change, no migration.** `npm run sdd:audit` exits 0, citing both PR #867 and PR #860.
+
+- **KMS strategy standard, restructuring pilot and navigation categories promoted to production (PR #858); roadmap and handoff reconciled to match.**
+  - Promoted to `main` via PR #858 (merge `2047d0a`, 2026-09-22), carrying PR #852 (`#851` pilot), PR #853 (nav categories), PR #855 and PR #856 (strategy standard), and PR #850 (prior `#847` reconciliation). 17 files, +1,841/−28.
+  - **No schema change, no migration** — the promotion diff touched no `prisma/` files and no `lib/`, `features/`, `components/` or storefront routes. One generated runtime file shipped: `app/(admin)/staff/runbook/docs.ts`, the `DOC_ARTICLES` payload served by `/staff/runbook`.
+  - Merged as a **merge commit, not a squash**, preserving `main`↔`staging` ancestry.
+  - `gates` (`docs-gates`, `quality/kms`, `quality/quality`) all green on PR #858; `deploy-production` (run `35711810410`) and `deploy-docs-internal` (run `35711810258`) both succeeded; production `/api/health` confirmed live serving `2047d0a` with `db.ok: true`, storage configured, reference reachable, `drift: false`.
+  - **Documentation Reconciliation**:
+    - `specs/roadmap.md` — five change-log rows added for PR #852, #853, #855, #856 and the #858 promotion; version bumped to 1.106.0. Rows are required: `scripts/sdd-check.ts` `reportPromotions()` fails `sdd:audit` for any `staging → main` promotion with no citing row.
+    - `docs/model-handoff.md` — Last Verified rewritten to record `main` at `2047d0a`, why `#851` stays open, the `#857` defect, and the squash-merge branch-reuse trap; version bumped to 1.26.0.
+    - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`).
+  - **`#851` deliberately NOT closed.** The pilot is in production, but the strategy it produced is `status: review`. §25's U8 (no KMS owner) and G1 (no authoritative security source) have no safe default, and the restructuring must not be specced until they are answered.
+
+### Added
+
+- **KMS Strategy — Target Design and Governance Standard (v2.0.0)**
+  - Rewrote `specs/2026-09-22-kms-pilot-orders-fulfilment/kms-strategy-evaluation.md` from an
+    evaluation note into the authoritative target design and governance standard for the KMS.
+    Status moved `approved` → `review`: the document now asks for the approval it previously
+    asserted. **Strategy and design only — no documentation was restructured, moved, renamed or
+    deleted by this change.**
+  - Added an explicit strategy-vs-implementation boundary and a Design / Verified / Example marker
+    applied to every substantive claim, so illustrative examples can no longer read as platform
+    capabilities.
+  - Added a measured current-state baseline (§2): 1,254 Markdown files scanned, 212 covered by
+    front-matter, 1,042 uncovered (403 of them under `specs/`), 165 of 212 documents typed `spec`,
+    117 at `status: draft`, 1 of 212 carrying an `owner`, and 1 document repo-wide at
+    `visibility: public`.
+  - Replaced the "the codebase rules supreme" source-of-truth hierarchy with a per-knowledge-type
+    matrix over ~25 knowledge types (§11), plus the intent-versus-implementation rule: code that
+    contradicts an approved requirement is a defect, not a silent redefinition.
+  - Expanded the audience vocabulary (7 new values, `shopper`/`admin` retired), moved to a
+    four-track model, and required track derivation to be exhaustive over the audience enum —
+    `platform-admin` currently falls through to `internal-eng`.
+  - Recommended a three-value visibility model (`public`/`internal`/`restricted`) with documented
+    triggers for expanding to five, rather than five values against two enforcement points.
+  - Recommended a 13-type taxonomy with an explicit "does it earn its place" test, retiring the
+    generic `doc` and the unused `prompt`, and rejecting `security` and `historical` as types with
+    reasons.
+  - Specified the full metadata schema per field (why, required, allowed values, CI disposition),
+    adding `last_reviewed`, `source_of_truth`, `canonical_source`, `supersedes`/`superseded_by` and
+    `applies_to`, and recommending `version` be demoted from required (U3).
+  - Added onboarding models with verifiable completion tests for ten audiences, the full runbook
+    standard, the SOP/runbook distinction, and deployment as a first-class domain —
+    discovery-then-classification, the required documentation set, a verified inventory of the
+    platform's actual deployment models, a decision guide and a 15-stage lifecycle.
+  - Added a 21-row CI validation matrix including the **coverage ratchet** — a per-directory
+    baseline that fails only on an *increase* in uncovered files, making the front-matter gap
+    strictly non-growing without blocking current work.
+  - Added the Documentation Impact Assessment model, stage-by-stage SDD integration attaching to
+    the four existing gates (no fifth gate), and a four-tier progressive context-retrieval contract
+    for AI agents.
+  - Recorded 8 unresolved decisions plus 1 gap requiring approval (§25) and an audit trail of every
+    unverified assumption removed from v1.0.0 (§26) — Docker, AWS, Jira, Slack, Datadog, container
+    images, ephemeral PR environments, self-hosted deployment, `npm run db:migrate`, `NODE_ENV`.
+  - Regenerated `ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`; `kms:validate` clean
+    and `kms/site-internal` builds all 214 pages.
+- **KMS Navigation Categories (#851)**
+  - Updated kms:assemble:internal to construct folders per DocType, so that the Nextra KMS UI renders a categorized left navigation sidebar instead of a flat list.
+
+- **KMS Restructuring Pilot (Orders, Fulfilment & Payment Exceptions) (#851)**
+  - Synthesized scattered historical specifications (`specs/`) into a single canonical operational runbook (`docs/operations-research/order-fulfilment-core.md`).
+  - Added source-to-destination ledger and working register entries tracking unresolved defects (e.g. `#795` for cancelled order revenue).
+  - Cross-referenced the new unified guide from the Store Admin and Staff playbooks to maintain audience boundaries without duplicating rules.
+  - Successfully validated progressive disclosure pattern without introducing unproven schemas or relocating historical artifacts.
+
+### Changed
+
+- **Website Feedback clickable star ratings promoted to production (PR #849); roadmap and handoff reconciled to match (`#847`).**
+  - **Storefront Feedback UX**:
+    - Replaces the radio-button pill group in `components/storefront/FeedbackForm.tsx` on `/feedback` with the shared `StarRatingInput` component.
+    - Provides a consistent 1–5 clickable star rating experience across both product reviews and website feedback, complete with hover previews, scale animations, and descriptive rating labels ("Poor", "Fair", "Good", "Very Good", "Excellent").
+    - Pre-fills existing rating and descriptive label when editing an existing submission (`defaultValue={existing?.rating ?? null}`).
+    - Preserves all existing feedback functionality, comment handling, submission validation, rate limiting, and moderation workflows untouched.
+  - **Automated Tests**:
+    - `tests/feedback-form.test.tsx`: 5 passing tests covering default unrated render, pre-filled state, star click selection, hover preview, and form submission data serialization.
+  - **Production Promotion (PR #849)**:
+    - Promoted to `main` via PR #849 (merge `6a9db8b`, 2026-09-21) carrying PR #848 and PR #846.
+    - `deploy-production` (run `35621757768`) and `deploy-docs-internal` (run `35621757321`) succeeded; production `/api/health` confirmed live serving `6a9db8b` with `db.ok: true`. Closes #847 to `Done` on Project #2.
+  - **Documentation Reconciliation**:
+    - `specs/roadmap.md` updated with PR #848 and PR #849 rows; version bumped to 1.105.0.
+    - `docs/model-handoff.md` updated with `main` at `6a9db8b`; #847 marked as Done in production; version bumped to 1.25.0.
+    - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`) and verified with `npm run sdd:audit`.
+
+- **Clickable star ratings with descriptive labels for product reviews promoted to production (PR #845); roadmap and handoff reconciled to match (`#841`).**
+  - **Storefront Review UX**:
+    - Replaces traditional rating `<select>` dropdowns in the Quick View drawer (`components/product/QuickViewDrawer.tsx`) and product reviews form (`features/reviews/components/ReviewForm.tsx`) with an accessible, interactive `StarRatingInput` component.
+    - Allows customers to click stars (1–5) to set or update their rating, with hover previews, scale animations, `motion-reduce` support, and custom descriptive rating labels ("Poor", "Fair", "Good", "Very Good", "Excellent").
+    - Backed by an accessible `<fieldset>` with radio inputs overlaid directly on star icons, satisfying Chromium focusability constraints without throwing unhandled form control errors.
+    - Comprehensive unit tests in `tests/star-rating-input.test.tsx` and `tests/review-form.test.tsx`, with updated Quick View tests in `tests/quick-view.test.tsx`.
+  - **Production Promotion (PR #845)**:
+    - Promoted to `main` via PR #845 (merge `a579781`, 2026-09-21) carrying PR #842, PR #843, and PR #844.
+    - `deploy-production` and `deploy-docs-internal` succeeded; production `/api/health` confirmed live serving `a579781` with `db.ok: true`. Closes #841 to `Done` on Project #2.
+  - **Documentation Reconciliation**:
+    - `specs/roadmap.md` updated with PR #845 promotion row; version bumped to 1.104.0.
+    - `docs/model-handoff.md` updated with `main` at `a579781`; #841 marked as Done in production; version bumped to 1.24.0.
+    - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`) and verified with `npm run sdd:audit`.
+
+- **Shopper account upgrade, loyalty/rewards integration with referrals, and documentation reconciliation (`#836`).**
+  - **`specs/roadmap.md`**:
+    - Adds change-log row for PR #836 documentation reconciliation promotion (merge `8eaf21b`, 2026-09-20).
+    - Adds change-log row for `#836` shopper account upgrade and loyalty rewards integration (`specs/2026-09-20-p836-shopper-account-rewards/`, PR #837 merge `b969acd`, PR #838 merge `bec905e`).
+  - **`docs/model-handoff.md`**:
+    - Updates checkout alignment to `bec905e` (PR #838).
+    - Documents the upgraded Shopper Account hub, persistent `AccountNav` tab bar, Aheed brand-native floating rewards launcher and slide-out panel, session pre-hydration in `StorefrontChrome`, customer referral link generation, checkout discount pre-population from referral cookie, and automated bonus loyalty points attribution on completed orders.
+  - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`) and verified with `npm run sdd:audit`.
+
+- **Quick View product drawer and image carousel promoted to production (PR #834); roadmap and handoff reconciled to match (`#830`, `#832`).**
+  - **`specs/roadmap.md`** gains four change-log rows: PR #829 documentation reconciliation promotion (merge `8df4efa`, 2026-09-20); `#830` Quick View product drawer slice (`specs/2026-09-20-p830-quick-view-product-drawer/`, PR #831 merge `fd79d22`); `#832` Quick View product image carousel slice (`specs/2026-09-20-p832-quick-view-image-carousel/`, PR #833 merge `d02ff8e`); and PR #834 promotion to production (merge `c18001b`, 2026-09-20). Records `#830` and `#832` as closed and Done.
+  - **`docs/model-handoff.md`** reconciled with production reality: records checkout alignment at `c18001b`, documents Quick View drawer and horizontal image carousel live in production, and records `#830` and `#832` as closed and Done.
+  - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`) and verified with `npm run sdd:audit`.
+
+- **Customer feedback & reviews and vibrant card-stack slider promoted to production (PR #817, PR #822, PR #826); roadmap and handoff reconciled to match (`#818`, `#824`, `#406`).**
+  - **`specs/roadmap.md`** gains five change-log rows: PR #817 promotion (merge `7d7bdff`, 2026-09-19); `#818` customer feedback slice (`specs/2026-09-19-p818-customer-feedback-reviews/`, PR #821 merge `5acc427`, PR #823 merge `a34f8a3`); PR #822 promotion to production (merge `684e828`, 2026-09-20) applying migration `20260919195726_p818_customer_feedback`; `#824` vibrant card-stack review slider slice (`specs/2026-09-20-p824-card-stack-reviews-upgrade/`, PR #825 merge `7585b51`, PR #827 merge `32d96b4`); and PR #826 promotion to production (merge `4aab0c8`, 2026-09-20). Removes `#406` and `#818` from P10 tracked issues and records both as Done.
+  - **`docs/model-handoff.md`** reconciled with production reality: records checkout alignment at `4aab0c8`, removes stale "built and unvalidated" status for `#818`, documents first-party feedback and vibrant 3D vertical card stack slider live in production, and notes closed status for `#818`, `#824`, and `#406`.
+  - KMS index rebuilt (`ARTIFACT_INDEX.md` and `app/(admin)/staff/runbook/docs.ts`) and verified with `npm run sdd:audit`.
+
+- **Vibrant card-stack review slider and lively pastel card palette (`#824`, `specs/2026-09-20-p824-card-stack-reviews-upgrade/`)**:
+  upgrades the landing page "What our customers say" customer feedback section to adopt a lively, modern aesthetic and align interaction with the UIInitiative Cards Stack Slider reference.
+  - **Lively rotating pastel color themes**: 6 distinct, tasteful background tints (soft green `#f0fdf4`, warm amber `#fffbeb`, soft orange `#fff7ed`, sky blue `#f0f9ff`, rose pink `#fff1f2`, lavender purple `#faf5ff`) with subtle complementary borders, cycled deterministically across cards. Each clears WCAG AA contrast (ratio >= 4.5:1, up to 8.3:1) for primary and muted text.
+  - **Prominent vertical 3D stacked deck**: active card sits front and center (`depth = 0`, `scale(1)`); cards behind tier in depth with vertical offset (-22px per level) and z-axis displacement, letting the distinct lively pastel colors and borders of background cards clearly peek out above the front card.
+  - **Direct card clicking and touch drag**: clicking the front card advances to the next review; clicking any visible background card immediately brings it to the front. Pointer drag/swipe provides tactile direct manipulation.
+  - **Removal of arrow buttons and addition of pagination pills**: previous/next arrow buttons removed per user refinement; replaced with modern accessible pagination indicator pills alongside the preserved "X / total" slide counter.
+  - **Peel and step-forward animations**: smooth 3D rotation and peel-out slide when advancing, with cubic-bezier easing.
+  - **Full responsive containment**: outer wrapper with generous top padding (`pt-12`) prevents clipping of the stacked cards while strictly containing horizontal overflow across mobile viewports down to 320px.
+  - **Preserved content and controls**: all review stars, "Verified customer" badges, comments, author names, relative dates, heading rating statistics, "Share your experience" link, and "X / total" navigation remain fully intact.
+
+### Added
+
+- **Shopper Account Upgrade & Loyalty/Rewards Integration with Referrals (`#836`, `specs/2026-09-20-p836-shopper-account-rewards/`)**:
+  upgrades the Demo/Shopper "Your account" experience to visually match the Staff View / Store Admin layout, integrates the Loyalty & Rewards interaction into the account, adds a persistent floating Rewards launcher with a compact slide-out panel, and establishes a customer referral system.
+  - **Account Navigation Tab Bar Parity (`components/account/AccountNav.tsx`, `app/(storefront)/account/layout.tsx`)**: horizontal scrollable navigation tab bar matching Staff View's `PanelNav.tsx` with smooth chevron nudge controls and active indicator borders across Overview (`/account`), Orders (`/account/orders`), Lists (`/account/lists`), Loyalty & Rewards (`/account/loyalty`), Feedback (`/feedback`), and Data rights (`/account/data`). Standardizes all account sub-pages to `max-w-5xl px-4 py-8` container width.
+  - **Staff View Card-Grid Parity (`app/(storefront)/account/page.tsx`)**: full-width structure and spacing (`max-w-5xl px-4 py-8`) aligning "Your account" with Store Admin. Replaces the narrow vertical menu with a responsive 2-column card grid (Orders, Lists, Loyalty & Rewards, Feedback, and Data Rights) matching Staff View borders, radius (`rounded-2xl`), padding (`p-5`), typography, icons, and hover states (`hover:border-action`). Customer Name, Email, and Role displayed in a clean surface card near the top; Logout button clearly accessible below.
+  - **Upgraded Loyalty & Rewards Page (`app/(storefront)/account/loyalty/page.tsx`)**: redesigned to `max-w-5xl` layout with breadcrumb back link. Displays current points balance, cash discount value, expiration date (when inactivity expiry applies), current tier multiplier, and next tier spend progress.
+  - **Interactive Rewards Accordions & Vouchers**: adds expandable/collapsible accordions for "Ways to earn" and "Ways to redeem", plus an "Available rewards" section with unlock progress bars for grocery basket vouchers (£1, £5, £10 off).
+  - **Floating Rewards Launcher & Slide-out Panel (`components/rewards/`)**: persistent launcher pill button at `bottom-6 left-6` (`sm:bottom-8 sm:left-8`) styled in Aheed brand primary (`bg-primary text-white`). Slide-out panel styled in Aheed store branding (forest green header, white card dialog, `bg-surface-muted`, and light theme accordions/referral card). Captures incoming `?ref=...` query parameters to set the referral cookie across the storefront.
+  - **Server-Side Pre-hydration & Session Resolution (`lib/rewards-service.ts`, `components/layout/StorefrontChrome.tsx`, `app/api/rewards/route.ts`)**: pre-hydrates initial loyalty and referral data directly from the server session in `StorefrontChrome`, ensuring logged-in customers instantly see their points balance and referral link with zero loading delay or cookie-in-fetch discrepancies. Sets `Cache-Control: private, no-cache, no-store, must-revalidate` on the API route.
+  - **Customer Referral Subsystem & Points Attribution (`lib/referrals.ts`, `lib/referrals-service.ts`, `lib/repositories/orders.ts`, `lib/repositories/loyalty.ts`)**: deterministic customer referral codes (`REF-XXXXXXXX`), share links for Facebook, X, Email, and WhatsApp, and automatic checkout discount code prefilling from the referral cookie. When a referred friend's first order payment confirms, automatically awards 100 bonus loyalty points (`REFERRAL_REWARD_POINTS`) to the referrer's `LoyaltyAccount`. Protects against self-referrals and duplicate redemptions.
+
+- **Quick View product image carousel with horizontal swipe and arrows (`#832`, `specs/2026-09-20-p832-quick-view-image-carousel/`)**:
+  upgrades the Quick View product drawer to display multiple product images in a compact horizontal carousel instead of stacking vertically.
+  - **Single main image view**: displays one product image at a time within a consistent aspect-square container, eliminating excessive vertical height and keeping product details, cart, and reviews immediately accessible.
+  - **Horizontal navigation arrows**: accessible left and right chevron buttons overlaying the image when multiple images exist (`images.length > 1`), smoothly wrapping around.
+  - **Touch swipe gestures**: supports natural horizontal swipe gestures on mobile and touch devices.
+  - **Pagination indicators**: compact bottom pill combining clickable indicator dots and a tabular "X / total" slide counter.
+  - **Smooth transitions & accessibility**: smooth CSS transforms (`transition-transform duration-300 motion-reduce:transition-none`), keyboard navigation (ArrowLeft, ArrowRight), and auto-hiding of controls on single-image products.
+
+- **Quick View product drawer replacing drill-down navigation (`#830`, `specs/2026-09-20-p830-quick-view-product-drawer/`)**:
+  replaces product card drill-down navigation with a seamless right-side slide-out drawer on desktop and mobile, displaying full product info, cart actions, and reviews without navigating away from the browsing experience.
+  - **Desktop and mobile triggers**: desktop reveals a smooth "Quick View" button overlay on card hover (`group-hover:opacity-100 transition-opacity duration-300`); mobile viewports display an always-visible compact Quick View button in the card corner.
+  - **Slide-out Quick View drawer (`components/product/QuickViewDrawer.tsx`)**: accessible dialog with darkened backdrop, focus trap, Escape key dismiss, and body scroll lock.
+  - **Complete product details**: multi-image thumbnail gallery, brand, product name, badges, rating stars, review count, price/unit price, stock status, low stock alert, and markdown description.
+  - **In-drawer Cart and Reviews**: prominent quantity stepper with Add to Cart action (`variant="drawer"`), customer reviews list with verified purchaser badges, and interactive review submission/edit/delete form with immediate live refresh.
+  - **No drill-down navigation**: removes "View full details" link to keep shoppers in flow while preserving `/products/[slug]` for direct visits and search indexing.
+  - **API endpoint (`app/api/products/quick-view/route.ts`)**: GET endpoint providing product details, approved reviews, and user session context.
+
+- **Customers can leave feedback about the shop, staff approve it before anyone sees it, and
+  approved feedback renders on the landing page (`#818`,
+  `specs/2026-09-19-p818-customer-feedback-reviews/`)**: the storefront previously carried no
+  business-level social proof at all. The product-review system (`#39`) is per-*product* and, it
+  turns out, unmoderated — a separate finding filed as its own issue.
+  - **`CustomerFeedback`, `CustomerFeedbackAttempt` and `VendorReviewLink`**, one additive
+    migration. A new model rather than an extension of `Review`, whose `productId` is required,
+    part of its unique key, and drives a denormalised aggregate.
+  - **Any signed-in customer may submit; a purchase is not required.** A `DELIVERED` or
+    `COLLECTED` order stamps `verifiedPurchase` and earns a "Verified customer" badge — computed
+    server-side from the customer's own orders and never read from the submitted form. One row per
+    customer per vendor, written as an upsert, so a customer replaces their feedback rather than
+    accumulating rows.
+  - **Editing returns the row to `PENDING` and clears the moderation stamp.** Without that,
+    approve-then-edit publishes text nobody approved, which is a complete bypass of the only
+    content control the feature has. Proven against a real database, not asserted.
+  - **Moderation at `/staff/feedback`** (STAFF and ADMIN): approve, reject, un-approve, bulk
+    approve, internal note. **Staff cannot create feedback or change a customer's rating, comment
+    or name** — no repository function exists that could, so the rule is enforced a layer below the
+    UI rather than by the absence of a button.
+  - **Abuse controls, since the schema no longer gates on a purchase**: a verified email is already
+    mandatory to sign in (`requireEmailVerification`), the unique key caps a customer at one row,
+    and the throttle covers **submits and edits alike** — 5 writes per vendor and hashed IP per 10
+    minutes, plus 60 seconds between writes to the same row. Limiting submission alone would have
+    converted flooding into churn through the moderation queue.
+  - **A reusable `components/ui/CardStack.tsx`** — generic, no feedback reference, no new
+    dependency. Features 3D perspective card peel physics with interactive pointer/touch drag and continuous
+    infinite loop cycling. Under `prefers-reduced-motion: reduce` it degrades to a plain scrollable row via a
+    real media query, not a class-scoped opt-out (the existing one already misses 24 transforms).
+  - **External review platforms are outbound links only** (`VendorReviewLink`, managed on
+    `/staff/storefront`): vendor-configurable, `https`-validated, no platform name compiled in.
+    Nothing is fetched, synced, cached or displayed from Google, Trustpilot or anywhere else — see
+    the spec for why the widget and Places-API routes were both rejected. **`#406` is superseded.**
+  - **No CSP change and no cookie-consent change**, which was `#406`'s entire difficulty.
+  - **P7b**: feedback is in the data-rights export, is deleted and counted by erasure
+    (`feedbackDeleted`), and is counted by `countOtherVendorData` — without that last one, an
+    erasure at one vendor would have cascade-deleted another vendor's published feedback.
+
+- **Vendor timezone is now data, and the checkout slot picker no longer returns the wrong day
+  during BST (`#363`, `#811`, `specs/2026-09-19-p363-vendor-timezone/`)**: two issues in one slice,
+  because they are one root cause — nothing in the codebase could name a vendor's timezone, so each
+  piece of date code picked one by accident.
+  - **`VendorConfig.timezone`** (`String`, default `"Europe/London"`), beside the other
+    region-shaped and operational vendor values rather than on `Vendor`, which holds identity.
+    Additive; Postgres backfills existing rows from the default. Editable by an ADMIN on
+    `/staff/fulfilment`, validated on write by asking `Intl` whether the runtime can actually
+    convert with the value — not against a hand-maintained list, which would drift from what the
+    conversion layer accepts.
+  - **Resolved through `VendorProfile.timezone`**, the request-scoped profile that is already
+    memoised per request. `lib/local-datetime.ts` stays pure, DB-free and request-free: it is told
+    the zone and never looks one up, so a plain `tsx` script can still exercise every conversion.
+    `STORE_TIMEZONE` survives as the **platform default** — what a vendor with no config row falls
+    back to, re-exported as `DEFAULT_TIMEZONE` — not as the answer.
+  - **The zone is a REQUIRED parameter**, through `parseCampaignForm` and `optionalDateField`, not
+    an optional one: an optional parameter lets a future caller silently fall back to the platform
+    constant with nothing failing, which is the defect itself. `#363` named two call sites; it
+    missed the read side (`CampaignForm.tsx`), and threading only the writes would have put write
+    and read back into the disagreement `#362` created that module to end.
+  - **`#811` — the slot picker was wrong for the whole of British Summer Time, in production.**
+    `SlotPicker` submitted the shopper's *browser-local* midnight as an instant and the Worker read
+    the weekday back off it with a *UTC* `getDay()`, so a customer choosing Saturday was shown and
+    booked into Friday's slots. Not an edge case near midnight: every hour of every day from late
+    March to late October. The suite stayed green because `tests/slot-capacity` and
+    `tests/concurrency-slot-booking` already built `fulfilmentDate` as UTC midnight — they encoded
+    the right contract and the browser violated it — and under `next dev` on a UK laptop both sides
+    are BST and the two errors cancel exactly.
+  - **Fixed by removing the zone from day selection rather than answering it**: a bare `YYYY-MM-DD`
+    calendar day on the wire, and `Order.fulfilmentDate` always the UTC midnight of the
+    vendor-local calendar day. The Express-collection window genuinely does need a zone — "is the
+    shop open now" is a question about the vendor's wall clock, not the shopper's — and gets it via
+    the new `zoneWallClock`.
+  - **The migration carries an idempotent backfill.** Both capacity queries match `fulfilmentDate`
+    by exact equality, so a BST-era row at 23:00Z would have stopped counting against its own day.
+  - Four pure helpers in `lib/local-datetime.ts`; `ADR-004`'s "store timezone is a constant" note
+    rewritten to record that the deferral, correct at the time, went on to hide a live defect for
+    the UK vendors it was judged sufficient for.
+
+- **Saved lists surfaced on `/shop-your-list` (`#116` follow-up, `#806`,
+  `specs/2026-09-19-p10-shop-your-list-saved-lists/`)**: a signed-in shopper with saved lists sees
+  them right on `/shop-your-list`, above the paste box — up to the 5 most recently updated, each
+  linking to the `/account/lists/<id>` page `#116` already shipped for the resolve-and-review
+  journey, plus a "Manage your lists" link. No new repository or service function; reuses
+  `getShoppingListService().list()` as-is. Guests and signed-in shoppers with no saved lists see the
+  page exactly as before.
+- **Saved shopping lists (`#116`, `specs/2026-09-18-p116-saved-shopping-lists/`)**: a signed-in
+  shopper saves a reusable list and re-opens it against today's catalogue. `#116` was filed asking
+  to sequence P4's reorder first "and see what demand is left"; reorder shipped, and this is
+  deliberately the half it does not cover.
+  - **A saved line stores the shopper's WORDS, never a `productId`.** `ShoppingListItem` has no
+    relation to `Product` at all. `reorderItems` already answers "the same products as last time,
+    exactly" — a product-id list would be that again under a new name, which `#116`'s own body
+    predicted. Storing text answers "here is my standing list, show me what you have this week,"
+    and costs nothing to maintain: no nullable FK, no `onDelete` decision, no "no longer available"
+    branch, and a line this shop has never stocked can be stored at all.
+  - **Nothing re-matches a saved list except the code that already matched a pasted one.**
+    `itemsToLines` → `matchListTerms` + `synonymAliasMap` → `resolveLines` → the existing review
+    step. The review block moved to `components/cart/ListReview.tsx` so both surfaces render one
+    component rather than two that can drift; `add-list-to-cart.ts` and `reorder-items.ts` are
+    byte-identical to `staging`.
+  - **`terms` is stored, not derived.** `parseList(rawText)` reproduces only the deterministic
+    parse — when P2.6's AI pre-pass ran, `terms` holds the normalised words, which cannot be
+    recovered without paying for the model again. So re-opening a list costs one DB query and no
+    Workers AI call. It is a space-joined `String`, not `Json` (§3.1) and not a child table: nothing
+    ever queries an individual term.
+  - **Schema, additive:** `ShoppingList` + `ShoppingListItem`, non-null `userId` (guests are not
+    served, matching `#764`'s ruling for saved addresses). No backfill.
+  - **Three entry points**, one aggregate: the `/shop-your-list` review screen, `/cart`, and a past
+    order beside the existing Reorder button. The cart and order paths build lines from catalogue
+    product names, so they need no AI call.
+  - **`CLAUDE.md` and `runtime-pitfalls.md` corrected, with measurements.** `#382` recorded
+    `updateMany`/`createMany` as the operations that crash on the HTTP adapter "and ONLY those
+    two," and singular `create` as always fine. That was true only of the childless create it
+    tested: a singular `create` **with nested child writes** fails identically
+    (`Transactions are not supported in HTTP mode`). The rule is "does this open an implicit
+    transaction," not which method is named. Reproducible on demand via the slice's
+    `verify-saved-lists.ts --prove-http`, which treats a success there as a failed check.
+  - Saved lists reach all three data-rights surfaces (export, other-vendor count, erasure).
+    `terms` is deliberately not exported — it is our tokenisation, not something the subject gave us.
+
+- **Staff can cancel a paid order (`#696`, closing `#137` and `#151`,
+  `specs/2026-09-17-p696-staff-cancel-confirmed-order/`)**: `#137` and `#151` were unreachable
+  code, and said so in their own bodies — `releaseOrder` acts only on `PENDING_PAYMENT` orders,
+  strictly before `confirmPayment` writes the `EARN`, so nothing in this codebase could cancel an
+  order that had earned points or spent a discount code. `cancelConfirmedOrder` is that missing
+  path, which is why all three close together.
+  - **It never touches the `Payment` row.** `releaseOrder` writes `FAILED` there, correctly, because
+    no money ever arrived on that path. Here it did and it stays — cancelling issues no refund
+    (`#606` owns money movement), so a cancelled order whose payment still reads `SUCCEEDED` is the
+    honest representation rather than an oversight. Confirmed against real Postgres, not by reading.
+  - **Cancellation is a predicate, not a rung on the status ladder.** `LEGAL_TRANSITIONS` stays
+    forward-only and `nextStatus` still returns the single successor driving the queue's one button;
+    `canCancel` permits `CONFIRMED` and `READY_FOR_COLLECTION` only, the two states where the goods
+    are still on the premises and returning them to stock is true rather than convenient.
+    `OUT_FOR_DELIVERY` is excluded because no return-to-stock step is modelled anywhere.
+  - **Schema, additive:** `LoyaltyEntryKind` gains `EARN_REVERSAL` so a cancelled paid order can
+    carry both reversals while `@@unique([orderId, kind])` keeps working unchanged;
+    `DiscountRedemption` gains `reversedAt`. No backfill.
+  - **The discount redemption is stamped, not deleted**, inverting `releaseCodeRedemption`'s "a
+    discount on a never-paid order is not a financial event" — `Order.discountPence` survives on the
+    cancelled order and the row is the only thing explaining it. Retaining the row forced `seq` to
+    stop being a count: it is now `max(seq)+1` over all rows while only un-reversed rows count
+    against `maxPerCustomer`, which preserves the `@@unique([codeId, userId, seq])` concurrency
+    guard exactly. **`tests/discounts-repository.test.ts` is new** because that guard had no test at
+    all — `tests/discounts.test.ts` covers only the pure `evaluateCode` — so it was pinned before
+    `seq` moved rather than after.
+  - **The fulfilment slot frees itself**: `getAvailableSlotsForDate` omits `CANCELLED` from its used
+    count. Measured live (9 → 10), not assumed, since the slice now depends on it.
+  - **Known and deliberate:** a cancelled-but-unrefunded order's retained money leaves
+    `/staff/reports`, because `REVENUE_STATUSES` is a status literal. Tracked as **`#795`**.
+  - `ADR-005` gains an implementation note: ledger reversal is now decoupled from refunds. No
+    numbered decision reopened — capture method unchanged, nothing writes `PaymentStatus.REFUNDED`,
+    refunds remain its open territory.
+
+- **`CLAUDE.md` reduced from 149,380 to 13,925 characters, with every rule relocated first
+  (`#786`, `specs/2026-09-17-claude-md-guardrail-refactor/`)**: the file is loaded into every
+  session before any work begins, so its whole size was a fixed per-session cost, and five of its
+  statements had drifted into being false against the repository. The spec's original 10,000-char
+  ceiling was raised to 14,000 at `/fix` — four compression passes reached 13,925 with every rule
+  intact, and cutting further meant either trimming a rule into ambiguity or reducing the
+  most-cited section in the codebase (Server Actions, 11 citations) to a bare pointer.
+  - **Three new developer-portal documents** take the material that had no owner:
+    `runtime-pitfalls.md` (code that passes `lint`/`typecheck`/`test`/`build` and still fails on
+    Workers), `app-conventions.md` (per-layer invariants and the tests enforcing them), and
+    `local-dev-playbook.md` (Windows shell, and proving something live without a browser). Six
+    existing documents absorbed the rest: `specs/architecture.md`, `tech-stack.md`,
+    `sdd-workflow.md`, `design-system.md`, `env-setup.md` and the SDD operator runbook.
+  - **Completeness is proved line-by-line, not by bullet.** `migration-ledger.md` claims all 1,599
+    non-blank body lines of the pre-change file across 173 rows, each carrying a disposition and a
+    literal phrase verified against its destination. An earlier draft inventoried only lines
+    starting `- `, which was structurally blind to the four SDD gates (numbered items) and the
+    `getPrisma`/`getPrismaWs` split (nested bullets). The ledger caught one genuine omission during
+    Build — the `ProductImage` row-versus-object rule had been relocated nowhere.
+  - **Five false statements reconciled from repository evidence**: the Milestone 0 claim (M0 closed
+    2026-08-06; the project is at P10), `@prisma/adapter-neon` stated as 6.19.3 when it is pinned
+    and test-asserted at 7.9.1, an env-format claim that generalised two keys into a file-wide
+    convention, the `phase:`/`gate:` PR label requirement (only two such labels have ever existed,
+    `#546`), and the claim that the delivery board holds status only (`Priority` is a real field,
+    `#724`).
+  - **The vitest suite baseline was removed rather than relocated** (`#584`). It had gone stale
+    roughly twenty times, each time disabling the detection it existed to provide; the forks-pool
+    trap is now documented with a detection procedure that needs no recorded number.
+  - No application source, configuration or environment file was changed, other than two spec-local
+    `.mjs` scripts (`gen-ledger.mjs`, `verify-ledger.mjs`) that generate and verify the migration
+    ledger — kept, at `/fix`, over deleting them, since deleting them would make the line-coverage
+    proof unreproducible. The 207 `CLAUDE.md` citations in source were honoured by preserving every
+    cited section heading.
+  - **`/validate` caught two stale cross-references and one relocated-but-uncorrected false
+    statement that survived the build's own review**: `docs/research/discovery-log.md` and
+    `docs/research/milestone-retrospectives.md` each pointed a reader at `CLAUDE.md` for material
+    that had moved to `runtime-pitfalls.md`, and `runtime-pitfalls.md` itself still quoted
+    `@prisma/adapter-neon@6.19.3` — the exact false pin version this slice exists to correct —
+    because the relocation moved that block verbatim. All three fixed at `/fix`.
+
+- **Credential verification now covers both stores, and the deploy wedge is documented
+  (`#780`, `#781`, `#782`, `specs/2026-09-17-credential-verification-closeout/`)**: closes the three
+  defects found while resolving the R2 credential outage (`#755`).
+  - `scripts/verify-storage-credentials.ts` now probes **four** env files, not three — `.dev.vars`
+    was absent, and it is the file that wins under `npm run preview`, so a rotation could pass the
+    check while local preview stayed broken. It additionally reports, for the staging and production
+    Workers, whether each is running its newest version: that divergence is what made `#755`
+    invisible, with the script reporting ACCEPTED for all three environments while both deployed
+    Workers served a revoked key. A stale Worker now exits non-zero; an unreachable Cloudflare API
+    reports `unknown` and deliberately does **not** affect the exit code, since this dev machine
+    produces transient `fetch failed` errors and a flaky network must never read as a mismatch.
+    That three-way decision is a pure exported `workerVersionState`, unit-tested in
+    `tests/worker-version-state.test.ts`, including the case where the lookup failed *and* the ids
+    differ.
+  - `CLAUDE.md` gains the **loud** half of the undeployed-version trap. The existing `#767`/`#771`
+    note covers the silent case; this adds that a dashboard secret edit makes every subsequent
+    `wrangler secret put` fail with `Secret edit failed`, and since both deploy workflows open their
+    deploy step with exactly that call, it fails **every future deploy on that environment** until
+    the pending version is deployed. Records `wrangler versions deploy` as the recovery and
+    `scripts/configure-env.mjs` as the path that avoids it. The Storage section's claim that the
+    verify script "is the one command that answers" whether credentials work is corrected to state
+    what it actually covers — it still cannot read a deployed secret's value, and a real upload
+    remains the only complete proof.
+  - `saveStorefrontTheme` (`features/admin/storefront.ts`) now validates its eight brand primitives
+    via a new `parseBrandPrimitives` in `lib/brand-colour-form.ts`, reusing `#713`'s validator rather
+    than a parallel one. The theme path is a second writer to the same columns, arrived with `#714`,
+    and wrote them verbatim. Its duplicate-name branch also tested `P2002` directly while that write
+    runs through the HTTP adapter, which throws `23505` — so the intended message could never fire
+    and a duplicate name produced a generic error. Now uses the shared `isUniqueViolation`; this was
+    the last direct `P2002` comparison in application code.
+
+- **Stakeholder Business Case & Platform Pitch, as a living KMS artifact (`#777`,
+  `specs/2026-09-16-business-case-kms/`)**: `docs/business-analysis/business-case.md` — the first
+  stakeholder-facing commercial account of the platform. Covers the executive pitch, delivered
+  capabilities and their business value, a Shopify comparison specific to this business model,
+  modelled cost savings, projected operating costs, monetisation including the multi-vendor
+  licensing opportunity, planned work and its expected impact, the day-to-day operating model,
+  growth strategy, risks, and a 12–24 month horizon plan.
+  - Every capability is tagged **IMPLEMENTED / IN PROGRESS / PLANNED** against a cited file, model,
+    route or issue; every derived figure is tagged `ESTIMATE` with its assumption at the point of
+    use; every external price carries its source and its 2026-09-16 retrieval date.
+  - **States plainly that the platform has never traded** — `#113` (live Stripe keys) and `#104`
+    (verified email sending domain) are both open — so no figure is presented as realised.
+  - `audience: [product, platform-admin]`, so it reaches `ARTIFACT_INDEX.md` and the internal docs
+    site but is withheld at `/staff/runbook` from vendor store admins, whose own commercials it
+    discusses.
+
+- **`npm run sdd:audit` now checks the business case for staleness** (`scripts/sdd-business-case.ts`,
+  `tests/sdd-business-case.test.ts`, 26 tests): it compares the document's own visible
+  `| **Last reviewed** |` row against the newest phase-closure row in `specs/roadmap.md`'s change
+  log, and reports a gap when a milestone closed afterwards, when the file is missing, or when the
+  marker cannot be parsed. Placed in `audit()` rather than a vitest check because the review belongs
+  after Ship, not before merge — the same reasoning as the `#207` promotion audit.
+  - The closure detector required tightening mid-build: a first version allowing 80 characters
+    between phase name and verb matched narrative prose (`P10, two closed`, `P10 and their
+    milestones closed`) and reported a phase closure on a date when none happened. Adjacency plus a
+    negation guard fixed it; all three false positives are pinned as tests.
+
+### Changed
+
+- **`#363`/`#811` promoted to production (PR #815, merge `a682177`); roadmap and handoff
+  reconciled to match.** `specs/roadmap.md` gains the promotion's change-log row (migration
+  `20260919113731_p363_vendor_timezone` applied to `main`), removes `#363` from P10's
+  tracked-issues bucket, and updates the P10 Delivery-cluster and `#420` gate-analysis narratives
+  from "shipped to `staging`" to promoted. `docs/model-handoff.md`'s Checkout, High-Priority Work,
+  In-Flight Work and Project Position sections are corrected from "shipped to `staging`, not yet
+  promoted" to both issues closed and live in production, confirmed via `/api/health` serving
+  `a682177`. **`#811`'s fix was verified a third time, directly against production**: the same
+  real BST-observing browser used at `/ship` to catch the pre-fix defect on staging read
+  `/checkout`'s hidden `fulfilmentDate` field on production itself and got the correct bare
+  `"2026-09-19"`. No source, schema or configuration touched.
+
+- **`#116`/`#806` promoted to production (PR #808, merge `187b5eb`); roadmap and handoff
+  reconciled to match.** `specs/roadmap.md` gains two change-log rows — `#806`'s own staging-merge
+  row (PR #807, merge `a5d1769`; `sdd:audit` had flagged this slice as missing its row) and the
+  promotion row (PR #808, migration `20260918053538_p116_saved_shopping_lists` applied to `main`) —
+  plus removes `#116`, `#137` and `#151` from P10's tracked-issues bucket (the latter two had been
+  left there for a day after actually closing via PR #799). `docs/model-handoff.md`'s Checkout,
+  High-Priority Work, In-Flight Work and Project Position sections are corrected from "`#116`
+  shipped to `staging`, pending promotion" to both issues closed and live in production, confirmed
+  via `/api/health` serving `187b5eb`. Re-encountered `#762` (open since 2026-09-15, pervasive
+  double-encoded em-dash corruption in `specs/roadmap.md`) while writing this pass — now at 393
+  occurrences, up from 389 at filing; a duplicate (`#809`) was mistakenly filed before checking for
+  an existing issue and closed in favour of `#762`. No source, schema or configuration touched.
+
+- **Document (final) for `#363`/`#811`'s vendor-timezone slice, shipped to `staging` (PR #813,
+  merge `ee09404`).** `specs/roadmap.md` gains the slice's own change-log row (`sdd:audit` had
+  flagged it missing) and removes `#363` from P10's tracked-issues bucket; the `#420` gate analysis
+  entry for `#363` is marked cleared rather than rewritten. `docs/model-handoff.md`'s Checkout,
+  High-Priority Work and In-Flight Work sections are reconciled — `staging` is no longer aligned
+  with `main` (two PRs ahead: this docs-only #810 and the feature #813), `#363`/`#811` moved from
+  "genuinely open/unresolved" to "shipped to staging, In Review, not yet promoted." Commented on
+  `#379` (multi-buy tier scheduling) noting its `#363` sequencing blocker is now cleared.
+  `docs/developer-portal/local-dev-playbook.md` gains a technique found at this slice's `/ship`: a
+  UK dev machine's own BST clock (March–October) reproduces a client-side timezone defect in a real
+  browser tab with no DevTools timezone override needed — used to confirm `#811`'s fix live against
+  both pre-fix and post-fix deployed staging by reading the submitted `fulfilmentDate` field
+  directly. No source, schema or configuration touched.
+
+- **Document (final) for `#116`'s saved-shopping-lists slice.** `specs/roadmap.md` gains the
+  change-log row for the `staging` merge (PR #804, merge `60275d9`). `docs/model-handoff.md`'s
+  Checkout section and In-Flight Work entry are reconciled from "built, awaiting Validate" to
+  "shipped to `staging`, pending promotion" — the migration
+  (`20260918053538_p116_saved_shopping_lists`) is now on `staging`, not yet on `main`.
+  `docs/developer-portal/local-dev-playbook.md` gains a new trap found at this slice's `/validate`:
+  a `useActionState` form's action result can execute correctly and still never appear as literal
+  text in a no-JS `curl` response when it only feeds a small conditional fragment, rather than a
+  large subtree, of the same client component — the `self.__next_f.push(...)` flight payload is
+  ground truth either way. No source, schema or configuration touched.
+
+- **`#696`/`#137`/`#151` promoted to production (PR #799, merge `d8f61a4`); roadmap and handoff
+  reconciled to match.** `specs/roadmap.md` gains the promotion's change-log row (PR #799, migration
+  `20260917140514_p696_staff_cancel_confirmed_order` applied) and its §P9.2 item 6 bullet no longer
+  reads "Not yet promoted". `docs/model-handoff.md`'s Checkout section is corrected from "`staging`
+  4 commits ahead, one slice pending promotion" to converged at `d8f61a4`, no slice pending. This
+  is carry-forward reconciliation, not a fresh Document (final) pass — `staging`'s own Document
+  (final) (PR #798) already covered the feature content before this promotion; only the promotion's
+  own facts needed correcting. No source, schema or configuration touched.
+
+- **Document (final) for `#696`'s staff-cancellation slice, plus a backfilled roadmap gap.**
+  `specs/roadmap.md` gains the change-log rows for the `#696`/`#137`/`#151` staging merge (PR #796)
+  and, backfilled in the same pass, the `#792`/`#724` board-reconciliation staging merge and
+  promotion (PRs #793/#794) that `npm run sdd:audit` reported as pending carry-forward. `#696`'s own
+  `validation.md` R2 row is corrected: its literal `grep -c` check returns `3`, not the `1` it
+  claimed, because this slice's schema comments quote the constraint in prose — the actual
+  declaration is unmodified. `docs/model-handoff.md` reconciled with the shipped-but-not-yet-promoted
+  state (`staging` is 4 commits ahead of `main`). Filed **`#797`** (live-DB test fixtures in
+  `tests/slot-capacity.test.ts` and two siblings never clean up their `Vendor` rows — 110 of 112
+  vendors in the dev database are orphaned fixtures, self-documented in a code comment for a while
+  but never tracked). No source, schema or configuration touched.
+
+- **Docs and board reconciliation, taken before the next feature slice (`#792`)**: four statements
+  in `specs/roadmap.md` that the 2026-09-17 `/orient` pass found false against live state, plus two
+  board corrections and the outstanding docs-only promotion. No source, schema or configuration
+  touched.
+  - **`#724` closes.** Its `/orient` and `CLAUDE.md` halves were already fixed (PR #727/#726 and
+    `#786` respectively); the roadmap half was still open in **three** places, not the one the
+    issue describes — the Delivery-tracking note (`the board holds only the status layer`), the
+    `Board limitation` note, and §P9.2's `the board carries status only`. All three denied fields
+    the board has carried since 2026-09-09 (`Priority`, `Complexity`, and the full `Phase` option
+    set), so every session read a roadmap that contradicted both the board and `CLAUDE.md`.
+  - **The `Board limitation` note is rewritten as history, not deleted.** It explains why ~219
+    items predating 2026-09-09 legitimately sit on Phase `P8`/`P2.5`; deleting it would leave that
+    unexplained. It now states plainly that parking a *new* item that way produces wrong board
+    data, and retires its own false claim that the options were "UI-only in Projects V2 with no API
+    to add them". The note previously contradicted a paragraph four lines below it in the same file.
+  - **§P9.2 item 7 no longer claims the delivery cluster is unpromoted.** It read "Not yet promoted
+    to `main` — held at the owner's request"; that hold was lifted and `#401`/`#402`/`#748`–`#751`
+    promoted to production on 2026-09-15 (PR #759). The fourth recurrence of the lag the Roadmap
+    Change Log's PR #679 row records as the third, and the pattern `#790` now tracks.
+  - **`#745` closed as resolved by other work** — PR #744 merged, PR #743 closed as superseded, and
+    every CI defect it lists is gone. It was an open `High` board item that would have distorted
+    the next ranking.
+  - **`#613`'s board Status corrected `In Review` → `Backlog`.** No code for it was ever written;
+    the status was contamination from the `#761` citation error. The issue stays open and gated on
+    operational input from Aheed.
+  - **`#762` deliberately excluded** (roadmap double-encoded em-dashes, 389 lines): its diff would
+    bury the four targeted corrections above. Replacement text here uses correct UTF-8 em-dashes,
+    which is what `#762` will normalise the rest of the file to.
+
+- **Documentation reconciliation for `#786`'s `/document` pass (PR #787/#788)**:
+  `docs/model-handoff.md` and `specs/roadmap.md` brought current after three promotions
+  (`#779`, `#785`, `#788`) shipped with no separate Document (final) pass — `npm run sdd:audit`
+  reported two missing slice rows and three pending-carry-forward promotion rows; all five now
+  added. `docs/model-handoff.md`'s "Last Verified" section rewritten (`main`/`staging` both at
+  `9a6b6d8`), its stale `CLAUDE.md` section citation and vitest-baseline bullet corrected to match
+  `#786`'s relocation, and the `#780`/`#781` follow-up marked closed rather than in progress.
+  `specs/sdd-workflow.md` gains a documented trap: its own R9 setup step's `git grep`
+  pathspec (`'docs/**/*.md'`) silently excludes files directly under `docs/`, which is how a stale
+  cross-reference inside `sdd-workflow.md` itself (a "KMS docs" section citation pointing at
+  content `#786` had already relocated within the same file) survived `/validate` uncaught — fixed,
+  and the pathspec pattern documented as a trap for the next row that needs it. Two small,
+  independently-tracked findings opened as issues rather than fixed inline: `#789` (a pre-existing,
+  never-real `CLAUDE.md` "outage guidance" citation, predates `#786`) and `#790` (the missing
+  Document passes themselves, so the two un-backfilled narrative sections get picked up later).
+
+### Changed
+
+- **The SDD milestone close now has a third stage** (`specs/sdd-workflow.md` 2.34.0,
+  `.claude/commands/document.md`, `.claude/commands/learn.md`): **Business case review**, run after
+  `/discover` and `/learn` and before the front-matter bump, model switch and `/clear`. Sequenced
+  after Learn deliberately — Learn establishes from evidence what shipped and which assumptions
+  held, and the business case consumes that rather than re-deriving it and risking a different
+  answer. Documented, including the fact that `sdd:audit` reports the artifact as due from the
+  moment `/document` writes the roadmap closure row until the review lands, and that the close is
+  not finished until it exits 0 again. Not a gate, for the same reason Discover and Learn are not.
+
+- **Documentation reconciliation for the `#764`/`#770`/`#771`/`#767` production promotion (PR
+  #775)**: `specs/roadmap.md`'s change-log row for the promotion, plus a corrected P10 tracked-issue
+  bullet (all five issues closed, `#766` the only one left open). `docs/model-handoff.md` updated
+  throughout — `main`/`staging` both at `1e44533`, no pending promotion; live post-deploy production
+  checks (`/api/health`, `/api/address/lookup` for `MK`/`LU`) recorded; the two now-deleted branches
+  removed from "safe to delete" listings.
+
+- **Documentation and handoff reconciliation for #770/#771/#767 (Document (final) for PR #773)**:
+  - Added `specs/roadmap.md`'s change-log row for this slice (closing the `npm run sdd:audit` gap
+    it left behind) and updated the P10 tracked-issue entry for `#767` — its database half is done,
+    what remains is `#772` (the application promotion).
+  - Reconciled `docs/model-handoff.md` with the real post-merge state: this slice shipped to
+    `staging` via PR #773 (`cb397b8`), a new "Reference coverage reconciliation" section records
+    what shipped and the Fix cycle's two findings, and Project Position/In-Flight Work both note
+    the slice is `In Review`, not promoted. Also corrected the recorded Vitest baseline
+    (`129/1687` → `139/1842`, two full updates behind) and the `Backlog`/`In Review` status for
+    `#767`.
+  - Documented a third Cloudflare deploy trap in `CLAUDE.md` (a dashboard-only plain-text var is
+    wiped by the next `wrangler deploy`, unlike a real secret) and a general one in the Branch
+    strategy section (a `schedule`/`workflow_dispatch` workflow does nothing until it reaches the
+    default branch, found via `#772`).
+
+### Added
+
+- **Retiring an unsupported postcode area, and making coverage drift visible** (`#770`, `#771`,
+  `#767`; `specs/2026-09-16-reference-coverage-reconciliation/`).
+  - **The reference pipeline could add a postcode area but never remove one.** Both of its
+    mechanisms are scoped to the areas being imported — deliberately, so one area's import cannot
+    retire another's — which together meant an area dropping out of
+    `UK_LOCATION_REF_POSTCODE_AREAS` was never touched by any later run. It froze at whatever
+    release imported it while its `ReferenceAreaCoverage` row went on claiming authority, so a
+    postcode issued there afterwards was answered `INVALID`: the one outcome the `UNVERIFIED` state
+    exists to prevent. `LU` had been in that state since 2026-09-15, Code-Point only, with **0**
+    `PlaceReference` rows.
+  - **`ReferenceDataSource.decommissionAreas` plus `decommissionUnsupportedAreas`**, reachable only
+    through `sync-reference-data.ts --decommission` (with `--dry-run` to rehearse). It removes each
+    unsupported area's **coverage row before its data rows**, so the area degrades to `UNVERIFIED`
+    rather than passing through a window in which it reads as `INVALID` — a correctness property
+    with its own call-order test, not a comment. It refuses when no areas are configured, because
+    "nothing is required" must never mean "remove everything", and the monthly workflow never
+    passes the flag.
+  - **`LU` retired from the dev/staging reference branch**: 6,464 postcodes and one coverage row
+    deleted, `MK` (16,215 / 9,989) and `RG` (23,816 / 13,483) unchanged. Staging now answers
+    `LU1 1AA` with `UNVERIFIED`, and `MK10 0AA` with Milton Keynes, coordinates and street hints.
+  - **`/api/health` now carries a `reference` block** — configured, reachable, required areas, and
+    per source the covered areas plus drift in **both** directions. Reported, never fatal: an
+    unsynced reference database is a designed, recoverable state, so it does not change the health
+    verdict. `scripts/verify-reference-coverage.ts` answers the same question about a database named
+    by an env file, read-only, exiting non-zero on drift.
+  - **Nothing compared configured against materialised coverage before this**, which is why the
+    above went unnoticed — and why a second failure did too: staging served `UNVERIFIED` for every
+    postcode for a day because the reference secrets had been added through the Cloudflare dashboard
+    as a version that was never deployed, while `wrangler secret list` listed them happily. That
+    pending version also blocked every `deploy-staging` run at its first step.
+  - **Production's reference database bootstrapped** (`#767`): migrated from empty and imported
+    `MK`/`RG` for both sources.
+  - **`wrangler.toml` now declares `UK_LOCATION_REF_POSTCODE_AREAS` as committed `[vars]` config for
+    both `staging` and `production`**, found necessary at this slice's own `/validate`: a routine
+    `deploy-staging` CI run silently wiped the dashboard-only variable the "pending version" fix
+    above had just restored, because `wrangler deploy` rebuilds a Worker's `vars` set entirely from
+    this file and a dashboard-only plain-text var isn't part of it (unlike a genuine secret, which
+    survives). Closes the whole class of drift rather than the one instance.
+  - `tests/reference-decommission-safety.test.ts` confines every `delete`/`deleteMany` under
+    `lib/reference-data/` to four named functions, on the AST rather than by grep — these files
+    discuss deletion at length, and a text check could only be satisfied by removing the
+    explanations.
+
+### Changed
+
+- **Documentation and handoff reconciliation for #764 (Document (final) for PR #768)**:
+  - Added `specs/roadmap.md`'s change-log row for `#764` (closing the `npm run sdd:audit` gap it
+    left behind) and P10 tracked-issue entries for `#766`/`#767`, both now tagged Phase `P10` on
+    Project #2 (were untagged Backlog).
+  - Reconciled `docs/model-handoff.md` with the real post-merge state: `#764` shipped to `staging`
+    via PR #768 (`ab1f080`), the reference-database section no longer frames itself as an in-branch
+    change, and Project Position/In-Flight Work both note the slice is `In Review`, not promoted.
+  - Corrected five `specs/2026-09-15-address-lookup-reference-data/validation.md` rows (R13, R14,
+    R30–R33) that cited unit-test files never created — the behaviour they describe is genuinely
+    tested, just in `tests/reference-sync-integrity.test.ts`/`tests/places-repository.test.ts`
+    rather than the files named — and annotated R25a/R27b with what was confirmed at Build versus
+    not re-executed at Validate, and why.
+
+### Added
+
+- **Postcode validation, location enrichment and saved addresses, on a dedicated UK reference database** (`#764`; `specs/2026-09-15-address-lookup-reference-data/`). Closes the whole flow: `saved address where available → postcode validation → delivery check → location assistance → manual completion → confirmation → save and reuse`.
+  - **Reference data lives in its own Neon project** (`uk-location-reference`), not Aheed's. Forced by measurement, not preference: a full-GB Code-Point import into Aheed's database succeeded at **1,749,109 rows and 456.9 MB**, took the project to **489.8 MB of its 512 MB ceiling** — against under 5 MB for every transactional table combined — and the Open Names import then failed outright. Shared UK reference data is not Aheed's data and dwarfs it. Its own schema (`prisma/reference/`), migrations and generated client; Aheed reaches it only through `lib/reference/`.
+  - **Demand-driven coverage.** UK-wide capable, but only the postcode areas configured in `UK_LOCATION_REF_POSTCODE_AREAS` are materialised — today `MK,RG`, at **40,031 postcodes and 20.50 MB** instead of 1.75M and 456.9 MB. Adding an area is configuration plus a sync run: no migration, no importer, no application change. No area literal exists anywhere in the schema, sources, repositories, services or routes.
+  - **The sync has two independent change dimensions**, and both matter. A new upstream release, *or* a newly required area that is not yet materialised. A checksum-only check would exit "unchanged" while a newly configured area sat unimported — silently, with no error. Proven live: with the release unchanged at `2026-08`, adding `LU` imported 6,464 rows and left `MK`/`RG` untouched.
+  - **Validity is coverage-aware and three-state.** Covered area with no active row is `INVALID`; an area never imported is `UNVERIFIED`, never invalid. A postcode outside `MK`/`RG` is not wrong just because we have not imported that part of the country.
+  - **Every infrastructure failure degrades to `UNVERIFIED`**, never `INVALID` and never a 500. Verified live with the reference database pointed at an unreachable host: `MK99 9ZZ` flips from `INVALID` to `UNVERIFIED` and checkout still accepts a manually entered address. Vendor delivery rules keep working throughout, because they never touch the reference database.
+  - **One `DeliveryEligibilityService`**, replacing three independent `isDeliverable()` call sites (`Header`, `place-order`, `fulfilment-service`) that could each drift — the damaging case being a header that promises delivery checkout then refuses.
+  - **`GET /api/address/lookup`** — provider-neutral, vendor-aware, exposing no internal field. `addresses[]` is reserved for genuine property-level candidates and is **empty**: no lawfully usable UK source exists (`#766`). Street hints live under `location`, are suppressed entirely when ambiguous, and are never presented as addresses.
+  - **`CustomerAddress`** — saved addresses for signed-in customers, separate from the immutable per-order `Address` snapshot, included in data-rights export and deleted on erasure.
+  - **Removed `lib/postcodes-api.ts`**: checkout no longer depends on a third-party postcode API, with no network fallback.
+
+### Changed
+
+- **`/staff/fulfilment` moved next to `/staff/orders`** in both navigation surfaces
+  (`components/staff/PanelNav.tsx`, the hub cards in `app/(admin)/staff/page.tsx`) — an owner
+  request after using the new page (`#750`) for the first time.
+- **The Fulfilment guide now explains the Collection-method empty-slot trap has no on/off switch**
+  (`docs/store-admin-guide/admin-tabs-guide.md`) — unlike Delivery, Collection's time picker always
+  shows once Click & Collect is on, so a store with no Collection-method weekly slots shows every
+  collection customer "No slots available" with nothing to disable. Found live on staging.
+
+### Added
+
+- **Fulfilment scheduling for store admins** (`#750`; `specs/2026-09-14-p10-fulfilment-config-and-checkout-fixes/`). **No schema change.** `#401` (delivery slots) and `#402` (express collection) shipped their models, checkout UI and capacity logic with **no administrative surface and no seed data**, so live staging carried both feature flags `false`, zero `VendorFulfilmentSlot` rows and zero `VendorExpressSchedule` rows — neither feature could be switched on, and no time window could be authored by anyone. This was the hard blocker on the `staging → main` promotion.
+  - **New `/staff/fulfilment` page** (store admins only), structurally a copy of `/staff/delivery-areas` (`#612`), which fixed the identical "only the seed can write this" defect for `VendorDeliveryArea`. Three sections: the four `VendorConfig` settings (`offerDeliverySlots`, `expressCollectionEnabled`, `bookingWindowDays`, `slotHoldDurationMinutes`), a weekly slot editor, and express windows.
+  - **Validation is load-bearing, not cosmetic:** times must be zero-padded 24-hour `HH:mm` because both consumers compare these columns as *text* (`"9:00"` sorts after `"10:00"`), end must be strictly after start, and capacity must be at least 1 — it is the real overbooking guard `lib/repositories/orders.ts` counts against, so a zero produces a slot that renders and can never be booked.
+  - **Express controls are withheld, with an explanation, from a vendor that does not offer collection** rather than offered as a setting that could never take effect.
+  - **Seed data** for both vendors, conditional on each vendor's stored `offerCollection`. Currently unreachable — see `#755`/`#756`.
+
+### Fixed
+
+- **Checkout address lookup never worked in any deployed environment** (`#749`; same spec). `lib/postcodes-api.ts`'s `fetch` ran in the browser, where every environment's `connect-src 'self' https://*.r2.cloudflarestorage.com` blocked it before it left the page — and the caller's `catch` treated the block as a transient API failure and swallowed it with `console.warn`. Now runs behind a server action (`features/checkout/postcode-lookup.ts`) rather than widening CSP, and returns outcomes as data, since a production throw crossing a server-action boundary reaches the client as an opaque digest.
+- **The lookup also wrote into the wrong form** (`#749`). It resolved fields via `document.querySelector("form")` — the document's *first* form, which since `#748` is the fulfilment-method form rendered above the address fields. Both that call and an identical one in the `localStorage` restore now resolve from a ref to the checkout form itself.
+- **`tests/postcodes-api.test.ts` no longer reaches the public internet** (`#751`), which flaked the full suite whenever egress was slow. Rewritten against a stubbed `fetch`, which also gave the 404, 5xx, malformed-body and network-failure paths their first coverage.
+- **The vendor logo upload can finally report why it fails** (`#749`). Its rejection message was a corrupted template literal that discarded the HTTP status, and its `fetch` was unguarded inside `startTransition`, so a network throw rejected silently — the only one of the repository's four uploaders that could not say what went wrong. **Root-caused to `#755`: the R2 S3 credential pair is rejected in all three environments**, so every `getStorage()` S3 API caller — product images, bundle images, campaign banners, the vendor logo, the image pipeline, and `prisma/seed.ts` — is failing everywhere. Shopper-facing image display is unaffected because `publicUrl()` is pure string composition over `CDN_BASE_URL`, which is why nothing looked broken. Added `scripts/verify-storage-credentials.ts`, a read-only per-environment credential probe.
+- **Shared fulfilment state across cart and checkout** (`#748`; `specs/2026-09-14-p10-shared-fulfilment-state/`). **No schema change.** Three separately-reported staging defects with one cause: the Delivery / Click & Collect choice was four independent client `useState` values — two `LocationControl` instances, `CheckoutForm` and `CheckoutSummary` — stitched together by a `window` CustomEvent and a `localStorage` blob, and readable by no Server Component.
+  - **One source of truth:** the method now lives in a `fulfilment-method` cookie written by a server action (`setFulfilmentMethod`), beside the existing `delivery-postcode` cookie and with the same attributes. `lib/fulfilment-service.ts` resolves the effective method per request, reconciling the stored preference against what the vendor actually offers — a vendor with `offerCollection: false` is always `DELIVERY`, whatever the cookie holds. The header's desktop and mobile controls can no longer disagree, and the choice survives navigation.
+  - **The postcode is editable again:** the Delivery button previously opened the postcode modal *only* when no deliverable postcode was stored, so once one was set nothing on the page could reopen it. A dedicated edit control now does. Submitting a new postcode while on Click & Collect also no longer forces the shopper back to Delivery.
+  - **Trackers derive from one pure function:** `fulfilmentProgress` in `lib/cart-rules.ts` replaces `deliveryProgress`, and expresses the vendor minimum *and* the free-delivery threshold *and* the method. The cart drawer, `/cart` and `/checkout` all render from it, so the minimum-order shortfall is now visible in the cart instead of only as a static banner at checkout, and a Click & Collect cart no longer advertises "FREE Local Delivery".
+  - **Checkout stops computing money twice:** `app/(storefront)/checkout/page.tsx` now passes the method to `computeTotals` (the argument already existed and simply was not supplied), and `CheckoutSummary` became a Server Component that renders the totals it is handed. Its duplicate arithmetic had also been dropping `discountPence` entirely, so loyalty redemptions and discount codes never appeared in the summary; they do now.
+  - **"Proceed to checkout" closes the drawer on click** rather than waiting for the pathname effect, which could not fire until the `force-dynamic` checkout page finished rendering server-side.
+
+### Added
+
+- **Express SLA for Click & Collect** (`#402`; `specs/2026-09-13-p402-express-sla/`). **Schema change: one new relational model, two new `Order` columns, three migrations.**
+  - **Express Collection toggle:** `VendorConfig.expressCollectionEnabled` plus a relational `VendorExpressSchedule` model (`dayOfWeek`/`openTime`/`closeTime`, no JSON columns) define when a vendor offers ASAP pickup, distinct from the P401 shared-slot booking flow.
+  - **60-minute SLA:** `Order.isExpress`/`Order.targetFulfilmentTime` — the target is stamped only on the `PENDING_PAYMENT` → `CONFIRMED` transition (payment clearing), never at order placement, so a slow checkout never eats into staff's window.
+  - **Checkout UI:** an Express toggle renders in `SlotPicker` only when Collection is selected, an active schedule window matches the current time, and the vendor has the feature enabled.
+  - **Staff queue visibility:** `/staff/orders` renders a live countdown (`ExpressCountdown`) and highlights a row red once `targetFulfilmentTime` has passed.
+
+- **Postcode & Address Lookup** (`#613`; `specs/2026-09-13-p613-address-lookup/`). **Schema change: one new column, one migration.**
+  - **Address Lookup:** Integrated postcodes.io to validate UK postcodes and automatically fill the Town/City and County fields during checkout.
+  - **Fallback Handling:** Ensures checkout continues even if the external postcode service is unavailable.
+  - **Editable Address:** Maintains fully manual Address Line 1 and 2 fields while preventing checkout on explicitly invalid postcodes.
+
+- **Shared Fulfilment Slots** (`#401`; `specs/2026-09-13-p401-shared-fulfilment-slots/`). **Schema change: two added models, one new table, one migration.**
+  - **Unified Slot Model:** Introduced `VendorFulfilmentSlot` to manage daily recurring time windows for both `DELIVERY` and `COLLECTION` methods.
+  - **Configurable Hold Durations:** Orders placed in checkout tentatively reserve their slot with a `PENDING_PAYMENT` status. The hold automatically expires after `slotHoldDurationMinutes`, freeing the slot for other customers without cron jobs.
+  - **Prisma Native Concurrency:** Slot booking uses Prisma native Serializable transaction isolation rather than raw SQL `SELECT FOR UPDATE` to guarantee no overbooking during high concurrent load, respecting the strict no-raw-SQL domain-data rule.
+
+- **Fulfilment Foundation (Click & Collect)** (`#402`; `specs/2026-09-12-p402-fulfilment-foundation/`). **Schema change: one added enum, one new table, one migration.**
+  - **Method-Aware Data:** Introduced `FulfilmentMethod` enum (`DELIVERY` | `COLLECTION`) on `Order`, allowing distinct handling of click & collect orders. Historical orders default to `DELIVERY`.
+  - **Status Isolation:** Split `OrderStatus` ladders to keep them strictly disjoint, adding `READY_FOR_COLLECTION` and `COLLECTED`.
+  - **Vendor Location Snapshotting:** Mapped the physical store location to an immutable snapshot upon checkout for `COLLECTION` orders, ensuring zero downtime for downstream consumers (receipts, staff queues) and maintaining complete audibility.
+  - **Method-Aware Erasure:** Altered GDPR data rights erasure (`eraseVendorData`/`eraseGuestOrderData`). For `COLLECTION` orders, customer-identifying data is still wiped but the immutable `VendorLocation` store address is intentionally retained.
+  - **UI Labels:** Updated checkout, confirmation emails, and staff panels to show distinct copy ("Collection Address", "Ready to collect") based on method.
+
+### Changed
+
+- **Documentation and handoff reconciliation for #748 (Document (final) for PR #752)**:
+  - Reconciled `docs/model-handoff.md` with the real post-merge state: `#748` shipped to `staging`
+    via PR #752 (`623c24f`), the first of the three owner-reported staging defects to close;
+    `staging` is now 21 commits ahead of `main`, and **promotion is still held** — `#750` (no staff
+    configuration surface for `#401`/`#402`) remains the hard blocker, `#749` also still open.
+  - Corrected `specs/2026-09-14-p10-shared-fulfilment-state/validation.md`'s R20 row on the same
+    branch as the fix, not here — see that PR's own commit — since it was found before merge.
+  - Filed **#753** to track a live-browser check of R14/R18 that `/validate` couldn't run in that
+    session (no Chrome automation available); both are sound at the code level and called out as
+    "known-shaky" in the slice's own `build-notes.md`.
+  - Added a `CLAUDE.md` bullet on a curl cookie-jar (`-b`/`-c`) trap: a `Secure`-flagged cookie can
+    silently fail to persist for a multi-label local hostname (`srimart.localhost`) while working
+    fine for a single-label one (`localhost:8787`) — extracting `Set-Cookie` values by hand and
+    replaying them as an explicit `Cookie:` header is the reliable pattern for this repo's
+    two-vendor local testing.
+  - Updated `specs/roadmap.md`'s change log with `#748`'s shipped-to-staging row.
+  - Moved `#748` to **In Review** on Project #2 (was `In Progress`); added `#753` to the board as
+    `Backlog`/`P10`/`Low`.
+  - Corrected `CLAUDE.md`'s vitest baseline reference in `docs/model-handoff.md`
+    (`127/1618` → `128/1632`, already current in `CLAUDE.md` itself since `#748`'s own Build).
+- **Documentation and handoff reconciliation for #401/#613/#402 (Document (final) for PRs #744/#746)**:
+  - Reconciled `docs/model-handoff.md` with the real post-merge state: `staging` (`0e3c4f1`) is 14
+    commits ahead of `main` (`02d8e82`), and **promotion is explicitly held at the owner's request**
+    pending review of issues observed on staging — flagged prominently rather than left implicit.
+  - Wrote retroactive `build-notes.md` for `specs/2026-09-13-p401-shared-fulfilment-slots/` and
+    `specs/2026-09-13-p613-address-lookup/`, neither of which had one — including the real R8
+    overbooking-guarantee gap (found and fixed during #402's rebase) and #613's PR being closed as
+    superseded rather than merged.
+  - Updated `specs/roadmap.md`'s P10 "Delivery cluster" entry (shipped without `#363` landing
+    first, as originally sequenced there) and added change-log rows for PR #744, #743's closure,
+    PR #746, and #742's closure (a stale PR that would have deleted this work if merged).
+  - Moved #401/#402/#613 to **In Review** on Project #2 (were still `Backlog`).
+  - Corrected `CLAUDE.md`'s vitest baseline (`117/1557` → `127/1618`) and added a new bullet on
+    guarding live-DB test files with `it.skipIf(!process.env.DATABASE_URL)` — missed three times
+    across two slices before being written down.
+- **Documentation and handoff reconciliation for #737**:
+  - Reconciled `docs/model-handoff.md` with verified staging and main git states, recorded in-flight PR #739, closed #737 (#738) and #733 (#734/#736) work, and updated owner priorities and test run baselines.
+  - Updated `specs/roadmap.md` with closure entries for #737 (PR #738) on staging and promotion PR #736 on main.
+  - Aligned `docs/staff-playbook/staff-tabs-guide.md` and `docs/store-admin-guide/admin-tabs-guide.md` with new Staff vs Admin RBAC boundaries, Category Manager Expand/Collapse controls and form placement, Search Dictionary navigation link, and AI synonym generation role separation.
+  - Promoted `specs/2026-09-12-staff-admin-help-ratings/` spec artifacts (`plan.md`, `requirements.md`, `validation.md`, `build-notes.md`) to approved status with dedicated KMS IDs.
+  - Rebuilt KMS artifact index and runbook docs bundle.
+- **Staff vs Admin role isolation and operational refinements** (`#737`; `specs/2026-09-12-staff-admin-help-ratings/`). **No schema change, no migration.**
+  - **Role isolation & server-side authorization**: Day-to-day store operations (Products, Categories, Brands, Promotions, Bundles, Runbook, and synonym moderation) are scoped to both `STAFF` and `ADMIN`. Platform-level functions (Payments, Storefront Configuration, Delivery Areas, Loyalty, Discount Codes, Reports, Customers, Team & Access, and AI synonym proposals) are strictly restricted to `ADMIN`, guarded at both UI page level (`<PanelRefusal />`) and server actions.
+  - **Category Manager**: Moved the "New Category" creation form above the category list on `/staff/categories`, and added global "Expand All" / "Collapse All" controls in `CategoryListClient`.
+  - **Help Centre presentation**: Extracted a shared `DocumentSectionRenderer` component used by both the internal operator Runbook and shopper-facing `/help` page to render top-level markdown headings into discrete cards with consistent typography.
+  - **Zero-review product ratings**: Products with 0 reviews now hide aggregate rating UI across the storefront via a reusable `ProductRating` component.
+- **Staff Panel Operability & Search Synonyms** (`#733`, wrapping `#589`, `#583`, `#582`, `#602`, `#638`, `#683`; `specs/2026-09-12-staff-panel-operability/`). **No schema change, no migration.**
+  - **`#589`, `#583`**: Hardened the AI synonym generation path. The Cloudflare Workers AI `fetch` response's JSON parsing is now wrapped in a `try/catch` to gracefully fall back to a standard error rather than throwing an unhandled exception when the model or proxy returns a non-JSON payload (e.g., 502 Bad Gateway HTML).
+  - **`#582`**: Bulk synonym management. The `PENDING` queue in `/staff/search-synonyms` now features a checkbox selection column and a bulk action bar, permitting store admins to approve or reject multiple AI proposals at once. The atomic update runs over the `neon-websocket` (`getPrismaWs()`) adapter via `updateMany` to bypass the Neon HTTP transaction limitations.
+  - **`#602`**: The search dictionary is now explicitly discoverable from the staff hub. A "Search dictionary" card is rendered on `/staff` for admins, bypassing the need to type the URL manually.
+  - **`#638`**: The category manager (`/staff/categories`) now supports hierarchical expand/collapse toggling via a new `CategoryListClient` component. Sub-categories are visually grouped and can be hidden/shown by clicking the parent's toggle (defaulting to expanded), improving operability for large taxonomies.
+  - **`#683`**: `RunbookClient` hardcoded colour scales (`slate-*`, `emerald-*`, `amber-*`) are replaced with the application's semantic design system tokens (`primary`, `primary-muted`, `accent`, `action`, `surface-muted`), aligning the runbook with the vendor's actual palette. Mobile styling for the tab row was updated to horizontally scroll rather than squishing.
+- **Vendor colour pickers with live contrast-clamp preview added to staff panel** (closes `#714`). The eight brand colour fields in `/staff/storefront` now provide native `<input type="color">` pickers alongside their hex text boxes. Crucially, a new "Live Preview" section demonstrates what the storefront will *actually render* — displaying the exact semantic `bg-primary`, `bg-action`, etc. tokens dynamically generated by the `brandStyle()` contrast clamp (`clampForContrast()`), giving vendors an honest WYSIWYG guarantee that accounts for WCAG AA adjustments.
+
+### Fixed
+
+- **PR #744 (Shared Fulfilment Slots, `#401`) fully green on CI** — six `quality/quality` ESLint
+  failures, none of them the Prettier issue they were first taken for. `components/checkout/SlotPicker.tsx`
+  and `features/checkout/slots.ts` imported `@prisma/client`/`@/lib/db` directly from the
+  feature/component layer, violating the ADR-004 slice 2 layering rule; split into
+  `lib/repositories/fulfilment-slots.ts` (pure, takes `prisma` explicitly) and
+  `lib/fulfilment-slots-service.ts` (request-scoped wrapper), matching the existing
+  `lib/delivery-areas-service.ts` pattern. Two `SlotPicker.tsx` section headings used `<label>`
+  with no associated control (`jsx-a11y/label-has-associated-control`); changed to `<div>`.
+  `components/layout/LocationControl.tsx`'s `react-hooks/set-state-in-effect` violation was fixed
+  separately (cherry-picked from `#743`'s own fix for the same line). Getting past lint then
+  surfaced real, pre-existing debt in `tests/slot-capacity.test.ts` and
+  `tests/concurrency-slot-booking.test.ts` that had never actually run in CI: an invalid
+  `PrismaNeon` adapter construction (a live `Pool` instance instead of a connection-string config,
+  matching `lib/db.ts`'s `getPrismaWs()`), a `tsc` error from mixing scalar FKs with a nested
+  relation write on `Order.create`, an unhandled-rejection race from firing `placeOrder` calls
+  inside the same loop as cart creation, and hardcoded non-unique ids with no row cleanup against
+  the shared dev database — now suffixed per run and guarded with
+  `it.skipIf(!process.env.DATABASE_URL)`, since CI's `quality/quality` job carries no
+  `DATABASE_URL` and would otherwise crash the whole `npm test` step on these two files.
+  **Separately (`#743`, superseded by `#744`)**: PR #743 (Postcode & Address Lookup) was closed
+  without merging — every code change it carried was already on staging via shared ancestry with
+  `#744`; this entry is the one piece of its own work (documenting the above) worth preserving.
+- **`Shop`, `Shop List` and the delivery-postcode badge are reachable on mobile** (`#718`).
+  `components/layout/Header.tsx`'s "Shop"/"Shop List" nav links and
+  `components/layout/PostcodeChecker.tsx`'s `badge` variant were `hidden` below the `lg` (1024px)
+  breakpoint on every route, with no mobile equivalent anywhere — owner-reported against staging on
+  both `/` and `/categories`. Now follows the same icon-always/label-hidden-below-`sm` pattern the
+  account and cart controls already use, rather than disappearing entirely.
+- **Value Bundles cards on `/categories` are the same size as the page's other cards** (`#719`).
+  `BundleRow`'s horizontal-scroller items were sized at 288–320px against `ProductRow`'s 160–208px
+  for the same page's New Arrivals/Featured Products rows — nearly double. Widths now match exactly;
+  `BundleCard`'s content (already sharing `ProductCard`'s padding) is unchanged.
+- **The landing hero's department carousel now fills its column** (`#715`;
+  `specs/2026-09-10-social-contact-surface/` R19). The two-column grid carried `lg:items-center` —
+  an explicit override of CSS grid's `stretch` default — which sized the second column to its own
+  content and parked it mid-row, leaving dead space above and below the panel. Restoring
+  `items-stretch` and giving the panel root, slide track and slides `h-full` lets it fill the
+  height; each slide centres its own content so a taller panel does not top-align. `#496` had
+  already fixed the *width* half of this (a fixed `28rem` cap); the height half survived it.
+  Unchanged below `lg`, where no grid applies and `h-full` resolves to `auto`. Shipped on this
+  slice's branch at the owner's request rather than as its own slice.
+
+### Added
+
+- **Tenant-Scoped Saved Themes & Harmonic Palette Generator** (`#714`). 
+  - **Saved Themes**: Vendors can now save their configured colours as a reusable theme. Unlike the global `Theme` presets (which are platform-wide), these are saved to a new `VendorTheme` model that strictly enforces row-level tenant isolation via a `vendorId` constraint. Vendors can apply both global presets and their own saved themes from the same UI, but attempting to apply another vendor's theme is securely blocked at the repository level.
+  - **Harmonic Random Pick**: A new "Randomise Colours" button allows vendors to dynamically generate accessible palettes. By locking their selected "Main Colour" as the anchor, the generator uses colour-theory relationships (analogous, complementary, triadic) with subtle jitter to build cohesive accents, tints, and backgrounds around it. The math is purely client-side and flows directly into the Live Preview contrast pipeline without premature database saves.
+
+- **Brand colour validation and robust fallback logic** (`#713`; `specs/2026-09-10-brand-colour-validation/`). 
+  - `StorefrontConfigForm` migrated from `useTransition` to `useActionState` to render field-level validation errors for malformed hex codes instead of silently submitting them or throwing unhandled errors.
+  - Added robust validation in `lib/brand-colour-form.ts` that enforces a strict `^#[0-9a-fA-F]{6}$` hex pattern.
+  - Hardened `lib/vendor-theme.ts`'s `brandStyle()` fallback behaviour: any malformed colour from existing data is safely swapped for `DEFAULT_BRAND_PRIMITIVES` before being passed to contrast clamping functions, preventing runtime crashes.
+  - Created an audit script (`scripts/audit-colours.ts`) to hunt down malformed colours in existing databases without running destructive migrations.
+
+
+- **Project-state model handoff integrated into the SDD loop** (`#726`;
+  `specs/2026-09-11-model-handoff-workflow/`). Build Notes now retain current-slice implementation
+  and validation context; authoritative documents retain permanent truth; `docs/model-handoff.md`
+  retains only important overall current position; and `/orient` recovers from that snapshot before
+  reverifying volatile Git, GitHub, Project, PR, deployment and environment state. `/build-notes`
+  gains a mandatory pre-Clear Project-State Handoff Check, while `/document` reconciles the handoff
+  only when shipped work materially changes overall project state. The semantic decision remains a
+  human judgment rather than a new `sdd:preclear` heuristic, and no parallel handoff artifact,
+  Build Notes heading, `/validate` change, application change or #713 work is included.
+
+- **Per-vendor social and contact links on the storefront** (`#407`, and the deep-link half of
+  `#405`; `specs/2026-09-10-social-contact-surface/`). Three nullable `VendorConfig` columns —
+  `facebookUrl`, `instagramUrl`, `whatsappNumber` — put each vendor's own Facebook, Instagram and
+  `wa.me` links behind a **single floating button that expands on tap**, closed by default.
+  **A null HIDES that control** rather than falling back to a platform account, the same rule
+  `bannerNote`/`heroSubtitle` follow: a platform-written social link is a claim made on a vendor's
+  behalf (`#239`). Both seeded vendors start null, so the hidden state is the default rather than
+  something only a test reaches.
+  - **The WhatsApp number must be international format, and a leading zero is refused with a message
+    that names the fix.** An E.164 number never starts with `0`, and `wa.me` given a national-format
+    number like `07448894146` opens WhatsApp and starts **no chat**, silently and with no error. The
+    first number ever entered through the admin form was exactly that shape, and the original rule
+    (`digits, 7-15`) accepted it — the requirement was wrong and the code implemented it faithfully.
+  - **URL validation is an https-only allow-list, not a sanity check.** These are the first
+    vendor-editable values in this repo that land inside an `href`, and `new URL()` parses
+    `javascript:alert(1)` perfectly happily — parsing is not safety. `http:` is refused too, since a
+    mixed-content link from an HTTPS storefront is a downgrade. `lib/social-contact-form.ts` is pure
+    and DB-free like `lib/delivery-rules-form.ts`, with 25 unit tests.
+  - The trigger **sits above the cart button** rather than taking the bottom-right corner:
+    `CartDrawerShell` already occupies `bottom-6 right-6` and is unconditional (only its badge is
+    conditional). The panel is absolutely positioned above the trigger, so collapsed it takes no
+    layout space and the footprint stays one button however many links a vendor adds. It uses
+    `bg-action`, not WhatsApp's or any network's brand colour — a hex literal would break the token
+    convention, and a storefront rendering a third party's brand colour in its own chrome is the
+    mistake `#239` fixed — so it renders in each vendor's own palette.
+  - **It opens on click and on nothing else** — no scroll position, scroll direction, hover or focus
+    expands it, and the component registers no scroll listener at all. A standard disclosure:
+    `aria-expanded`/`aria-controls`, an accessible name that changes with state, and collapsed links
+    held at `tabIndex={-1}` so a keyboard user is never offered a link they cannot see. The panel
+    stays in the DOM rather than unmounting, and its transition is disabled under
+    `prefers-reduced-motion`.
+  - `lucide-react@1.30.0` ships 6056 icons and **no brand marks at all**, so the Facebook and
+    Instagram glyphs are inline SVG using lucide's own stroke geometry. Nothing was added to
+    `package.json`, which is what `#407` asked for.
+  - `specs/mission.md`'s MVP out-of-scope bullet is **narrowed in place, not deleted**: a contact
+    deep link ships, while WhatsApp as an outbound channel — notifications, marketing automation and
+    the chat re-order flow (`#695`) — stays out.
+  - The generated migration proposed dropping all three `pg_trgm` indexes again (GAP-011, seventh
+    occurrence); `--create-only` caught it before it reached the database.
+
+- **Graft MCP integration for repository navigation** (`#709`). A prebuilt symbol/edge graph
+  queried through six MCP tools (`graft_repo_map`, `graft_find_code`, `graft_find_all`,
+  `graft_file_api`, `graft_trace_calls`, `graft_check_freshness`), plus hooks, a statusline and a
+  hardened skill. **Graft is navigation, structural relationships and impact analysis only** —
+  source, approved specs/ADRs, tests and runtime validation remain authoritative truth, and the
+  committed `SKILL.md` states that rule explicitly.
+  - Two workflow touchpoints, deliberately minimal: `/orient` step 1 locates the area with
+    `graft map`/`graft ask` before broad Glob/Grep; `/validate` step 4 gains a *conditional*
+    shared-symbol `graft callers` check whose hits are investigation targets to confirm against
+    source and tests, never findings. `/build` and `/document` are untouched — Build runs in
+    Orient's context, and Document already reconciles from validation findings. Graft indexes no
+    `docs/`/`specs/` markdown, so it cannot become a second documentation system.
+  - Permissions are narrowed to read-only graft verbs; there is no broad `Bash(graft:*)`, and
+    `graft build --deep` is not auto-approved. Telemetry is disabled locally for the benchmark;
+    that preference is machine-local (`~/.graft/`) and is **not** enforced by this repository
+    configuration.
+  - The generated `graft/` tree is gitignored and regenerable; `.ignore` re-admits it to ripgrep so
+    the cards stay greppable. `.claude/settings.local.json` is now ignored repo-side rather than
+    depending on an individual contributor's global gitignore.
+  - Requires `@nanonets/graft` installed globally and one `graft build`. The helper shims derive
+    npm's Windows global prefix from `%APPDATA%` rather than baking an absolute path, falling
+    through to package resolution and `npm root -g` elsewhere.
+  - Retention is undecided: the `#407`/`#405` slice runs its full SDD lifecycle as a real-world
+    effectiveness benchmark, concluding KEEP / KEEP BUT MODIFY / REMOVE.
+
+- **The storefront's collection links now reach every browse page** (`#694`;
+  `specs/2026-09-09-storefront-browse-discovery-completion/`). `CollectionNav` shipped in `#681` on
+  `/search` and `/bundles` only, so Value Bundles, New Arrivals and Featured Products vanished the
+  moment a shopper browsed a department — the page reached from the department menu. It now renders
+  on `/categories/[slug]` too, inside the same `md:w-60 md:shrink-0` column `/search` uses and
+  outside `FilterPanel` (which renders its form twice, so a nav inside it would duplicate the
+  landmark). No `activeHref` there: a category is a different axis from a collection.
+- **A pack-size filter** (`#397`), built on the `netContentAmount`/`netContentUnit` columns `#398`
+  added. **No schema change and no migration.** New pure helpers in `components/product/unit-price.ts`
+  (`formatPackSize`, `packSizeParamValue`, `parsePackSizeParam`, `comparePackSizes`), a predicate
+  emitting both net-content columns or neither, a distinct-pair facet probe, a select rendered only
+  when the context has pack sizes, a removable chip, and both browse pages wired.
+  - Pack sizes are ordered by **real size**, not raw amount — `500g` before `1kg` — by converting
+    through the same `REFERENCE_UNITS` table the unit-price derivation already uses.
+  - `parsePackSizeParam` accepts `string | string[]` and **rejects the array**. `#689` records five
+    existing keys that return HTTP 500 on a repeated query parameter because each calls a string
+    method on what is actually an array; those stay `#689`'s scope, but the new key is array-safe by
+    construction and applies no predicate instead of throwing.
+  - **`#397` was largely already shipped and its issue body is stale**: `#569` had added
+    `isVegetarian`, `isGlutenFree`, `isHmcCertified`, the `Brand` model and the origin/brand indexes,
+    and `#398` the net-content columns. Pack size was the last genuinely missing facet.
+  - `packSize` survives a "Next page" click on `/categories/[slug]` as well as `/search` — that
+    page's own pagination href builder is separate from `search-href.ts` (it also carries the `#498`
+    `back` cursor stack), and it initially listed every other filter this slice and `#569` added
+    except the one this slice introduced itself. Found and fixed at `/validate`.
+- **The dietary and brand facets are visible on products, not just filterable** (`#608`).
+  `ProductSummary` did not carry `isVegetarian`, `isGlutenFree`, `isHmcCertified` or `brand` at all,
+  so a shopper could narrow a listing to gluten-free products and read nothing on any card saying
+  which ones were. The product card gains three text badges plus the brand; the **product detail
+  page gains a facet block it never had** — it rendered no facet whatsoever before this, not even
+  Halal or Fresh, which made it the larger half of the issue. `hmcReference` renders beside the HMC
+  claim so a certification never travels without its provenance (`#239`).
+
+### Changed
+
+- **`/bundles` now uses the same page layout as `/search` and `/categories/[slug]`** (`#701`;
+  `specs/2026-09-10-bundles-page-layout-parity/`). **No schema change, no migration.** The store
+  owner flagged, with screenshots, that clicking "View all" from Value Bundles landed on a
+  single-column page (`CollectionNav` full-width, a 3-column grid of large cards) that visibly
+  didn't match clicking "View all" from New Arrivals or Featured Products (a two-column layout —
+  sidebar plus a 4-column grid). `BundleCard` already shared `ProductCard`'s `.skew-card` visual
+  treatment; the mismatch was the page's own layout wrapper and grid density, not the card. Fixed by
+  moving `CollectionNav` into the same `md:w-60 md:shrink-0` left column `/search` uses (no
+  `FilterPanel` — `Bundle` has no `categoryId` and none of that form's predicates exist on a
+  bundle, a deliberate `#347` decision this slice doesn't reopen) and widening the grid from
+  `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3` to `grid-cols-2 sm:grid-cols-3 lg:grid-cols-4`,
+  matching `ProductRow`'s exactly. No change to `BundleCard`, `BundleRow`, or any repository/service
+  function.
+
+### Removed
+
+- **The `Category` select is gone from `/search`'s filter panel** (`#704`;
+  `specs/2026-09-10-search-category-select-removal/`). **No schema change, no migration.**
+  Store-owner-flagged: the department icon strip already at the top of every browse page
+  (`DepartmentScroller`, linking to `/categories/[slug]`) made a second, overlapping department
+  picker inside the filter panel redundant. The underlying `category` query-string filtering is
+  untouched — `FilterChips`'s removable chip and `search-href.ts`'s `categoryFilterHref` (used by
+  the zero-result recovery notice and search suggestions) still work exactly as before, so a
+  shopper who arrives at `/search?category=X` via one of those links still gets a correctly
+  filtered, chip-labelled result.
+  - **A hidden `category` passthrough field was added**, mirroring the existing `featured` one
+    exactly: a plain `<form method="GET">` submits only the fields it contains, so without it,
+    applying any other filter from a category-scoped listing would have silently dropped the
+    category and widened the shopper back to the whole catalogue — the same `#501`/`#568` trap this
+    codebase has already paid to learn about twice.
+  - `app/(storefront)/search/page.tsx`'s category fetch reverts from `categoryRepo.listTree()`
+    (widened by `#681` specifically to feed the now-removed select) back to
+    `categoryRepo.listTopLevel()` — every other consumer on the page only ever needed the
+    top-level rows, so this restores the page to its pre-`#681` one-query shape.
+
+### Documentation
+
+- **`/document` (final) closeout for storefront browse discovery completion** (`#694`, `#397`,
+  `#608`; PR #699 merged to `staging`, merge `020a99f`). Docs only — no runtime code, no schema
+  change on this branch (the fix itself shipped on the feature branch, PR #699).
+  - `specs/roadmap.md` (1.89.0 → 1.90.0): removed the now-shipped items from the P9.3 "next up"
+    list, added a shipped bullet to P9.3 covering all three issues and the pagination fix found at
+    `/validate`, and the staging-merge change-log row.
+  - **A genuine spec-wording defect found and corrected, not the code**: `validation.md`'s R3 row
+    checked `grep -c 'aria-current="page"' cat.html` printing `0`, but a real category page also
+    renders `DepartmentScroller` and `SubcategoryLinks`, both of which correctly carry
+    `aria-current="page"` on the active tab for reasons unrelated to `CollectionNav` — the literal
+    command could never print `0` on any category page. The underlying requirement (no
+    `aria-current` *inside the Collections nav specifically*) was genuinely met; the row's check
+    was scoped to the whole page instead of the one landmark it was actually about. Corrected in
+    `validation.md` and promoted to `CLAUDE.md`'s grep-trap section as a transferable lesson.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+- **`/document` (final) closeout for bundles page layout parity** (`#701`; PR #702 merged to
+  `staging`, merge `a602493`). Docs only — no runtime code, no schema change on this branch.
+  - `specs/roadmap.md` (1.90.0 → 1.91.0): added a `#701` bullet to P9.3 covering what shipped, plus
+    the staging-merge change-log row — explicitly noting the full `/propose → /spec → /build →
+    /validate → /ship` loop ran in one continuous session with no `/clear` between stages, per this
+    repo's own standing lesson that a context which just built something is the worst judge of
+    whether it matches the spec.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+- **`/document` (final) closeout for search category select removal** (`#704`; PR #705 merged to
+  `staging`, merge `78f65d4`). Docs only — no runtime code, no schema change on this branch.
+  - `specs/roadmap.md` (1.91.0 → 1.92.0): added a `#704` bullet to P9.3 covering what shipped, plus
+    the staging-merge change-log row — same continuous-session caveat as `#701`'s closeout above.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+- **`/document` (final) closeout for the `staging → main` promotion carrying all three slices above**
+  (`#694`, `#397`, `#608`, `#701`, `#704`; PR #707, merge `2ec84f4`). Docs only — no runtime code, no
+  schema change on this branch.
+  - `specs/roadmap.md` (1.92.0 → 1.93.0): added the promotion's own change-log row, recording that
+    `closingIssuesReferences` was verified to resolve to exactly the five issues above — both before
+    merging and again afterward, alongside independently confirming `#682` and `#697` stayed open —
+    rather than assumed correct from the PR's own title.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+### Fixed
+
+- **A keyset cursor from a URL no longer reaches Prisma unvalidated** (`#682`, `#670`;
+  `specs/2026-09-09-admin-catalogue-latency-and-cursor-safety/`). **Schema change: one added
+  index, one migration.** New `lib/repositories/pagination.ts` is the only place a Prisma cursor
+  argument is built, enforced by `tests/pagination-guard-coverage.test.ts`, which walks
+  `lib/repositories/` from the filesystem with no allowlist and matches on the parsed AST rather
+  than by grep. Five call sites converted: `findPage`, `listInventoryForStaff` and
+  `listProductsForAdmin` (`products.ts`), `listForUser` and `listOrdersForStaff` (`orders.ts`) —
+  the issue named only `/staff/products`, but the idiom was identical at all five and the
+  storefront's ranked-search path had guarded its own cursor since `#564` without that reasoning
+  ever being carried across.
+  - **Two defects, both measured live under `npm run preview`, neither the one the issue
+    predicted.** A malformed or stale cursor returned **HTTP 200 with an empty list** — Prisma does
+    not error on a cursor matching no row, so a bookmark rendered a 2,080-product catalogue as "No
+    products" with nothing indicating why. A **repeated** `?cursor=` parameter, which is `string[]`
+    at runtime whatever the page's `searchParams` type declares, reached Prisma as
+    `cursor: { id: [...] }` and threw `PrismaClientValidationError` (**HTTP 500**) — on
+    `/staff/products`, `/staff/orders` and `/search` alike. `#682`'s own first hypothesis, a cursor
+    carried across a category filter change, worked correctly before and after and **did not
+    reproduce**; the issue is fixed on the strength of what was actually found, not that guess.
+  - `runKeysetPage` re-runs a cursored query from the first page only when it returns empty, so the
+    extra round-trip is paid solely in the broken case rather than as a pre-check on every request.
+    A filter that genuinely matches nothing still renders empty, and page 1 and page 2 of a real
+    category share zero product ids.
+- **Duplicated `status`/`q`/`category` parameters still 500 on `/staff/products`** — same root
+  cause, different parser, filed as `#689` rather than absorbed into this slice.
+
+### Changed
+
+- **One render resolves the current vendor once instead of once per service** (`#670` part 2,
+  `#682`). `getCurrentVendorIdOrNull` (`lib/tenant.ts`) is wrapped in React `cache()`, and
+  `listCategoriesForAdmin` plus the storefront `listTopLevel`/`listTree` reads are memoized the
+  same way. Request-scoped de-duplication, not a cross-request cache: nothing survives the request,
+  so the Workers I/O rule is untouched. The previous docstring called the omission deliberate on
+  the grounds that repositories already memoize — they do, but **per instance**, and about twenty
+  service factories each carried their own copy. **Measured: `/staff/products` went from 28
+  outbound round-trips to 24**, counted as `fetch` spans in `wrangler dev`'s observability store
+  with no instrumentation, since `PrismaNeonHttp` is fetch-based. Better Auth's fail-closed rate
+  limiter (`#469`), which calls this from a route handler rather than a render, was verified live
+  and still refuses. The double `getSession` `#670` also names is deliberately not touched and is
+  filed as `#690`.
+- **`Product` has the index its ordering has always needed** (`#670` part 3):
+  `@@index([vendorId, createdAt, id])`. Every product list sorts `(createdAt desc, id desc)` and
+  none of the model's seven existing indexes was ordered, so `EXPLAIN` showed a `Seq Scan` plus
+  top-N heapsort over every row. After: `Index Scan Backward`, **12.063 ms to 0.109 ms** on the
+  admin list query. `prisma migrate dev --create-only` again generated `DROP INDEX` for all three
+  hand-authored `pg_trgm` indexes — the seventh consecutive occurrence — caught by reading the
+  generated SQL before applying it, so the drops never reached a database.
+- `specs/architecture.md` (1.27.0 → 1.28.0) — the Pagination section now states that a cursor is
+  untrusted URL input and names the single module permitted to turn one into Prisma arguments.
+
+- **One filter surface on `/search`: the category control moves into the filter panel** (`#681`;
+  `specs/2026-09-09-storefront-browse-consolidation/`). **No schema change, no migration.**
+  `/search` rendered two department pickers setting the same `category` parameter — the
+  `DepartmentScroller` strip and `CategoryDrillDown`'s chip row directly beneath it — while the
+  filter panel beside them had no category control at all, carrying `category` only as a hidden
+  passthrough field (`#568`) precisely because nothing visible owned it. `ProductFilterForm` now
+  renders a grouped `select` (departments selectable in their own right, each followed by its
+  subcategories, values are slugs), the hidden `category` input is gone, and
+  `components/product/CategoryDrillDown.tsx` is deleted. `featured`'s hidden field **stays** —
+  nothing visible owns it, so removing it would reintroduce the bug `#501` fixed.
+  - **The page issues no more category queries than before.** A new
+    `listCategoryTreeForStorefront` returns both tiers in one read and **replaces** the
+    `listTopLevel()` call; the department strip takes the `parentId === null` rows of that same
+    result. Read amplification on these pages is live work (`#670`, `#682`) and this slice was
+    careful not to add to it.
+  - **New collection entry points** — `CollectionNav`, rendered once per page above the panel and
+    shared by `/search` and `/bundles`: All products, New Arrivals, Featured Products, Value
+    Bundles. It sits outside `FilterPanel`'s two branches deliberately: that component renders its
+    form twice (mobile disclosure, desktop sidebar), which is safe for a form using no `id`
+    attributes but would put two identical `nav` landmarks in the accessibility tree.
+  - **`/bundles` gains the department strip and the same collection nav**, but deliberately **not**
+    the filter form: `Bundle` has no `categoryId` and none of that form's predicates exist on a
+    bundle, because a bundle is a curated set spanning departments (`#347`). The strip there is a
+    way back out to a filtered product listing, not a filter over bundles.
+  - **No `collection=new` parameter was invented.** `findPage` already orders every browse listing
+    `createdAt desc, id desc`, so `/search` with no query *is* the newest-first listing and the
+    shop page's New Arrivals row is that same query capped at eight. A predicate-free key would
+    have rendered a removable chip claiming a filter that is not running, which `filter-chips.ts`
+    exists to prevent. The listing states its ordering instead. A recency-window New Arrivals is a
+    real feature and a separate one.
+  - `toCategoryOptionGroups` (`lib/catalogue-form.ts`) is now generic over its element type, so the
+    storefront can reuse it without losing `slug`. It had shipped in `#630` with **no test
+    coverage of any kind**; four cases now pin the grouping rules, the orphan-child promotion and
+    the field preservation, before a second caller depends on them.
+  - `specs/design-system.md` (1.12.0 → 1.13.0) records the standing rule this established: a
+    disclosure's two branches may duplicate a **form** that uses no `id` attributes, but never a
+    **landmark** — two identically-named `nav`s are a real defect for anyone navigating by
+    landmark, and invisible on screen.
+  - Deferred and filed rather than folded in: **`#684`** (a real recency-window New Arrivals,
+    which must follow `#601` because it does introduce a new query key) and **`#685`** (the Gate 2
+    pre-commit hook cannot tell a generated artefact from source).
+
+### Added
+
+- **A Prisma-free fallback so an unhandled request error can still be recorded** (`#674`;
+  `specs/2026-09-08-error-event-fallback-capture/`). **No schema change, no migration.**
+  `instrumentation.ts`'s `onRequestError` wrote its `ErrorEvent` row through
+  `getPrismaUncached()`, which builds a fresh `PrismaClient` and therefore a fresh WASM
+  `QueryCompiler` — so an error originating in that constructor made the recorder re-enter the
+  code path that had just thrown. It could never succeed. That is what happened in production on
+  2026-09-08: one request 500'd and the recorder failed with an identical stack, leaving no row,
+  and `#437`'s error-rate alerting counts rows in that same table. The stack was mapped
+  frame-by-frame onto `node_modules/.prisma/client/query_compiler_bg.js` to establish it was the
+  constructor rather than a query. The Prisma write stays the normal path; when it throws,
+  `lib/error-event-fallback.ts` inserts the row through `@neondatabase/serverless`'s `fetch`-based
+  `neon()` client, which loads no WASM and shares none of the failed machinery. `onRequestError`
+  still never rejects, and now logs a distinct line when the fallback also fails. Truncation is
+  shared rather than duplicated — `buildErrorEventRow` is exported from
+  `lib/repositories/error-events.ts` and both paths use it, so the 2000/8000 caps stay declared
+  once. **This is the codebase's only raw SQL in application code**, a deliberately narrow
+  exception (one parameterised INSERT, one vendor-less table, error path only) recorded in
+  `CLAUDE.md` and both places `specs/architecture.md` states the rule; `#676` tracks making that
+  boundary mechanical rather than prose. `scripts/verify-error-event-fallback.ts` proves the
+  statement against real Postgres from plain Node, which no unit test can do — the `id` column has
+  no database default and `createdAt` does, and getting either backwards passes every unit test.
+  Nothing a user sees changed.
+- **Panel refusal enforcement and an admin catalogue category filter** (`#350`, `#503` part 1;
+  `specs/2026-09-08-panel-refusal-and-catalogue-category-filter/`). Two independent P9.3 tail
+  items sharing no code. **No schema change, no migration.**
+  - **`#350` — the deliverable is the enforcement, because the fix had already shipped.**
+    `/staff/storefront`'s bare `return null` was fixed incidentally on 2026-09-06 in `e3c9642` by
+    a slice editing that page for something else, and nobody closed the issue. Walking all 25
+    `app/(admin)` pages then found a **fourth** instance the issue never mentions:
+    `/staff/discounts` hand-rolled markup byte-identical to `PanelRefusal`'s output — a
+    consistency defect, a deliberate P6a deferral, and the only page no list had ever named. By
+    then `PanelRefusal`'s own docstring was wrong about `loyalty` (converted three phases earlier)
+    while `CLAUDE.md`'s list mentioned neither `storefront` nor `discounts`. So the prose list is
+    gone: `tests/panel-refusal-coverage.test.ts` walks the directory with **no allowlist** and
+    fails any page that gates on `requireVendorRole(` without rendering `<PanelRefusal>`, or that
+    returns `null` from an `auth`-conditioned branch. **It matches JSX on the parsed TypeScript
+    AST, not text** — several of these pages carry a comment stating the rule, which satisfies any
+    substring check on its own; the same comment-unaware-parser defect fixed a week earlier in
+    `82dbb1d`. Nothing a user sees changed.
+  - **`#503` part 1 — the admin product list can be filtered by category.** With 2,026 products
+    and `PAGE_SIZE = 25`, reaching a product by category meant walking up to 81 cursor pages.
+    Reuses `listCategoriesForAdmin` (`#627` ordering) and `toCategoryOptionGroups` (`#630`) rather
+    than rebuilding either. **Selecting a department includes its subcategories; a subcategory is
+    exact** — both tiers are genuinely in use (`seed.ts` assigns curated products to a top-level
+    category, `seedGeneratedCatalogue` assigns generated ones to subcategories), so exact-match on
+    a department would have hidden every generated product beneath it. `parseStaffProductsQuery`
+    takes the vendor's categories as a **required** argument and stays pure, so the whole rule
+    surface is unit-testable with no database; an unknown, blank or cross-vendor id normalises to
+    `CATEGORY_ALL` rather than riding the pagination href into the next page, and `categoryIds` is
+    never `[]` (`in: []` matches nothing, which on screen is indistinguishable from a working
+    filter over an empty category). Categories are fetched **before** the product query, not
+    alongside it — the two are not independent, since expansion and validation both need the real
+    id list. `#503`'s parts 2 and 3 (vendor-resolution memoisation, the ordered
+    `(vendorId, createdAt, id)` index) are split to **`#670`**, sequenced behind `#439`.
+
+- **Deferred-abstraction sweep** (`#662`, closing `#656`, `#653`, `#351`, `#639`, `#75` and the
+  derivation half of `#398`; `specs/2026-09-07-deferred-abstraction-sweep/`). Four abstractions this
+  repo deferred as speculative, built now that each deferral's own stated precondition has been met.
+  **Two migrations, no data rewrite.**
+  - **`#653` — the radius scale was ambiguous, and the fix is a retirement, not a re-style.**
+    Tailwind v4's `@theme` *merges* with its default scale, so overriding only `sm` and `md` made
+    `rounded-sm` identical to `rounded-lg` and `rounded-md` identical to `rounded-2xl`, while the
+    two most-used radii (`rounded-2xl` at 141 uses, `rounded-xl` at 94) named no token at all.
+    Breaking the tie by picking new values would have restyled real screens days before UAT, so the
+    37 `rounded-sm`/`rounded-md` call sites were rewritten to their **identical-rendering** twins
+    instead and those two tokens retired. **No corner radius changed anywhere.**
+    `tests/radius-scale.test.ts` now fails if any two distinct `rounded-*` utilities in use ever
+    resolve to the same value. Bare `rounded` is declared too — it registers `themeKeys: ["--radius"]`
+    and would otherwise have been the one radius still riding an un-overridden Tailwind default.
+  - **`#656` — the UI primitive layer, arriving with its deferral's expiry finally reached.**
+    `specs/design-system.md` had deferred `components/` because "nothing consumes tokens yet…
+    building these now would be speculative" — written before P1, still quoted after P9.2. The
+    evidence it was waiting for is that `#649` and `#650` each reached double-digit failing sites
+    from a *single* author decision copied into 11 and 15 files. `Card`, `Button` and `FormField`
+    are server components composing `lib/form-classes.ts`'s existing strings rather than
+    re-declaring them; `FormField` emits `aria-invalid` and `aria-describedby` together or not at
+    all. Adoption is deliberately partial — 87 card-surface lines and 24 button sites across 17
+    distinct geometry combinations remain, and a single sweep would be an unreviewable diff.
+  - **`#351` — the product card stopped nesting buttons inside a link.** The card-wide `<Link>`
+    contained `AddToCartButton` and `CartQuantityStepper`, which HTML forbids, and correctness
+    rested on every handler calling `stopPropagation()`. Now a stretched link on the title, with the
+    controls as siblings; both `stopPropagation()` calls are gone. **`BundleCard` already carried
+    `.skew-card` and `group` on a plain `<div>` in production**, so this converged on a shape that
+    already worked and needed **no CSS change at all**.
+  - **`#639`/`#75` — a vendor can set its whole palette, and pick a theme to start from.**
+    `StorefrontConfigForm` rendered 2 of `VendorBranding`'s 8 brand primitives while the repository's
+    `BRAND_FIELDS` loop had always written all 8 — the write path was built and unused, and the
+    `initialConfig: any`/`initialBranding: any` props are what hid it. All 8 are now editable and
+    typed. The new `Theme` catalogue **copies** its 8 values onto the vendor's row; `brandStyle()` is
+    untouched and performs no join, so a theme is a starting point a vendor can then edit, and every
+    existing contrast clamp applies unchanged. **`Theme` deliberately carries no `vendorId`** — the
+    first stated exception to ADR-004 decision 2, recorded in the ADR and in the schema so an
+    un-scoped table in a row-scoped schema reads as a ruling rather than a defect.
+  - **`#398` (derivation half) — a unit price that cannot drift from the price charged.**
+    `unitLabel` was free text, hand-typed, validated only for non-emptiness and parsed by nothing —
+    a UK Price Marking Order exposure rather than a UX gap. `Product` gains a nullable net-content
+    amount and unit, and **two** derived values doing different jobs: the **displayed** price is
+    computed exactly at render time from `basePrice`, while a denormalised whole-pence column is an
+    indexed **sort key** that is never displayed. `#398` framed these as either/or; taking both is
+    what stops a rounding artefact in the sort key reaching a price a shopper reads. `unitLabel`
+    stays as the fallback where no net content is set. **The variant model stays out** — it needs
+    its own `/propose`, and multi-weight products remain separate rows.
+  - **No storefront sort control**, deliberately: `findPage` is hardcoded to keyset pagination on
+    `(createdAt, id)` and `specs/architecture.md` requires a cursor's ordering key to *be* the sort
+    key, so a user-facing sort means changing every listing's cursor. The column is proven sortable
+    by a real indexed query instead.
+  - Both migrations hit the `pg_trgm` trigram-drop trap — the **seventh and eighth** consecutive
+    occurrences — caught by `--create-only` and read before applying, as CLAUDE.md now treats as
+    certain rather than possible.
+
+- **Storefront & panel accessibility remediation** (`#649`, `#650`, `#651`, `#652`,
+  `specs/2026-09-07-storefront-accessibility-remediation/`). Four WCAG 2.2 AA defects found by the
+  2026-09-07 Discover pass, fixed as one slice because #649 and #650 lived in the same eleven
+  duplicated style constants. **No schema change and no migration.**
+  - **`#649`** — **299 alpha-modified colour utilities across 83 files failed AA**, and the reason
+    no test could see it is the point: `brandStyle()` passes every semantic foreground through
+    `clampForContrast`, and **a Tailwind alpha modifier composites that clamped value back below
+    the floor at paint time**, while `tests/design-tokens-contrast.test.ts` reads token *values*. So
+    the better the clamp works, the worse `/70` renders. `text-primary/80` is the row that shows
+    why a percentage floor could never have expressed this — 4.80:1 on white, **4.41:1 on Aheed's
+    tints**, and passing on both for SriMart. Replaced by two tokens derived through a new
+    `mutedForeground()` (composite at the old alpha, then clamp — the same derive-then-clamp shape
+    `darkenForHover` already used): `--color-primary-muted` (4.5:1, text) and
+    `--color-primary-subtle` (3:1, decorative `aria-hidden` graphics), both re-declared per vendor
+    in `brandStyle()` because a token declared only in `tokens.css` renders the default palette on
+    every real page. Aheed resolves to `#49784e`/`#77917a`, SriMart to `#4369a7`/`#7287aa`.
+    Collapsing `/80`, `/70` and `/60` onto one tone was the slice's main visual risk, so the
+    resulting ladder is pinned rather than assumed: three ordered steps, each at least 1.4:1 from
+    its neighbour, asserted for both vendors.
+  - **`#650`** — `focus:outline-none` at **27 sites with 2 replacements**; the rest indicated focus
+    by a 1px border-colour change, which fails SC 2.4.11's indicator-area requirement and
+    **disappears entirely in forced-colors mode**, where author border colours are overridden and
+    the suppressed system outline is not there to fall back on. One `focus-visible` ring now serves
+    all of them. The four staff forms' `fieldClass(name)` became `fieldProps(name)`, returning the
+    className **and** `aria-invalid`/`aria-describedby` together, so a field cannot be styled
+    invalid without being announced invalid — a red border alone satisfies neither SC 1.4.1 nor
+    SC 3.3.1.
+  - **`#651`** — `app/globals.css`'s reduced-motion block is **class-scoped**, and `transform` is
+    not inherited, so `transform: none` on `.skew-card-inner` never reached the
+    `group-hover:scale-105` on the product photo inside it: under
+    `prefers-reduced-motion: reduce` the card correctly stopped skewing and lifting and **still ran
+    a 500ms image zoom**. Fixed with `motion-reduce:` at all 24 utility-transform sites.
+    **Widening the CSS block to a global selector was considered and rejected** — it would remove
+    the `box-shadow`/`border-color` transitions that block deliberately keeps (hover would stop
+    being perceivable at all), and any blanket `transform: none` would break the seven **static**
+    `-translate-y-1/2` centring transforms in this repo, detaching search icons from their inputs
+    for reduced-motion users only.
+  - **`#652`** — six pages (`/login`, `/register`, `/forgot-password`, `/reset-password`,
+    `/account`, `/account/data`) rendered `mx-auto max-w-sm` with **no padding at all**, and
+    nothing upstream supplied a gutter — so below 384px the sign-in and registration forms ran
+    edge-to-edge. The container-width inconsistency behind it stays with `#656`.
+  - **Enforcement is the deliverable.** All three rules had existed as prose in
+    `specs/design-system.md` and reached 299, 27 and 24 sites anyway.
+    `tests/token-alpha-purity.test.ts` and `tests/motion-reduce-coverage.test.ts` are new, both
+    walking the filesystem so a new file is covered the moment it exists; the motion one caught a
+    `hover:scale-105` in `CartDrawerShell` that the sweep's literal patterns had missed.
+  - **The product-card motion is untouched.** `ProductCard.tsx`'s entire diff is **one line** (the
+    `motion-reduce:` variant); `.skew-card*`'s transforms, durations and easings are byte-identical.
+  - Scoped out and filed: `#657` (`text-white/NN` over vendor-uploaded campaign imagery — needs a
+    scrim, not a token, since the background is an arbitrary photograph).
+
+- **P9.2 remaining non-operational gaps** (`#644`, absorbing `#94`, `#621`, `#437` code tail,
+  `#505` code half and `#472` in part, `specs/2026-09-07-p9-2-non-operational-gaps/`). Closes every
+  remaining P9.2 item a repository change can close, leaving only the operational set (`#113`,
+  `#104`, `#227`, `#175`, `#219`, `#246`, `#436`, `#438`). **No schema change and no migration.**
+  - **`#94`** — guest carts were created lazily, keyed by an opaque cookie token, and **nothing had
+    ever reaped them**. `deleteAbandonedGuestCarts` now deletes carts untouched for 30 days, which
+    is exactly `lib/cart-identity.ts`'s `CART_COOKIE` `maxAge`: past that the guest token exists
+    nowhere, so the row is unreachable by everyone including the shopper — a derived retention
+    position rather than an arbitrary age. Never touches a cart carrying a `userId`, which has no
+    cookie dependency and no expiry. Takes `vendorId` explicitly (`Cart` is vendor-scoped) with the
+    service iterating `listActiveVendorIds`, matching `lib/payment-sweep-service.ts`; capped
+    **per vendor** rather than per tick, so one vendor's backlog cannot starve another (`#619`).
+    Verified against the real dev database — cascade included — by
+    `scripts/verify-guest-cart-reaper.ts`.
+  - **`#621`** — `app/api/webhooks/stripe/route.ts` read `STRIPE_WEBHOOK_SECRET` through a bare
+    `getPaymentEnv()`, whose zod `superRefine` throws when the value is absent and `NODE_ENV` is
+    `"production"` — unconditionally true in every **built** Worker. Its own
+    `Webhook not configured` 500 was therefore dead code and an unset secret produced an uncaught
+    `ZodError` instead. `readOptional` moves out of `app/api/jobs/reconcile-payments/route.ts`,
+    where `#618` left it as a **private** helper — which is why this second instance went unnoticed
+    — into `lib/config.ts`, and both routes import it. The route's contract is unchanged; only its
+    reachability is.
+  - **`#437` (code tail only)** — `ErrorEvent` rows have been written by `instrumentation.ts` since
+    `#508` and read by nothing but `/staff/errors`, so a spike was visible only to whoever happened
+    to look. Adds `countRecentErrorEvents`, a pure `evaluateErrorRate` (no imports, so it is
+    testable with no stubs), and `/api/jobs/check-error-rate`, which logs one structured line when
+    the threshold is breached and none when it is not. The window is **derived** from the
+    scheduler's 15-minute cron so ticks neither double-count nor leave a gap; the threshold is a
+    named constant recording that it awaits `#246`. **No delivery channel is chosen** — `#104`
+    leaves Resend's sending domain unverified, so an email alert would look delivered and never
+    fire.
+  - **`#505` (code half)** — `parseEnvFile` existed as **four** private copies, three byte-identical
+    and the fourth differing by one comment. Consolidated to `scripts/lib/env-file.ts`. The parser
+    is **kept** rather than replaced by `dotenv`: `secrets/*.vars` are gitignored, hand-maintained
+    and will never be seen by a linter, so tolerating their formatting is a requirement. Normalising
+    the files themselves is local-only and stays open on `#505`.
+
+- **Admin panel operability: category hierarchy, report drill-down, delivery rules and per-vendor
+  panel colours** (`#627`, `#628`, `#630`, `#631`, `#634`, P9.2,
+  `specs/2026-09-06-admin-panel-operability/`), landing the `/discover` pass that filed them
+  (`#632`). **No schema change and no migration** — every column involved already existed.
+  - **`#627`** — `listCategoriesForAdmin` ordered by `(sortOrder, name)` as a single **global**
+    ordering with no `parentId` grouping. `prisma/seed.ts` gives top-level categories no
+    `sortOrder`, so all 13 take the schema default of `0` while children get `0,1,2` **within** each
+    parent — putting every department and every first-child in one bucket sorted by name alone, so
+    an indented Household subcategory rendered directly beneath Beverages. Grouped in the
+    **repository** via a pure, exported `groupCategoryRowsByParent`, so `ProductForm`'s picker (fed
+    by the same function) is fixed by the same change rather than separately. A child whose parent
+    is missing is treated as top-level rather than dropped: an unselectable category is a worse
+    failure than an oddly-placed one.
+  - **`#630`** — the product form rendered **one flat select** over every tier. Both tiers are
+    genuinely assignable and both seed paths use them (`prisma/seed.ts` assigns hand-curated
+    products to a department, `seedGeneratedCatalogue` to subcategories), so it is now one
+    `optgroup` per department **with the department itself as the first selectable option inside
+    it**. A "pick category, then subcategory" cascade would have read more naturally and silently
+    removed direct-to-department assignment — the exact regression `#630` was filed to prevent.
+  - **`#628`** — `/staff/reports`' tiles aggregate over `REVENUE_STATUSES`, a set the URL could not
+    express: `parseStaffOrdersQuery` resolved a status to the default queue, `all`, or one single
+    status. So `?status=all` overcounted the tile and the bare queue undercounted it, and any
+    drill-down would have contradicted the number it was reached from — re-opening the credibility
+    problem `#238` already repaired once. Adds a `STATUS_REVENUE` sentinel alongside `STATUS_ALL`,
+    an **Orders by status** tier built from **one `groupBy` over the same `where` clause** the tiles
+    use (so the rows sum to Total Orders by construction, not coincidence), and a Total Orders tile
+    that links to precisely its own dataset. The orders filter gains a matching option, so arriving
+    from the tile does not show "Awaiting action" selected over a different list.
+  - **`#631`** — six Tailwind arbitrary-value literals hardcoded **Aheed's** brand primitives into
+    pages every vendor's staff open, so SriMart staff saw Aheed's green on their own store's
+    screens. `#631` named three; a panel-wide grep found six (`staff/team/page.tsx` and
+    `AssignRoleForm.tsx` carried the others). All now read `text-action`, `bg-action-tint`,
+    `bg-surface-muted` and `text-danger`, which `brandStyle()` re-declares per vendor.
+    `tests/panel-token-purity.test.ts` walks the panel from the filesystem and fails on any new
+    arbitrary hex, excluding the **generated** `runbook/docs.ts` via `build-index.ts`'s own
+    `GENERATED_ARTIFACTS` rather than a hand-written path.
+  - **`#634`** — `deliveryFeePence`, `freeDeliveryThresholdPence` and `minimumOrderPence` were
+    written by `prisma/seed.ts` and nothing else, so changing a delivery fee needed a developer with
+    database access — the same operability gap `#612` closed for delivery *areas*. They are now
+    editable on `/staff/storefront` as their own form with its own state, because these three reach
+    real money arithmetic on the checkout path (`lib/order-totals.ts`) and a silently-rejected save
+    would be indistinguishable from a successful one. `lib/delivery-rules-form.ts` accepts only
+    `^\d+(\.\d{1,2})?$` and converts by **integer arithmetic on the digit strings**, so no binary
+    float touches a money value and `2.999` is refused rather than quietly rounded to `£3.00` —
+    which is why `parsePriceInput` was not reused. Blank threshold stores SQL `NULL` (never
+    offered), deliberately distinct from `0` (every order qualifies).
+  - **Incidental:** `/staff/storefront`'s refusal branch was `return null`, so a refused user got a
+    `200` with the portal shell and an empty content area. Now renders `PanelRefusal` like every
+    other `/staff/*` page.
+  - `docs/store-admin-guide/admin-tabs-guide.md` (2.1.0) regains a delivery-rules capability
+    sentence — the **fourth** false claim `#633` removed — in the same change that makes it true.
+  - `docs/research/discovery-log.md` (1.4.0) lands via PR #632's stranded commit, with all seven
+    findings reconciled to their real state rather than left presenting closed defects as open.
+
+- **Scheduled sweep for stranded payments** (`#618`, P9.2,
+  `specs/2026-09-06-stranded-payment-sweep/`), absorbing `#101` and `#94`. An order whose Stripe
+  webhook never arrived was stranded in `PENDING_PAYMENT` forever, holding its inventory, its
+  discount-code use and its loyalty redemption: `lib/order-status.ts` gives that state no outbound
+  staff transition, and `/staff/payments` reads binding-refusal rows, which a webhook that never
+  arrived never wrote. A new minimal Worker (`workers/scheduler/`) carries a Cron Trigger and calls
+  an authenticated job route every 15 minutes; the route asks Stripe about each stale order's own
+  stored session and confirms, releases, or leaves it alone. `#101` and `#94` are one slice because
+  a timeout that cancels stale orders without asking the provider first would cancel and restock
+  orders that were genuinely paid. **Release is gated on the session's own state, never on elapsed
+  time**, which is what makes a 30-minute cutoff safe while still rescuing a charged shopper within
+  the hour. **No schema change and no migration** — `@@index([vendorId, status, createdAt])`
+  already existed — and no body in the payment transition path was modified: `confirmPayment`,
+  `failPayment` and `releaseOrder` are `#429`'s machinery and this adds a caller, not a change to
+  them. Needs a new `JOB_INVOCATION_TOKEN` runtime secret, set with the same value on **both**
+  Workers per environment. The job route fails closed with a clean `503` — not a crash — when
+  that secret or `STRIPE_SECRET_KEY` is unset, confirmed live at `/validate`.
+- **`/staff/delivery-areas`** (`#612`, P9.2, `specs/2026-09-06-delivery-areas-admin/`). Store admins
+  can add and remove the postcode areas their shop delivers to. These rows are a hard checkout gate
+  — `features/checkout/place-order.ts` refuses an order outright when no prefix matches the
+  shopper's postcode — and until now their only writer anywhere in the repository was
+  `prisma/seed.ts`, so changing where the shop delivers required a developer with production
+  database access. No schema change: `VendorDeliveryArea` already carried the unique constraint this
+  needed. Removing a vendor's **last** remaining area is refused inside a `Serializable`
+  transaction, mirroring the last-admin guard in `lib/repositories/roles.ts` — an empty prefix list
+  makes every postcode undeliverable, so it would stop checkout for every customer of that store.
+- **Catalogue filter facets — brand, dietary flags, country of origin and offers** (`#569`,
+  P2.6 slice 6 of 6, `specs/2026-09-05-catalogue-filter-facets/`). Shoppers can now narrow
+  `/search` and any category listing by country of origin, dietary suitability (vegetarian, gluten
+  free, HMC certified), brand, and whether a product is on offer. Each facet renders only when the
+  current result context actually contains matching products, and each is individually removable as
+  a chip. No client JavaScript: both new controls are `select` elements inside the existing
+  `method="GET"` form, so the no-JS filter path is unchanged.
+- **`/staff/brands`** — store admins can create brands, rename them, and set a brand's relative
+  image key. A brand is a model rather than a free-text column so `#394`'s mega-menu thumbnails
+  have a stable id and an image key to attach to; nothing renders a brand image yet, and this slice
+  adds no upload pipeline. Product edit pages gain a brand picker, dietary checkboxes and an HMC
+  certification section.
+- **HMC certification carries provenance.** `isHmcCertified` cannot be saved without a certificate
+  reference and a verified date, and unticking it clears both. HMC is a named third-party
+  certifying body, and `#239` was a real incident of this codebase asserting certification with no
+  basis for it; a bare tickable boolean would have re-created that exposure one product at a time.
+
+### Changed
+
+- **Required status checks now enforced on `main` and `staging`** (`#472`, partial). Both rulesets
+  gain a `required_status_checks` rule naming `docs-gates`, `quality / kms` and
+  `quality / quality`, closing the gap that let PRs `#464`, `#465` and `#466` reach `main` with
+  nothing able to reject them. **The premise blocking this was false and unchecked**: `#472` and
+  `CLAUDE.md` both recorded a paid-plan limitation for *private* repos, but this repository is
+  **public** — the recorded 422 applied only to environment reviewers, never to rulesets. Context
+  strings were read from the names real completed runs reported, never guessed, since a rule naming
+  a context nothing reports blocks every merge permanently (`#539`'s reason for deferring).
+  `deploy` is deliberately excluded — it runs on `push`, not `pull_request`. Approval gates are
+  deliberately **not** adopted: as sole maintainer that would mean approving one's own deploys.
+- `specs/tech-stack.md` (1.5.0) no longer says branch protection is "prepared for later".
+- `CLAUDE.md` — corrects the public-vs-private premise, describes the new rule, records `#541`'s
+  closure reasoning, and moves the vitest baseline to **107 files / 1431 tests**, noting for the
+  first time that the count can move **down**: `tests/scheduler.test.ts` lost two tests that had
+  hardcoded call counts against a one-entry `JOBS` array while claiming independence from it.
+
+### Removed
+
+- **`#541` closed as accepted risk** — `continue-on-error` is inert on a passing job, so no
+  `deploy-production` run can settle it (`33606818256` and `34103597181` both proved nothing). The
+  only way to observe the false branch is to deliberately ship a broken KMS artefact to `main`, and
+  the failure direction is safe: a mis-resolved expression leaves the job **blocking**.
+- **`#101` closed as delivered** by `#618`'s `app/api/jobs/reconcile-payments/route.ts`; only the
+  operational `JOB_INVOCATION_TOKEN` remains.
+
+### Documentation
+
+- **`/document` (final) closeout for admin catalogue latency and cursor safety** (`#682`, `#670`;
+  PR #691 merged to `staging`, merge `77869cd`; not yet promoted to `main`). Docs only — no
+  runtime code, no schema change on this branch (the schema change and migration shipped on the
+  feature branch itself, PR #691).
+  - `specs/roadmap.md` (1.87.0 → 1.88.0) gains a `#670` bullet and a separate `#682` bullet in
+    P9.3 — `#670` shipped both remaining parts and moves toward closing on promotion, `#682`
+    stays open regardless of promotion since its own named hypothesis never reproduced — plus the
+    staging-merge change-log row for this slice.
+  - **A second, unrelated carry-forward found and fixed in the same pass**: `npm run sdd:audit`
+    reported PR #688 (the `#681` promotion to `main`, merge `f548306`) as a pending row — it had
+    merged mid-session, before this slice's own `/document` could run. Added as its own
+    change-log row rather than folded into this slice's row, matching the existing convention for
+    a promotion that reaches production independently of the slice being documented.
+  - `/validate` ran from a genuinely fresh context (the session had not built the artifact) and
+    re-verified every live claim independently rather than trusting `build-notes.md`: re-executed
+    the cross-category cursor sequence and cross-checked all 25 returned products against Prisma
+    directly, re-ran `EXPLAIN (ANALYZE, BUFFERS)` independently (matched), reproduced the
+    query-span count live (24, matching exactly), and deliberately triggered the pagination
+    guard's own AST check on a hand-added violation before reverting it. No new defects found; the
+    artifact matched the spec as built.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for the storefront browse consolidation** (`#681`; PR #686 merged
+  to `staging`, merge `7c95646`; not yet promoted to `main`). Docs only — no runtime code, no
+  schema change.
+  - `specs/roadmap.md` (1.86.0 → 1.87.0) gains a `#681` bullet in P9.3 and the staging-merge row
+    for this slice.
+  - `/validate` ran from a genuinely fresh context (the session had not built the artifact) and
+    live-verified every row under `npm run preview` against both seeded vendors, reading their
+    hosts from `VendorDomain` rather than assuming the `nocaped.com` convention — the local dev DB
+    here was seeded `localhost:8787`/`srimart.localhost`. All four `validation.md` corrections
+    `build-notes.md` recorded were independently re-verified as the right call. No new defects
+    found; the artifact matched the spec as built.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **Roadmap carry-forward for the `ErrorEvent` fallback capture promotion** (`#674`; PR #679,
+  merge `7efc8eb`, `staging -> main`, promoted 2026-09-09). Docs only — no runtime code, no
+  schema change. `npm run sdd:audit` reported this row pending at `/orient`; it is the only gate
+  that fires after Ship, and the fourth consecutive slice to hit the one-loop documentation lag.
+  - `specs/roadmap.md` (1.85.0 → 1.86.0) gains the promotion row — one promotion carrying both
+    PR #677 (the feature merge) and PR #678 (its Document (final) closeout), rather than the two
+    separate promotions the previous three slices each needed — and its P9.2 bullet for `#674`,
+    which still read "Not yet promoted to `main`", is corrected.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for the Prisma-free `ErrorEvent` fallback capture** (`#674`;
+  PR #677 merged to `staging`, merge `cb2b1d6`; promoted to `main` by PR #679, above). Docs only —
+  no runtime code, no schema change.
+  - `specs/roadmap.md` (1.85.0) gains the staging-merge row for this slice, records the two rows
+    Build flagged as never run (`R15`/`R16`, a real insert/read-back/delete against the dev
+    database) as confirmed at `/validate`, and adds `#676` to the P10 tracked-issue list (it had a
+    GitHub milestone but no roadmap mention).
+  - **A spec/check mismatch found at `/validate`, left as a flagged deviation rather than
+    patched.** R17 required `CLAUDE.md` to state the exception's file name and the words "raw SQL"
+    on one literal physical line, checked by a same-line grep; the bullet states both correctly
+    but wraps across two source lines under this file's own hard-wrap convention. The requirement's
+    intent was met; the literal check was over-strict against the file's formatting style.
+    `specs/sdd-workflow.md`'s grep-trap list (2.30.0 → 2.31.0) now records this as a fifth
+    instance, with the generalised fix: word a same-line requirement as "same bullet/paragraph"
+    when the target file hard-wraps, or check line adjacency instead of exact line identity.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for panel refusal enforcement & the admin catalogue category
+  filter** (`#350`, `#503` part 1; PR #671 merged to `staging`, PR #672 promoted to `main`, merge
+  `364103c`). Docs only — no runtime code, no schema change.
+  - `specs/roadmap.md` (1.83.0) gains a `#503` bullet in P9.3 (previously undocumented there),
+    the staging-merge and promotion rows for this slice, and a backfilled row for PR #669 (the
+    prior slice's own Document-final promotion) that `sdd:audit` reported pending carry-forward.
+  - **A closing-keyword incident, caught and reversed within the same session.** Two commits
+    already on `staging` carried a caution phrased as a colon-separated issue list — structurally
+    identical to GitHub's `close: #NNN` syntax — and PR #672's merge auto-closed the first-listed
+    issue (`#670`) despite `closingIssuesReferences` showing only `#350`/`#503` beforehand. This is
+    the same class this repo already hit once at `#214`; caught within seconds via the immediate
+    post-merge issue-state check, reopened with an explanatory comment, board status corrected
+    from the auto-triggered `Done` back to `Backlog`. `specs/sdd-workflow.md`'s existing bullet on
+    this trap (2.29.0 → 2.30.0) now records the second occurrence and a concrete phrasing fix:
+    state issue numbers to keep open as bare digits, with no `close`/`fix`/`resolve` word anywhere
+    in the sentence.
+  - Production `/api/health` confirmed serving `364103c` with `db.ok: true`; staging confirmed
+    serving `2bec567` the same way.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for the deferred-abstraction sweep** (`#662`, `#656`, `#653`,
+  `#351`, `#639`, `#75`; PR #666 merged to `staging`, PR #667 promoted to `main`, merge `14200cc`).
+  Docs only — no runtime code, no schema change beyond what PR #666 already carried.
+  - `specs/roadmap.md` (1.81.0) gains the staging-merge and promotion rows, updates P9.3's own
+    bullets to reflect `#351` and `#398`'s derivation half as shipped rather than pending, and moves
+    `#75` out of P10's tracked-issues list (shipped) while adding `#663`/`#664`/`#665` (this slice's
+    own filed follow-ons) into it.
+  - **Milestones assigned to close a Propose-stage gap**: `#662`, `#656`, `#653` and `#639` had
+    carried no GitHub milestone since filing — assigned `P09.3` to match `#351`/`#398`/`#649`–`#652`,
+    which shipped in the same window for the same reason (a stated deferral precondition had
+    genuinely expired). `#663`, `#664`, `#665` and `#398`'s remaining variant/unit-of-measure scope
+    assigned `P10`, matching `plan.md`'s own stated sequencing and the Discover finding that
+    originally recommended deferring full primitive adoption there.
+  - Production `/api/health` confirmed serving `14200cc` with `db.ok: true`; staging confirmed
+    serving `b80ecc7` the same way.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for operator documentation** (`#633`; PR #635 merged to
+  `staging`). Docs only — no runtime code, no schema change, nothing for `prisma migrate deploy` to
+  apply.
+  - `specs/roadmap.md` (1.77.0) gains the slice's build/merge row (PR #635, including its
+    post-`/validate` fix commit) and adds `#633` — absorbing `#625` and `#629`, folding in
+    `#626` — to P9.2's scope list, which had never carried it.
+  - `CLAUDE.md` (1.20.0) gains a live-testing lesson: a `grep` pattern matched against a page's
+    real rendered HTML can false-negative on a literal `&`/`<`/`>`/`"`/`'` that the renderer
+    escapes, and `validation.md`'s own example command is not exempt — found live when the spec's
+    suggested `grep -c 'Platform & Technical Admin Guide'` printed `0` for both the correct and
+    incorrect case, because the rendered page always carries `&amp;`.
+  - `#625`, `#626` and `#629` moved to `In Review` on Project #2 alongside `#633`, rather than
+    closed — this repo's `#174`/`#214`/`#231` R40 lesson is that absorbed issues aren't closed by
+    keyword, so they track and close together with `#633` on promotion to `main`.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for admin panel operability** (`#627`, `#628`, `#630`, `#631`,
+  `#634`; PR #640 merged to `staging`). Docs only — no runtime code, no schema change, nothing for
+  `prisma migrate deploy` to apply.
+  - `specs/roadmap.md` (1.78.0) gains the slice's build/merge row (PR #640) and a new P9.2
+    scope-list bullet for `#627`/`#628`/`#630`/`#631`/`#634`, absent from that list until now, plus
+    a backfilled row for **PR #637** — the `#633` promotion to `main` — whose own row was never
+    written and was found missing by `npm run sdd:audit` at this slice's `/orient`.
+  - `CLAUDE.md` (1.22.0) gains a live-testing lesson from `/validate`'s R22b: a `grep` for a retired
+    hex literal against a page's saved, rendered HTML can match even when the literal is genuinely
+    gone from every component's source, because `brandStyle()` must legitimately re-embed that exact
+    hex string as a CSS custom-property value for whichever vendor's own primitive happens to equal
+    it — confirmed here for Aheed's `#e8f5e9`/`#f5f5f0`, the same class this file already records
+    for `<1%` and unescaped `&` in rendered HTML.
+  - `#627`, `#628`, `#630`, `#631` and `#634` moved to `In Review` on Project #2; they close to
+    `Done` only on promotion to `main`.
+  - Filed **#641** (P10, non-blocking): the `hover:bg-action/20` replacement for
+    `hover:bg-[#c8e6c9]` is the one colour in `#631` that is not a 1:1 token equivalent, and its
+    render against a genuinely different vendor palette (e.g. SriMart) is still unverified — R22c
+    could not be exercised locally, since a fresh sign-in under a spoofed host is correctly refused
+    by Better Auth's `trustedOrigins` (`403 Invalid origin`, matching `#454`).
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for P9.2 remaining non-operational gaps** (`#644`, absorbing `#94`,
+  `#621`, `#437` code tail, `#505` code half and `#472` in part; PRs #646, #647 merged to `staging`
+  and promoted to `main`). Docs only — no runtime code, no schema change, nothing for
+  `prisma migrate deploy` to apply.
+  - `specs/roadmap.md` (1.79.0) gains this slice's build/merge row (PR #646) and its promotion row
+    (PR #647), a new `#644` P9.2 scope-list bullet, updated `#94`/`#101`/`#437`/`#472`/`#505`/`#541`
+    bullets reflecting their (full or partial) closure, and a backfilled row for **PR #643** — the
+    `#627`/`#628`/`#630`/`#631`/`#634` promotion to `main` — whose own row was never written and was
+    found missing by `npm run sdd:audit` at this stage.
+  - No new `CLAUDE.md` lesson: this Ship + Document pass surfaced two validation-row wording gaps
+    (R21's grep expecting an absolute-looking import path the code correctly uses a relative one
+    for; R2's reference to route-level tests that don't exist as dedicated files), both the same
+    "a validation row is a proxy for its requirement, not the requirement itself" class
+    `specs/sdd-workflow.md` already documents at length — recorded on the roadmap row as an
+    instance, not promoted as a new rule.
+  - **#644**, **#94** and **#621** closed on the `main` merge; **#627**, **#628**, **#630**,
+    **#631** and **#634** (from the prior slice, its own promotion previously undocumented) also
+    closed. All auto-moved to `Done` on Project #2 with no manual reconciliation needed.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **`/document` (final) closeout for storefront & panel accessibility remediation** (`#649`, `#650`,
+  `#651`, `#652`; PR #659 merged to `staging`). Docs only — no runtime code, no schema change,
+  nothing for `prisma migrate deploy` to apply.
+  - `specs/roadmap.md` (1.79.0 → 1.80.0) gains this slice's build/merge row (PR #659) and annotates
+    the **#442** P9.3 bullet with what shipped ahead of it, so accessibility launch validation
+    validates a candidate rather than rediscovering a launch-severity backlog — which is that
+    issue's own stated intent.
+  - **Three wording defects `/validate` found are corrected in the spec, not the code** — the
+    artifact was correct in all three cases. `requirements.md` **R7**'s two clauses were mutually
+    inconsistent: its general clause (`text-black/[1-5]0` returns zero matches) always covered
+    `/40`, while its arithmetic clause was written as if only `/50` were in scope, downstream of
+    `plan.md`'s inventory table undercounting by 5 sites. The real `text-black/60` rise is **15**
+    (21 → 36), not 10. `validation.md` **R10** and **R13** carried grep commands that
+    false-positive on their own subject matter — `grep -c "use server" lib/form-classes.ts` returns
+    1 because the file's doc comment *explains* it is not a `"use server"` file, and R13's
+    `--include=*.ts` (needed to reach `lib/form-classes.ts`) collaterally re-included the generated
+    `runbook/docs.ts` bundle, which quotes this spec's own prose. `build-notes.md` gains an
+    addendum recording all three.
+  - **Two lessons promoted to `CLAUDE.md`**, both from the live `/validate` pass. First: query
+    `VendorDomain` in the environment actually under test before trusting a hardcoded `Host` header
+    — this slice's mandatory two-vendor check hardcoded the `nocaped.com` hostnames, while the dev
+    DB was seeded `localhost:8787` / `srimart.localhost`, so both requests silently redirected to
+    `/coming-soon` with no signal distinguishing "wrong host" from "feature broken". Second: a
+    grep-based validation row proves its claim only when the pattern cannot also match a comment,
+    docstring or generated bundle quoting the very thing being searched for — the same shape as the
+    already-recorded `&`-escaping trap, minus the escaping.
+  - **#649**, **#650**, **#651** and **#652** are `In Review` on Project #2; they close to `Done`
+    only on promotion to `main`.
+  - `ARTIFACT_INDEX.md` / `docs.ts` regenerated to match.
+
+- **Operator documentation: runbook role delivery repaired, guides corrected, every menu item
+  documented** (`#633`, P9.2, `specs/2026-09-06-operator-documentation/`), absorbing `#625` and
+  `#629` and folding in `#626`. `/staff/runbook` was filtering twice against two different audience
+  vocabularies — the page admitted `staff`/`store-admin`, then `RunbookClient` re-filtered for
+  `staff`/`admin` — and since `Array.includes` is exact-element matching, **one of 152 articles
+  rendered** and the UI's own "Admin" tab could never match anything. The approved Store Admin
+  Management Guide reached nobody. Fixed at the root cause rather than the mismatched string: the
+  client's audience filter is gone entirely and the tab list is **derived** from the audiences the
+  delivered documents carry, so a tab exists only when it has documents behind it. The vocabulary
+  now lives once in `lib/runbook-audiences.ts`. Platform-admin material is admitted only when
+  `auth.via === "platform-admin"` (the `#508` pattern), which also gives `/staff/errors` somewhere
+  correct to be documented. **All 18 Admin/Staff menu items now have a per-menu-item section** —
+  Purpose, Who can access it, What you can do, Typical workflow, Important fields and filters,
+  Common mistakes and limitations, and What happens after changes are saved — placed by each page's
+  own gate across the staff playbook, the store admin guide and the platform admin guide.
+  `tests/operator-doc-coverage.test.ts` enumerates routes from the **filesystem** and compares each
+  section's documented permission against the page's real `requireVendorRole` arguments, so a guide
+  that misstates who may open a page fails the suite and a new `/staff` page fails it until
+  documented.
+
+- **Three false capability claims removed from the store admin guide** (`#629`). It told operators
+  they could issue Stripe refunds and invite staff members — neither has ever existed — and that a
+  store admin can assign the Store Admin role, which `lib/repositories/roles.ts` refuses
+  (`Only a platform-admin can grant the Store Admin role`) and the form does not even offer. The
+  guide now states the real process: refunds are issued in the payment provider's own dashboard, and
+  a colleague registers their own account before being granted the Staff role by email. A **fourth**
+  false claim was found during the build and filed as `#634` — delivery fee, free-delivery threshold
+  and minimum order are documented as editable but are written only by `prisma/seed.ts`, the same
+  operability gap `#612` closed for delivery areas. A **fifth** false claim was found at `/validate`:
+  the Bundles section said a store admin sets a bundle's price by hand and that it does not follow a
+  product's own price changes — backwards from reality. `Bundle` has no price column at all; the
+  price shown to a shopper is always the live sum of its products' current prices, exactly as
+  `BundleForm.tsx`'s own on-page copy already said. Corrected to state that, with nothing to set.
+
+- **`/discover` pass on the Admin/Staff portal usability brief** (`docs/research/discovery-log.md`
+  1.3.0). Seven findings, each filed: the staff runbook renders **1 of its 152 articles**, because
+  `app/(admin)/staff/runbook/page.tsx` filters for `staff`/`store-admin` and
+  `components/staff/RunbookClient.tsx` then re-filters the result for `staff`/`admin`, so the
+  approved Store Admin Management Guide reaches nobody and the UI's own "Admin" tab is permanently
+  empty (`#625`); that guide also documents Stripe refunds and staff invitations, neither of which
+  exists anywhere in the code (`#629`); `PanelNav`'s staff tier omits `/staff/payments` even though
+  the page admits STAFF and the hub shows them its card, which `tests/staff-nav-parity.test.ts`
+  cannot see because it compares whole-file href sets (`#626`); `listCategoriesForAdmin` orders
+  globally by `sortOrder` with no `parentId` grouping, so departments and first-children interleave
+  by name and there is no contiguous run of children for an expand/collapse to reveal (`#627`); the
+  report tiles count `REVENUE_STATUSES` while `parseStaffOrdersQuery` can express only the default
+  queue, `all`, or one single status, so a drill-down would contradict its own totals (`#628`);
+  `ProductForm`'s single flat category select cannot express direct-to-department assignment, which
+  both seed paths actively use (`#630`); and three Tailwind arbitrary-value literals hardcode
+  Aheed's brand primitives into shared staff pages, so SriMart staff see the wrong palette
+  (`#631`). Two of the brief's six items — Brand sample data and reduced-motion support — were found
+  **already implemented** and are recorded as such rather than as findings. No runtime code, no
+  schema change.
+
+- **`/document` (final) closeout for the stranded payment sweep** (`#618`; PR #622 merged to
+  `staging`, PR #623 promoted to `main`). `specs/roadmap.md` (1.76.0) gains the slice's build/merge
+  row and its promotion row (the promotion also carried the pending delivery-areas `/document`
+  (final) closeout, PR #617, still waiting on `staging`). `CLAUDE.md` (1.19.0) gains two config
+  lessons live-found at this slice's `/validate`: `readEnv()`'s fallback to `process.env` is
+  per-key, not per-Cloudflare-context, so simulating a secret as "unset" requires clearing it from
+  both `.env` and `.dev.vars`, not `.dev.vars` alone; and a `lib/config.ts` accessor that throws on
+  a missing required-in-production secret makes a caller's own graceful `if (!X)` check unreachable
+  in every built Worker, since `NODE_ENV` is unconditionally `"production"` there — the transferable
+  half of the fix this slice needed for its own R10/R23. `specs/sdd-workflow.md` (2.28.0) gains a
+  Propose-stage lesson: a slice's plan claiming to "absorb" an existing issue number needs that
+  number's actual title checked before it is cited anywhere, found here after `#94` had been
+  mis-cited as "abandoned checkout handling" eight times across three months of roadmap history —
+  the real #94 is unrelated guest-cart retention, and no correctly-numbered issue for the real
+  concern ever existed; corrected going forward, with a comment left on #94 and historical
+  change-log rows left as written. Two Build-time follow-up issues (`#619` batch-cap vendor
+  starvation, `#620` a sweep confirmation being indistinguishable from a webhook one) cross-referenced
+  into `build-notes.md` after turning up unfiled there despite being properly filed and boarded.
+  `npm run sdd:audit` reports zero gaps. Delivery board reconciled: `#618` is **Done**.
+  `ARTIFACT_INDEX.md` / `app/(admin)/staff/runbook/docs.ts` regenerated to match. No runtime code,
+  no schema change, nothing for `prisma migrate deploy` to apply.
+
+### Changed
+
+- **The staff panel's two navigation surfaces now list the same pages.**
+  `components/staff/PanelNav.tsx` omitted brands, customers and payments while the hub at
+  `app/(admin)/staff/page.tsx` omitted bundles, promotions and storefront, so three pages vanished
+  from the chrome the moment a user navigated off the hub and three more were unreachable from it.
+  Each file was individually correct; the defect existed only in the relationship between them, so
+  `tests/staff-nav-parity.test.ts` now pins the two together. `/staff/errors` is reachable from the
+  hub for the first time, gated on `auth.via === "platform-admin"` directly rather than on the
+  page's broader `isAdmin` flag — that flag is true for vendor admins too, who cannot open the page.
+
+### Security
+
+- **A postcode prefix can no longer reach `lib/delivery.ts`'s `RegExp` constructor unvalidated.**
+  That module interpolates the stored prefix straight into `new RegExp(...)`, which was safe only
+  while a hand-authored seed file was the column's sole writer. Making prefixes admin-writable
+  without this would have let a stored metacharacter throw a `SyntaxError` on the checkout path for
+  every shopper of that vendor. `lib/delivery-area-form.ts` validates against an allow-list
+  (`^[A-Z]{1,2}$`) rather than a metacharacter deny-list, so it cannot be outflanked by a character
+  nobody enumerated.
+
+### Fixed
+
+- **`/staff/payments` restored to the staff navigation** (`#626`, folded into `#633`). The page
+  admits STAFF and the hub renders its card to them, but `components/staff/PanelNav.tsx`'s staff-tier
+  branch omitted the link — so it vanished the moment a staff member navigated off the hub, on the
+  page where a shopper's stranded payment gets resolved. `tests/staff-nav-parity.test.ts` could not
+  see this: it compares whole-file href sets, which is the **admin** view, and the staff tier was
+  never compared against anything. It now also derives the expected staff-tier set from the pages'
+  own `requireVendorRole` gates, so a future reallocation between the tiers is self-verifying. That
+  file's docstring, which asserted the staff branch's contents without drawing the conclusion, was
+  corrected to name which surface each block covers.
+
+- **A filter predicate emitting a top-level `OR` was silently dropped on the zero-result recovery
+  rungs.** `fetchSearchCandidates` merged the filter fragment and the search predicate with an
+  object spread, and the `#565` ladder's identity and broad rungs each emit their own top-level
+  `OR` — spread second, so they won. The "on offer" facet is the first filter needing a compound
+  key, and written the obvious way it would have served products that are not on offer while the
+  applied-filter chip still said the filter was active. Fragments now compose through
+  `combineWhere`, which nests into `AND` only on a real key collision, so every non-colliding query
+  keeps exactly the shape it had before. Recorded in `specs/architecture.md` (1.26.0) as a standing
+  rule rather than only a slice note.
+- **The seed's new catalogue fields never reached an already-seeded database.** `seedCatalogue`
+  returns early once a vendor's categories exist, so columns added to the fixture would have
+  reached a from-scratch database and no other — leaving each environment with a different facet
+  set, and a missing facet reading as "no stock" rather than as a bug. Brands and the new facet
+  fields are now applied before that early return. Same failure shape as `#502`.
+
+### Documentation
+
+- **`/document` (final) closeout for delivery areas admin & staff nav reconciliation** (`#612`; PR
+  #615 merged to `staging`, PR #616 promoted to `main`). `specs/roadmap.md` (1.75.0) gains the
+  slice's build/merge row and its promotion row — the promotion also carried two docs-only P2.6
+  milestone-close merges (`/discover` PR #609, `/learn` PR #611) that had reached `staging` but not
+  yet `main`. `CLAUDE.md` (1.18.0) gains a new headless-testing entry: a server action a client
+  component calls directly (`await addToCart(...)`) rather than binding to a `<form>` is curl-drivable
+  too, but as a third, distinct wire shape — a `Next-Action: <id>` header plus a JSON-array body —
+  neither of the two already-documented `$ACTION_ID_<hash>`/`useActionState` shapes apply, since
+  there is no form for either to render into. `npm run sdd:audit` reports zero gaps. Delivery board
+  reconciled: `#612` is **Done**. `ARTIFACT_INDEX.md` / `app/(admin)/staff/runbook/docs.ts`
+  regenerated to match. No runtime code, no schema change, nothing for `prisma migrate deploy` to
+  apply.
+
+- **`/learn` retrospective on P2.6's close** (`docs/research/milestone-retrospectives.md` 1.1.0) —
+  the first entry written under the Discover/Learn phases. All six slices (`#564`–`#569`) shipped
+  and promoted as proposed, none reverted; the one significant scope change (moving AI off the
+  public zero-result search path, per `#570`/`#571`) was caught and reversed pre-ship, a genuine
+  SDD-loop success. The milestone's own commercial hypothesis — that better search/discovery
+  converts more shoppers — remains **unmeasurable**: no analytics instrumentation exists (`#607`).
+  The Workers AI response-shape assumption (`typeof response === "string"`) was disproved twice in
+  this milestone, the second instance (`lib/search-synonym-proposals.ts`, `#583`/`#589`) still
+  unfixed at close. Query latency stayed measured and on-budget throughout (p95 75.1ms → 102.1ms,
+  always under the 400ms target). Filed **`#610`**: no mechanical check currently catches a
+  Discover finding tagged `PROPOSE` that never gets an issue, which is exactly what happened to two
+  2026-09-02 findings this pass had to backfill.
+
+- **`/discover` pass at P2.6's milestone close** (`docs/research/discovery-log.md` 1.2.0). One
+  genuinely new finding: six of `#569`'s seven new facet fields (vegetarian, gluten free, HMC,
+  brand) never reach a product card or detail page — the filter half of the facet feature works,
+  but nothing shows a shopper why a product matched, and the HMC certificate reference/verified
+  date the admin form requires is never surfaced to the shopper the `#239` provenance requirement
+  exists to protect. Filed as `#608`. Also corrects a process gap: two 2026-09-02 findings (a paid
+  order cannot be reduced/substituted/refunded; no analytics instrumentation exists) had carried
+  `PROPOSE` for three days with no issue filed — re-verified still current and filed as `#606` and
+  `#607`. Also fixed a milestone-bookkeeping gap while grounding: `#582`, `#583`, `#599`, `#601` and
+  `#602` had never been assigned the `P02.6` milestone.
+
+- **`/document` (final) closeout for P2.6 slice 6 — P2.6 CLOSED** (`#569`; PR #603 merged to
+  `staging`, PR #604 promoted to `main`). `specs/roadmap.md` (1.74.0) gains the slice's build/merge
+  row and its promotion row, recording a fully clean fresh-context `/validate` (every row checked
+  and passed, no `/fix` round needed) — including a first-ever live end-to-end drive of
+  `/staff/brands`'s create/rename/set-image-key actions and the duplicate-name unique-violation
+  path, and a re-measurement showing the roughly-tripled facet probe set still comfortably under the
+  400ms API target. Marks **P2.6 — Search & AI shopping as CLOSED**: all six slices (#564–#569)
+  shipped and promoted; the milestone's eleven remaining open follow-ups (two pre-existing/adjacent,
+  nine filed across slices 3–6) stay open, tracked individually rather than blocking the close — see
+  `specs/roadmap.md`'s closing row for the full accounting. Also found and fixed a milestone
+  bookkeeping gap: five of those follow-ups (`#582`, `#583`, `#599`, `#601`, `#602`) had never been
+  assigned the `P02.6` milestone at all. `CLAUDE.md` (1.17.0)
+  gains a new Windows-shell entry: a `gh` string argument starting with `/`, run from Git Bash, gets
+  silently rewritten to a Windows path by MSYS's path conversion before `gh` ever sees it — caught
+  because it had already corrupted `#602`'s own title (`/staff/search-synonyms…` became `C:/Program
+  Files/Git/staff/search-synonyms…`), fixed via `gh issue edit` with `MSYS_NO_PATHCONV=1`.
+  `npm run sdd:audit` reports zero gaps. Delivery board reconciled: `#569` is **Done**; `#582`,
+  `#583`, `#599`, `#601`, `#602` confirmed at Backlog/`P2.5`. `ARTIFACT_INDEX.md` /
+  `app/(admin)/staff/runbook/docs.ts` regenerated to match. No runtime code, no schema change,
+  nothing for `prisma migrate deploy` to apply.
+
+- **`/document` (final) closeout for P2.6 slice 5** (`#568`; PR #597 merged to `staging`, PR #598
+  promoted to `main`). `specs/roadmap.md` (1.73.0) gains the slice's build/merge row and its
+  promotion row, recording the post-`/validate` fix (a chip rendered for a category slug that never
+  resolved, because the page conditioned the query's `categoryIds` on resolution but not the value
+  handed to the chip row) and a post-promotion live finding: `/api/search/suggest`'s
+  `Cache-Control: public, max-age=60` header does not actually get the route cached at Cloudflare's
+  edge — six requests across two vendor hosts on staging never once returned a `cf-cache-status` or
+  `Age` header — filed as `#599` rather than patched as a hotfix, since the requirement's actual
+  security concern (cross-tenant leakage) does not occur. `CLAUDE.md` (1.15.0) gains a new
+  "Cloudflare edge caching of Worker routes" section recording that as a transferable lesson.
+  `specs/sdd-workflow.md` (2.27.2) records a recurring `validation.md` trap — five rows in this one
+  slice failed their literal `grep` only because a file's own explanatory comment contained the
+  string the grep was told to treat as evidence, all confirmed absent from real code by mechanism.
+  `npm run sdd:audit` reports zero gaps. Delivery board reconciled: `#567`/`#568` are **Done**, `#599`
+  filed at Backlog/`P2.5`. `ARTIFACT_INDEX.md` / `app/(admin)/staff/runbook/docs.ts` regenerated to
+  match. No runtime code, no schema change, nothing for `prisma migrate deploy` to apply.
+
+- **`/document` (final) closeout for P2.6 slice 4** (`#567`; PR #592 merged to `staging`, PR #593
+  promoted to `main`). `specs/roadmap.md` (1.72.0) gains the slice's build/merge row and its
+  promotion row, recording the post-`/validate` fix (the AI pre-pass never actually enriched
+  anything live, because Cloudflare's real reply shape didn't match the `typeof response ===
+  "string"` assumption) and the live verification performed against `npm run preview` with real
+  Workers AI credentials. `CLAUDE.md` (1.14.0) gains a new "Workers AI" section recording that
+  shape mismatch as a transferable lesson — the same failure class already recorded there for
+  Prisma driver error codes — and flags that `lib/search-synonym-proposals.ts` (`#566`) likely
+  carries the identical unfixed assumption, tracked on `#583`. `#588`–`#591` (this slice's deferred
+  follow-ups) assigned the `P02.6` milestone, which they were missing. `npm run sdd:audit` reports
+  zero gaps. Delivery board reconciled: `#567` is **Done**. `ARTIFACT_INDEX.md` /
+  `app/(admin)/staff/runbook/docs.ts` regenerated to match. No runtime code, no schema change,
+  nothing for `prisma migrate deploy` to apply.
+
+- **`/document` (final) closeout for P2.6 slice 3** (`#566`, `#396`, `#580`, `#572`, `#578`; PR #585
+  merged to `staging`, PR #586 promoted to `main`). `specs/roadmap.md` (1.71.0) gains the slice's
+  build/merge row and its promotion row, recording both `/fix` passes (a real "Shop your list"
+  alias-blindness bug, and a missing unit test for `SYNONYM_LOAD_LIMIT`) and the live verification
+  performed against `npm run preview` and the dev Neon branch. `CLAUDE.md` (1.13.0) gains a new
+  bullet on its headless-server-action-testing section: a `useActionState`-bound form carries a
+  different hidden-field shape (`$ACTION_REF_N`/`$ACTION_N:0/1`/`$ACTION_KEY`) than the plain
+  progressive-enhancement pattern already documented there, discovered driving
+  `/staff/search-synonyms` end-to-end with no browser. `npm run sdd:audit` reports zero gaps.
+  Delivery board reconciled: `#566`/`#396`/`#580`/`#572`/`#578` are **Done**. `ARTIFACT_INDEX.md` /
+  `app/(admin)/staff/runbook/docs.ts` regenerated to match. No runtime code, no schema change,
+  nothing for `prisma migrate deploy` to apply.
+
+### Added
+
+- **Search suggestions as you type, and a filter surface a shopper can steer** (`#568`, `#512`,
+  P2.6 slice 5). Typing in the header search box now suggests matching products, departments and
+  approved synonym terms, ordered by the same relevance-and-availability ranking the results page
+  uses (`#564`). Applied filters are shown as chips above the results and can be removed one at a
+  time or cleared in one action, on both `/search` and `/categories/[slug]`. Search results can be
+  narrowed to a department **without losing the query** — `/search?q=rice&category=world-foods`
+  applies both, where previously drilling into a category meant navigating away and starting the
+  search again. On a narrow viewport the filters collapse into a disclosure panel instead of
+  pushing the products down the page.
+  **Filter toggles now reflect the current results**, not just the vendor: a speciality that no
+  product in the current search or department carries is not offered. Each toggle is computed with
+  every speciality filter excluded, so ticking one never hides the others — and an active filter
+  can always be unticked.
+  **Everything here still works with JavaScript disabled.** The filter panel is a native
+  disclosure rather than a scripted drawer, chips and drill-down are plain links, and the search
+  box remains a normal form that submits; suggestions are strictly additive. The suggestion
+  endpoint is bounded by a minimum query length, a hard result cap, a client-side debounce and a
+  short edge-cacheable response rather than a per-request throttle row, and it reaches no AI and
+  writes no search-query log row.
+  Also fixes the Apply button rendering a hardcoded green (`#512`) — it ignored per-vendor
+  branding, so SriMart showed Aheed's colour, and its hover shade pre-dated the WCAG AA contrast
+  darkening. No schema change and no migration.
+
+- **"Shop your list" now understands how people actually write a shopping list** (`#567`, P2.6
+  slice 4). An AI pre-pass turns pasted free text into structured items — name, quantity, pack
+  size, brand — which are handed to the **existing, unchanged** matcher, expanded through `#566`'s
+  synonym dictionary. Spelling mistakes, Desi and transliterated terms and brand names now reach a
+  product; `2kg atta` no longer finds nothing.
+  **The AI interprets words; it never picks a product.** Every candidate still comes from the same
+  single vendor-scoped catalogue query against real rows, so a model that invents a product name
+  can at worst fail to match — it cannot produce a match. The model's reply is validated rather
+  than trusted: each item must claim a line the shopper actually wrote, and any line it doesn't
+  claim keeps its deterministic parse, so a broken reply degrades line by line.
+  **A pack size we can't fill exactly is now the shopper's choice, not ours.** `2kg atta` against a
+  shop stocking 1kg, 5kg and 10kg bags asks which size rather than resolving — including when only
+  one product matches the name, which previously would have added a 5kg bag silently. `5kg basmati
+  rice` still resolves outright. No unit model is invented (`#398` is untouched).
+  **It degrades instead of failing.** Missing credential, throttled caller, oversized submission,
+  upstream error or a 6-second timeout all fall back to exactly the matcher this feature shipped
+  with, never to an error page. Cost is bounded per caller (a new `ListNormalisationAttempt`
+  counter, hashed IP, the same shape as the order-lookup throttle), per submission, and per call.
+  `specs/architecture.md` (1.24.0) records why this is a deliberate, conditioned exception to
+  "AI never sits on a public request path" (`#571`) rather than a relaxation of it.
+
+- **A curated search synonym dictionary, so shoppers find the shelf using the word they actually
+  use** (`#566`, closing `#396`, P2.6). New vendor-scoped `SearchSynonym` model, staff-editable at
+  **`/staff/search-synonyms`**, seeded with the Desi/transliteration keyword set — bhindi/okra,
+  haldi/turmeric, keema and qeema/minced meat, atta/chapati flour, dhania, jeera, mirch, chana,
+  aloo, baingan, methi, karela.
+  **Expansion, never replacement.** A query becomes term *groups* (`lib/search-expansion.ts`) —
+  `{ term, variants }` with the shopper's own word always at `variants[0]` — and a group is
+  satisfied by any variant. That makes the guarantee a property of the type rather than a promise
+  in a comment, and `@@unique([vendorId, alias])` bounds a group at two variants, so the predicate's
+  size is a function of the query rather than of how large the dictionary grows. Ranking
+  (`lib/search-ranking.ts`) computes tiers over groups too, so an alias-matched product ranks as a
+  name match instead of falling to a description-only tier; tier 0 still uses the original typed
+  query. With an empty dictionary the `where` is byte-identical to the one `#564` built.
+  **AI proposes, humans approve.** A store admin can ask the model to read this shop's own failing
+  searches and suggest mappings; every suggestion lands `PENDING` and reaches a shopper only once
+  approved. The call is staff-triggered and offline — never on the public `/search` path (`#571`),
+  over the same Cloudflare REST transport the image pipeline already uses, with no new credential,
+  degrading to a message when unconfigured. The **"Shop your list"** matcher reads the same
+  dictionary, so an approved alias works identically in both.
+
+### Fixed
+
+- **Search recovery now fires on a thin result, not only an empty one** (`#580`, P2.6). `#565`'s
+  ladder ran only when a search returned *zero* candidates, so a one-word query such as `haldi` that
+  happens to appear in one unrelated product's description returned exactly one tangential result
+  and no recovery at all — which reads as "they do not stock this" just as firmly as an empty page,
+  while consuming the one mechanism built to prevent that conclusion.
+  A result is now **thin** when candidates came back but none matched on *name*
+  (`hasNameTierCandidate`, exported from the ranking module so recovery and ordering share one
+  definition of "relevant"). Such a result **keeps every product it found** and gains suggestions
+  beside them — the dictionary's canonical term, the typo correction, and the departments. The
+  zero-result ladder replaces a result set, which is right for nothing-found and wrong for
+  found-something-tangential; recovery must never subtract. `SearchQueryLog` gains
+  `directNameMatch`, because `directResultCount` and `recoveryRung` together could not tell a thin
+  result from a good one — and those are the rows the synonym proposals read.
+- **Single characters and bare punctuation are no longer search terms** (`#572`, P2.6). Measured on
+  the dev catalogue, `e` matched **2,026** of roughly 2,000 products and `a` matched 2,024, because
+  every term is satisfied by name *or* description and a one-letter substring appears in nearly
+  every description — so the query returned the whole catalogue in an arbitrary order, and was also
+  the only thing that reliably triggered the truncation notice. A bare `-` likewise survived
+  tokenisation, so `rice - basmati` demanded a product whose text contained a literal hyphen.
+  `parseSearchQuery` now drops tokens shorter than two characters and tokens carrying no letter or
+  digit; a query that parses to nothing tells the shopper it is too short rather than claiming the
+  catalogue holds no match. `lib/search-query.ts` and `lib/shopping-list.ts` now diverge here
+  deliberately — a search term is a recall instrument, a list line is something the shopper wrote
+  and which passes a review step — and the test pinning them together is narrowed to say so.
+- **"Shop your list" now finds a product through an approved alias, not only through the shopper's
+  literal word** (`#566`, found live at `/validate`). The candidate query already widened itself
+  with the alias dictionary, but the separate per-line matching step that decides `matched` /
+  `ambiguous` / `unmatched` re-checked each candidate against the unexpanded word, so a line whose
+  only match came from an alias (`dhania`, approved to `coriander`) was silently reported as
+  unmatched even though the identical term on `/search` found the product. `resolveLines` now
+  widens each line's terms into the same term groups search uses before matching, so both surfaces
+  read the dictionary identically, as this same changelog entry already claimed above it did.
+
+- **Storefront search now matches multi-word queries, and ranks results by relevance instead of
+  recency** (`#564`, P2.6). `searchProducts` passed the whole trimmed query to a single `contains`,
+  so `basmati rice` matched only that exact substring in that exact order — every multi-word or
+  out-of-order query returned **nothing**, before typos or synonyms entered the picture. Confirmed
+  live in both directions against the dev catalogue: the old predicate returns 0 rows for
+  `rice basmati`, the new one finds *Basmati Rice 5kg*.
+  New **`lib/search-query.ts`** tokenises (capped at 10 terms so a pasted paragraph cannot build an
+  unbounded predicate) and the query becomes an `AND` of one clause per term, each satisfied by
+  `name` **or** `description`. SQL-level recall is deliberately unchanged; what changed is that
+  *every* term must now be satisfied by something. Kept separate from `lib/shopping-list.ts` — they
+  must differ on leading quantities (`5kg basmati rice` is one product, `2 apples` is two) — with a
+  test pinning them together on every quantity-free input.
+  New **`lib/search-ranking.ts`** ranks over five tiers. **Relevance dominates availability
+  deliberately:** an out-of-stock product whose name matches every term outranks an in-stock one
+  that matched only through its description, because burying an out-of-stock staple reads to a
+  grocery shopper as "they do not sell this", and `inStockOnly` is a filter they already have.
+  `searchProducts` no longer uses `findPage`: a keyset cursor's ordering key has to *be* the sort
+  key, and relevance is computed rather than stored. It fetches a bounded candidate set, ranks it
+  purely, slices the page, and only then looks up tier pricing — for the twelve rows rendered, not
+  all two hundred candidates. `findPage` is unchanged and still serves every browse and category
+  listing. **`specs/architecture.md` (1.22.0) carries the one scoped exception** to the keyset rule,
+  argued from that rule's own rationale — `OFFSET` is banned because it degrades linearly, and a
+  bounded query does not — and explicitly forbids citing itself for offset pagination over an
+  unbounded query.
+  `ProductPage` gains **`truncated`**, set by a **sentinel row** (fetch 201, rank 200), not by the
+  cap being reached: "cap reached" would **lie** when the catalogue holds exactly 200 matches —
+  nothing missing, yet the shopper told the list is incomplete. A test asserts the exactly-200 case
+  specifically, since it is the only one that distinguishes the two semantics.
+  The row-to-summary mapping is extracted to a shared `toProductSummary`, so the keyset and ranked
+  paths cannot drift into returning different fields.
+  Search p95 re-measured at **67.6 ms** against a 400 ms target and recorded in `nfr-baseline.md`
+  (1.3.0) beside the previous figure — **not** as evidence the new query is faster: four untouched
+  paths moved in the same run and one got slower by more than search got faster.
+  Two spec errors were corrected at Build from real measurement: `plan.md` guessed that a broad word
+  such as `chicken` could exceed the candidate cap (it matches **3** products; `e` matches 2,026),
+  and `validation.md`'s optional row named `chicken` directly — so a validator following it
+  literally would have recorded the truncation notice as unreachable when it is not. Low-information
+  terms are tracked as **`#572`**.
+
+### Changed
+
+- **The DB dependency pins are now exact, and `CLAUDE.md` finally describes the ones actually
+  running** (`#491`, P9.2). Filed as *drift*; it was not. Both pins moved in one deliberate commit —
+  `ac3f0d6` (2026-08-14), the Cloudflare connection-exhaustion fix that introduced `lib/db.ts`'s
+  hybrid `getPrisma()`/`getPrismaWs()` strategy — which updated `CLAUDE.md`'s hybrid-driver section
+  but **not** its pin paragraph. So the lockfile was current and the doc was stale for three weeks,
+  and because both became **caret** ranges, `npm install` could have moved them again at any point.
+  Ratified rather than reverted: reverting would have undone the dependency half of a real
+  production fix. `@neondatabase/serverless` **1.1.0**, `@prisma/adapter-neon` **7.9.1** and
+  `@prisma/client` **6.19.3** are now declared with no range operator. **No runtime code changed** —
+  these are the versions already installed.
+  New **`tests/dependency-pins.test.ts`** asserts the installed version *and* the absence of a range
+  operator, because checking only the version passes right through a re-loosened pin that still
+  resolves correctly today — precisely the state the repo was in. Proven non-vacuous by mutation.
+  `CLAUDE.md`'s paragraph carried **four** false claims, not one: both pins; `@cloudflare/workers-types`
+  "must match wrangler's major (v5)" (false in both halves — types are `5.20260804.1` against
+  wrangler `4.119.0`, now recorded as an observed pairing rather than an asserted rule); and the
+  suite size `74/874`, measured at **77/903**. That last one mattered most: the file count is taught
+  as *the tell* for the silent worker-startup trap, so a stale number **disabled the detection it
+  exists to provide**.
+  `@prisma/adapter-neon` remains a full major ahead of `@prisma/client`; that straddle is deliberate,
+  now recorded, and tracked by `#560`. Nothing in the toolchain can warn about it — adapter-neon@7
+  declares **no `peerDependencies` at all**, so npm has nothing to check the client against.
+  The lockfile **had** to be re-synced: it mirrors declared specifiers, all eight workflows run
+  `npm ci`, and `npm ci` refuses to install when manifest and lockfile disagree. Verified with a
+  real clean install; zero resolved versions moved anywhere in the tree.
+
+### Added
+
+- **A search that finds nothing now tries three further, deterministic attempts before giving up,
+  and every search submission is logged** (`#565`, P2.6 slice 2). `searchProducts` required every
+  parsed term to match `name` **or** `description` (`#564`'s tokenised `AND`) — correct recall for a
+  well-formed query, and no help at all for a typo, an over-specific query, or a term the catalogue
+  genuinely doesn't have.
+  When the direct fetch returns zero candidates, up to three rungs now run in order, stopping at the
+  first that yields a result: **typo correction** (re-runs the identical direct predicate with each
+  uncorrectable-as-typed term replaced by its nearest token in the vendor's own product-**name**
+  vocabulary, by Levenshtein distance within a length-scaled budget — `0` at length ≤3, `1` at 4–6,
+  `2` at 7+); **identity match** (loosens `AND` to `OR`, narrowed to `name`/category `name`,
+  `description` dropped); **broad match** (`OR` across `name`/`description`, the widest net this
+  codebase can express without `pg_trgm`/raw SQL). A term already in the vendor's vocabulary is
+  **never** "corrected" — that is what stops a correctly spelled term with simply no matching
+  product from being silently turned into a different word. All three rungs share one fetch/cap/
+  sentinel helper with the direct search, so `truncated` means the same thing regardless of which
+  rung supplied the results. New **`lib/search-typo-correction.ts`** (pure, no I/O).
+  If all three rungs come up empty, `app/(storefront)/search/page.tsx` shows relevant categories
+  plus one link per individual search term instead of a bare "No products found". `ProductPage`
+  gains **`directResultCount`** and **`recovery`**, additive, always `0`/`null` outside `search()`.
+  New **`SearchQueryLog`** model records every search submission — vendor-scoped, hashed IP,
+  **no user link by deliberate decision** (`#570`): a search history tied to a signed-in user is
+  personal data that would put it in `lib/repositories/data-rights.ts`'s export/erasure scope, and
+  the curation purpose (which queries recur) doesn't need one. 90-day retention sweep, same
+  low-probability piggyback as `error-events.ts`/`order-lookup-rate-limit.ts`. Logged only on the
+  **first page** of a search — a shopper paginating an already-successful search isn't a gap.
+  **No AI on the request path** — ruled out at a second `/propose` (`#571`): `/search` is public and
+  unauthenticated with no middleware layer on this stack to rate-limit it, and the AI quota is
+  shared with the product-image pipeline. AI stays staff-triggered and offline, in `#566`.
+  **The generated migration proposed `DROP INDEX` for all three hand-authored `pg_trgm` indexes
+  again** — the same `#508` drift a new, unrelated model has now triggered twice. `--create-only`
+  plus reading the SQL caught it before it applied; verified live against the dev database that all
+  three indexes and the new table both exist.
+
+- **A refused Stripe payment binding is now recorded, discoverable and recoverable** (`#454`,
+  P9.2). `#429` made the webhook fail closed, correctly — but a refusal against a *genuine* payment
+  leaves a charged shopper's order stuck `PENDING_PAYMENT`, and the only trace was a
+  `console.error`. That route returns 200 and nothing throws, so `onRequestError` never fires and
+  **no `ErrorEvent` row is written** — `/staff/errors` could never have shown one.
+  New **`PaymentBindingRefusal`** model records one row per loud refusal with both what the event
+  claimed and what the order stored; `already-processed` stays silent, as a duplicate delivery is
+  Stripe working as intended. This is a table rather than a query over existing state because
+  `PENDING_PAYMENT` plus a non-null `providerReference` cannot separate an abandoned checkout from a
+  never-arrived webhook (`#101`) from a refused binding, and only the last must **not** be re-driven.
+  New vendor-scoped **`/staff/payments`** lists them with two actions. Reconciliation asks the
+  provider about the order's **own stored** session — never the id the refused event claimed, which
+  is the value under suspicion. Recovery builds a binding from the provider's response and calls the
+  **unchanged** `confirmPayment`, so it introduces **no second path to `CONFIRMED`** and a refusal
+  that was correct cannot be confirmed away by a staff click.
+  `lib/repositories/orders.ts` is **byte-identical** — persistence sits in the
+  `getWebhookOrderService()` facade and never rethrows, since failing the webhook to record a
+  forensic row would make Stripe retry an event that can never succeed.
+  `PaymentService` gains **`retrieveSession()`**, its first read method (raw `fetch`, no `stripe`
+  SDK); the stub never reports a session paid. ADR-005 → 1.7.0 records why recovery reuses the
+  existing binding, and that **refunds and the capture method remain undecided**.
+  **The generated migration proposed `DROP INDEX` for all three hand-authored `pg_trgm` indexes** —
+  the `#508` drift, triggered by a model with no relationship to `Order` or `User`. `--create-only`
+  plus reading the SQL caught it before it applied; the drops were removed and all three indexes
+  verified still present on the dev branch.
+
+### Documentation
+
+- **`/document` closeout for `#565`.** PR #577 merged to `staging` (`0d0d10c`); `deploy-staging`
+  and `deploy-docs-internal` both completed success. `specs/roadmap.md` 1.70.0 gains this slice's
+  own build/merge row. `npm run sdd:audit` reports zero gaps. `#565` moved to **In Review** on
+  Project #2; **P2.6 does not close on this merge** — four slices remain (`#566`–`#569`).
+  `build-notes.md` needed a correction, not just confirmation: the previous `/validate` had found
+  the row claiming R20's unit-test half was already covered was itself wrong (it pointed at a test
+  proving something else), alongside a real, CI-blocking defect (`plan.md`'s front-matter `summary`
+  over the KMS schema's 300-character cap) invisible to `lint`/`typecheck`/`test`/`build`. Both are
+  fixed on the merged branch; the length-cap trap is now recorded in `CLAUDE.md` (1.12.0) alongside
+  its sibling front-matter traps. Filed **#578** to track the live-database verification `build-
+  notes.md` still discloses as not done (the ladder's rungs, the search-log write, the typo-
+  correction cost budget against the real catalogue), added to Project #2 at Phase `P2.5`/Backlog.
+
+- **`/document` closeout for the `#491`/`#564` promotion to production.** PR #575 promoted
+  `staging` to `main` (merge `3ef85a3`), carrying `#491`'s and `#564`'s already-merged feature
+  branches and their own, already-completed Document (final) closeouts — neither carries a
+  migration. `deploy-production` and `deploy-docs-internal` both completed success; production
+  `/api/health` confirmed serving `3ef85a3` with `db.ok: true`. `#491` and `#564` both closed on the
+  `main` merge, their Project #2 items auto-moving to **Done**. `specs/roadmap.md` 1.69.0 gains the
+  promotion's own row. This closeout has no accompanying slice — `#564`'s own Document (final) had
+  already merged before this promotion existed, so there was no next slice's branch to carry the
+  row forward onto; recorded via its own doc-only PR instead.
+- **`/document` closeout for `#564`.** PR #573 merged to `staging` (`5a79675`); `deploy-staging` and
+  `deploy-docs-internal` both completed success. `specs/roadmap.md` 1.68.0 gains this slice's own
+  build/merge row, a new **P2.6 — Search & AI shopping** phase entry (six slices, `#564`–`#569`,
+  sequenced ahead of `P9.2`–`P9.4` by decision at `/propose`), and a **board-limitation note**: the
+  delivery board's Phase field predates P2.6 in its fixed option list, so P2.6 items park on Phase
+  `P2.5` rather than reuse the "stays on `P8`" convention every later inserted phase already uses.
+  `npm run sdd:audit` reports zero gaps. `#564` moved to **In Review** on Project #2; **P2.6 does not
+  close on this merge** — five slices remain (`#565`–`#569`), all on the board at `Backlog`. No
+  correction to `build-notes.md` was needed — everything it recorded held up live at `/validate`,
+  including the one row (`R19a`'s optional system-level check) it had flagged as not walked at Build.
+- **`/document` closeout for `#491`, plus the outstanding `#454` promotion carry-forward.**
+  PR #562 merged to `staging` (`1564009`); `deploy-staging` completed success. `/validate` ran from
+  a fresh context and confirmed all 20 requirements live, including reproducing the exact 169-line
+  post-`npm ci` typecheck failure the build notes described (resolved by `db:generate`) and the
+  mutation check's real fail-then-pass cycle. `specs/roadmap.md` 1.67.0 gained this slice's own
+  build/merge row **and** the still-missing row for **PR #559** (`staging -> main`, merge `6801879`,
+  closing `#454`) — `npm run sdd:audit` now reports zero gaps, where before this closeout it had not
+  yet been run against that promotion. `#491` moved to **In Review** on Project #2; `#454` was
+  already **Done**, auto-closed on the `main` merge. **`specs/sdd-workflow.md` 2.27.1 records a
+  seventh instance of the `validation.md`-row-stricter-than-its-requirement trap**: R12a demanded a
+  doc section literally never contain two old numbers, when the paired requirement (mirroring a
+  sibling's own historical-citation carve-out) only asked that the section state the *current* one —
+  the doc content was correct throughout, the row's wording was not.
+- **`/document` closeout for `#454`.** PR #557 merged to `staging` (`656b8e6`); `deploy-staging` and
+  `deploy-docs-internal` both completed success, and staging's `/api/health` confirmed serving
+  `656b8e6`. `/validate` regained live browser access mid-session and re-ran every row that could be
+  exercised live against the real dev Neon branch and a real Stripe test-mode account rather than
+  mocks — including the hardest row, `R15 (positive)`: a second fixture order paid with a real test
+  card through hosted Checkout, with no webhook listener running, correctly reconciled and recovered
+  to `CONFIRMED` with exactly one new `OrderStatusEvent` and one confirmation-email attempt. A forged
+  cross-tenant refusal id performed no read and no write. One planned live check (replaying a session
+  under a spoofed `Host` header to simulate a second local vendor domain) was correctly rejected by
+  Better Auth's own origin validation before it could reach the app's vendor-scoping at all; the same
+  scoping guarantee was confirmed live a different way instead. `specs/roadmap.md` 1.66.0 gained the
+  build/merge row citing `PR #557`; `npm run sdd:audit` reports zero gaps. `#454` moved to
+
+  a no-JS server-action form via `curl` with its `$ACTION_ID_<hash>` hidden field, and why a
+  repo-root scratch script's type error fails the whole `npm run preview` build.
+
+- **`/document` closeout for `#550`.** PR #552 merged to `staging` (`6de0131`) and PR #553 promoted
+  to `main` (`1819c0e`); `deploy-staging`, `deploy-docs-internal` and `deploy-production` all
+  completed success, and both environments' `/api/health` were checked live — production serving
+  `1819c0e` with `db.ok: true`. `specs/roadmap.md` 1.64.0 gained **three** change-log rows: the slice
+  itself, its promotion, and **PR #549** — the previous closeout's own promotion, which was pending
+  carry-forward because a closeout's promotion is always one loop behind the work it documents.
+  `#550` closed and moved to **Done** on Project #2.
+  **`#551` correctly stayed open**, verified before the merge rather than after:
+  `gh pr view 553 --json closingIssuesReferences` returned exactly `[550]`. That check ran because a
+  promotion PR is precisely where the `#174` closing-keyword accident fired, and a branch scan for
+  `close`/`fix`/`resolve` adjacent to `#551` ran over both the commit messages and the tracked files
+  first — the commit-message surface being the one `closingIssuesReferences` cannot see.
+  **The board's Phase field still cannot express P9** (`#267`), so both issues sit with Phase unset;
+  and `#546` stands — the `phase:P_` / `gate:_` labels `CLAUDE.md` requires have never existed, so
+  neither PR could carry them.
+  **Nothing here has been exercised yet.** Both phases are written and unrun; the first real
+  milestone close is P9's, which is also the point at which `#551`'s deferred `sdd:audit` matcher
+  becomes writable against an actual entry.
+
+- **Two new strategic phases added to the SDD workflow: `/discover` and `/learn`** (`#550`). Both sit
+  **outside** the per-slice delivery loop and run on the **milestone**: invocable at any time, and
+  automatic at milestone close in the order Discover then Learn, so the retrospective can react to
+  what discovery surfaced rather than re-derive it. **Discover** is forward-looking — unowned
+  customer problems, opportunities, UX friction, operational gaps, risks, assumptions, market
+  observations and technical constraints — and its defining step is classifying every candidate as
+  *already implemented* (cite the file), *already tracked* (cite the issue and phase, including
+  deliberate deferrals), or *genuinely unowned*, because presenting a filed issue as a discovery is
+  what would discredit the log. **Learn** is the retrospective — delivered versus promised,
+  assumptions held or disproved or **still untested**, what emerged that nobody planned for, and
+  what would have found it earlier — with the standing rule that where no measurable evidence
+  exists it says so rather than reaching a conclusion anyway.
+  New: `specs/sdd-workflow.md` 2.27.0 (the two stages, the milestone-close sequence, and a second
+  diagram for the phases outside the loop), `.claude/commands/discover.md`,
+  `.claude/commands/learn.md`, and three KMS-registered artifacts under `docs/research/` —
+  `README.md` (what belongs here and, more usefully, what belongs in the roadmap, an ADR or the
+  design system instead), `discovery-log.md` (seeded with the first pass's three genuinely unowned
+  findings) and `milestone-retrospectives.md` (template only; **P8 is deliberately not backfilled**,
+  since a retrospective reconstructed from the change log months later is exactly what the template
+  forbids). Edited: `/document` step 8 and `/orient` step 7 wire the phases into the existing loop,
+  and `CLAUDE.md` records them alongside the four gates.
+  **Neither phase is a gate, and that is deliberate** — evidence a merge depends on gets written to
+  pass rather than to be true. Nothing either phase produces is approved scope; findings reach the
+  roadmap through `/propose` and code through `/spec`. The one rule carried over from this repo's
+  own history: **a lesson recorded only in the retrospective has not been promoted** — durable
+  lessons go to `CLAUDE.md`, the workflow doc, a test or a CI check, and the entry must name where.
+  **Gate 1 was applied retroactively** — the human directed the change, the implementation was
+  written, and `#550` plus `specs/2026-09-02-sdd-discover-learn-phases/` were then written against
+  the built artifact. Disclosed in the plan and the build notes rather than back-dated, since a spec
+  that reads as though it preceded its implementation is its own hazard. **`#551` records the one
+  deliberately deferred piece**: extending `npm run sdd:audit` to report a closed milestone with no
+  retrospective entry, held until the milestone-close process has actually run once, so the matcher
+  is written against a real entry rather than a template.
+
+- **`/document` closeout for `#539`.** PR #544 merged to `staging` (`06b5fb1`) and PR #545 promoted
+  to `main` (`061e389`); both deploys confirmed complete and both environments' `/api/health`
+  checked live. `specs/roadmap.md` gained **three** change-log rows — the slice itself plus the two
+  promotions that were pending carry-forward (**PR #543**, the #537/#473 promotion, and **PR #545**)
+  — and `npm run sdd:audit` now reports zero gaps. **`#539` closed and moved to `Done`** on Project
+  #2; the board carries nothing in `In Progress` or `In Review`.
+  **R15 is the row worth recording, because it could not pass before merge and did not have to be
+  taken on trust.** `deploy-staging` triggers only on a push to `staging`, so the first run of the
+  modified workflow is the one the merge produces. Both deploy paths then showed the gate actually
+  gating, on timestamps rather than inspection: staging run `33613070598` has `quality` completing
+  at `09:16:31Z` and `deploy` starting at `09:16:34Z`; production run `33614955500` has `09:36:57Z`
+  and `09:37:00Z`. Three seconds apart, in order, twice.
+  Two new issues filed from what Ship surfaced, both on the board: **`#546`** — `CLAUDE.md`'s gates
+  section requires every PR to carry `phase:P_` and `gate:_` labels, and `gh label list` shows those
+  labels have **never existed**, so the instruction is unsatisfiable rather than merely unobserved
+  (the last four PRs carry no labels at all). **`#547`** — a Project #2 automation moves items to
+  `In Progress` when a PR referencing them opens, silently undoing the `In Review` state that the
+  `Done`-means-production semantics depend on; observed live when opening PR #543 flipped #537 and
+  #473 out of `In Review`.
+  Two traps recorded while cheap. `CLAUDE.md` (Windows section): **`npx vitest run` exits 0 while
+  whole test files never execute** when run concurrently with another heavy build — the forks pool
+  times out starting workers and those files count as *unhandled errors*, not failures. Measured on
+  this slice: `64 files / 784 tests, 10 errors, exit 0` concurrently versus `74 / 874` alone. The
+  tell is the file count, not the exit code. `specs/sdd-workflow.md` (Spec section): a fourth
+  instance of the absence-grep trap, whose new wrinkle is that **one authored sentence becomes three
+  or four grep matches** once `kms:build-index` and `kms:assemble:internal` copy a spec's prose into
+  generated files — so an absence-grep must be scoped to the directory that would hold the defect.
+
+### Fixed
+
+- **`#539` — the staging deploy path is gated, and its own comment becomes true**
+  (`specs/2026-09-02-staging-deploy-gates/`). `.github/workflows/deploy-staging.yml` ran **no** lint,
+  typecheck, test, format or KMS check: on a push to `staging` it went straight to build, migrate and
+  deploy. That was deliberate, and the file said so — its justification was that `gates` had already
+  run those checks on the pull request that produced the merge.
+  **The reasoning was sound and its premise was unenforced.** `gates` triggers `on: pull_request`, so
+  a commit reaching `staging` without a PR never runs it — and nothing stopped one. The
+  `protect-main` ruleset's condition is `~DEFAULT_BRANCH`, which resolves to `main` and nothing else;
+  there was no ruleset and no classic protection on `staging` at all. A direct push therefore
+  deployed to `staging.aheedfoodcentre.nocaped.com`, running migrations against the staging database
+  along the way, having executed no check of any kind.
+  **Both halves are now closed, because neither subsumes the other.** A new **`protect-staging`**
+  repository ruleset (`refs/heads/staging`, `pull_request` with zero required approvals,
+  `non_fast_forward`, `deletion`, no bypass actors, `active`) makes a PR mandatory, so `gates`
+  cannot be skipped — this is the half that makes the workflow's own comment a checkable claim
+  rather than an assumption. `deploy-staging.yml` additionally gained a `quality` job calling
+  `quality.yml` with `kms_blocking: false`, with `deploy` declaring `needs: quality` — the half that
+  catches what a ruleset cannot, a PR whose checks went red and was merged regardless.
+
+  recorded that required-reviewer protection "needs a paid plan for private repos and was rejected
+  with a 422", which reads as "branch protection is unavailable here" and is how `staging` stayed
+  uncovered. Reading `protect-main`'s actual payload showed it uses
+  `required_approving_review_count: 0`, no `required_status_checks` rule and no bypass actors — no
+  paid feature — so an exact mirror was creatable, and was.
+  **Verification distinguishes a ruleset being *declared* from being *applied*.** The failure mode a
+  ruleset has is being created successfully with a ref condition that matches nothing, so the spec
+  checks `gh api .../rules/branches/staging` (returns `pull_request`), `.../rules/branches/main`
+  (unchanged), and the feature branch (returns `[]`, proving the condition does not over-match) —
+  never `/branches/staging/protection`, which returns `404 Branch not protected` whether or not a
+  ruleset is active. Deliberately **not** in scope: a `required_status_checks` rule on either branch,
+  which stays **#472** — a red PR remains mergeable into both branches, and `CLAUDE.md` still says
+  so. `deploy-docs-internal.yml` still runs no checks of its own; the ruleset removes its
+  direct-push exposure on `staging` as a side effect.
+
+### Documentation
+
+- **`/document` closeout for `#537` and `#473`.** PR #540 merged to `staging`; `deploy-staging`
+  confirmed complete, and `gates` (`docs-gates`, `quality`, `kms`) confirmed green via the run API,
+  not just `gh pr checks`. `specs/roadmap.md` gained a change-log row and `npm run sdd:audit` now
+  reports zero gaps. Both issues moved to **In Review** on Project #2 — they close only on promotion
+  to `main`. One new item deferred and filed as **`#541`**: the `kms` job's
+  `continue-on-error: ${{ !inputs.kms_blocking }}` has only ever been evaluated at its blocking
+  (`true`) default, since `gates.yml` never sets `kms_blocking`; the non-blocking branch is
+  unexercised until the first `deploy-production` run after promotion. The failure direction is
+  safe — a broken expression stays blocking rather than silently passing — but unverified is not the
+  same claim as verified.
+
+### Fixed
+
+- **`#537` (and `#473`) — every generated KMS artefact is now checked, on both CI paths**
+  (`specs/2026-09-02-kms-generated-artifact-coverage/`). `kms/scripts/build-index.ts` ends with two
+  `writeFileSync` calls two lines apart — `ARTIFACT_INDEX.md` and
+  `app/(admin)/staff/runbook/docs.ts` — and **every** mechanism enforcing their freshness read back
+  only the first: `gates.yml`'s staleness step and `scripts/sdd-check.ts`'s
+  `checkArtifactIndexStale()`.
+  **The two go stale under different conditions, which is what made the gap invisible rather than
+  merely narrow.** The index renders **front-matter only**; `docs.ts` embeds each document's **full
+  body**. So a content-only edit rebuilds the index byte-identically and `docs.ts` differently — the
+  check passes on the file that did not drift. Commit `122609c` appended five change-log rows to
+  `specs/roadmap.md` without touching its front-matter (`version: "1.61.0"`, `updated: 2026-08-31`);
+  `gates` passed on PR #536, it merged, and `/staff/runbook` — which imports `DOC_ARTICLES` from
+  that file — served a five-rows-stale Roadmap article **in production**, with CI green throughout.
+  **The fix is not "add the second file to both checks", which would rebuild the same defect one
+  level up as two lists that must be remembered together.** `build-index.ts` now exports
+  `GENERATED_ARTIFACTS` and writes exactly those paths; the new `kms/scripts/check-generated.ts`
+  (`npm run kms:check-generated`) derives what it checks from that array, so a third output is
+  covered the moment it is added. Same shape as `#411`/`#412` unscoping
+  `tests/repository-client-injection.test.ts` from a hardcoded file list.
+  `scripts/sdd-check.ts` now calls that shared checker, which fixes a second live defect: it ran
+  `kms:build-index` (rewriting **both** files) and restored only the index, so a stale `docs.ts` was
+  silently regenerated and **left modified** with nothing tying it to the index — the origin of the
+  unexplained dirty file this slice inherited. `main()` is now guarded by `require.main === module`,
+  since a checker that regenerates the artefacts as an import side effect can never report drift.
+  The pending `docs.ts` regeneration is committed, repairing the live stale article.
+
+### Changed
+
+- **`#473` resolved — both KMS checks moved into `.github/workflows/quality.yml`**, as a `kms` job
+  separate from `quality` (`continue-on-error` is per-job, so folding them in would have made
+  `lint`, `typecheck` and `test` non-blocking on the production path too). It is **blocking on the
+  pull-request path and non-blocking on the production path**, via a `kms_blocking` `workflow_call`
+  input that `deploy-production.yml` sets to `false`. The rationale `#473` lacked: **the pull
+  request is the gate; on `main` the same check is a drift tripwire, and failing a deploy cannot
+  un-merge drift that already landed** — it only withholds the fix. Annotations still surface.
+  **`#473`'s stated blocker was simply untrue.** It scoped itself around "the two steps that
+  genuinely cannot move (the `ARTIFACT_INDEX.md` staleness check and the Gate 4 CHANGELOG diff both
+  need `github.base_ref`)". The staleness check read no `base_ref` at all — it copied a file,
+  regenerated, and diffed. That false sentence was written in `gates.yml`, `quality.yml`, `CLAUDE.md`
+  and `#473` itself, and is why the production deploy path ran **zero** KMS checks. All three
+  repository copies are corrected; only Gate 4 genuinely needs `base_ref`.
+- **`CLAUDE.md`'s branch-strategy section corrected: `main` IS protected, by a ruleset.** It said
+  "**No branch protection at all**, on either branch", citing
+  `gh api .../branches/main/protection` returning `404 Branch not protected`. **That command queries
+  classic branch protection and cannot see rulesets**, so P9.2's verification was structurally
+  incapable of finding what it concluded was absent — the same failure shape as the `base_ref` claim
+  above. `main` carries an **active** ruleset `protect-main`: a PR is required (direct pushes to
+  `main` are **blocked**), force-push and deletion blocked, but
+  **`required_approving_review_count: 0`**, **no required status checks**, **no bypass actors**, and
+  its `~DEFAULT_BRANCH` condition means **`staging` is not covered**. The warning's substance
+  survives, narrowed: a PR into `main` can still be self-merged with every check red, and nothing
+  constrains its source branch, so the `#464`/`#465`/`#466` pattern remains available.
+
+### Added
+
+- **`#511` — one horizontal-scroll affordance across the shop page**
+  (`specs/2026-09-01-shop-row-scrollers/`). `/categories` showed one row that scrolled (the
+  department strip) and three wrapping grids, so it read as two designs meeting.
+  `components/layout/HorizontalScroller.tsx` (new) lifts the behaviour out of `DepartmentScroller` —
+  arrows driving `scrollBy`, hidden scrollbar, native touch/trackpad scroll as the no-JS fallback —
+  and `ProductRow`, `BundleRow` and `DepartmentScroller` all render through it, so **no second
+  scroller implementation remains**. It takes `as: "div" | "ul"` because `BundleCard` renders an
+  `<li>` and the scroll container must be the items' own parent; item width is applied by the track,
+  so `ProductCard` and `BundleCard` are untouched. `DepartmentScroller` passes its original
+  `step={260}` and arrow placement, so the extraction changed nothing about how the strip feels.
+  **The rows widened from `take: 4` to `take: 8`** — a scroller over four items in a four-column grid
+  has nothing to scroll, so the affordance required a page-cost decision, these queries running on
+  every shop-page render. `#511` recorded 12 as discussed but not settled; **8 was chosen
+  deliberately**, still overflowing a desktop grid at half the added fetch.
+  **A live render caught what the unit tests could not.** `tests/horizontal-scroller.test.tsx`
+  passed — including a case named "names its arrows after what they scroll" — while the real page
+  emitted `Scroll products left`/`right` **twice**, once for New Arrivals and once for Featured
+  Products, because both rows passed a fixed label. Two identically-named arrow pairs are
+  indistinguishable to a screen reader, and that is precisely the ambiguity the required `itemLabel`
+  prop exists to prevent. A per-component test renders one instance and structurally cannot see a
+  collision between two on a page. Fixed by deriving the label from each row's title; re-verified
+  live, all eight distinct (`departments`, `value bundles`, `new arrivals`, `featured products`),
+  four scrollable tracks, exactly one of them a `<ul>`, and 8 cards in the New Arrivals row.
+
+- **`#521` — two curated products behind every subcategory, for both vendors**
+  (`specs/2026-09-01-subcategory-products/`). Production's 31 subcategories were **all empty**
+  while every top-level category had exactly 2 products — so the tier `#494` and `#498` built
+  navigation for had nothing behind it, and the gap was invisible from the home page. The cause was
+  structural and never production-specific: `prisma/seed.ts`'s `CATALOGUE` assigns every curated
+  product to a **top-level** category, and the only path that fills a subcategory,
+  `seedGeneratedCatalogue`, was called for Aheed alone — so SriMart's subcategories were empty in
+  *every* environment, dev and staging included. `AHEED_SUBCATEGORY_PRODUCTS` (27 keys) and
+  `SRIMART_SUBCATEGORY_PRODUCTS` (4 keys) now hold two real products each, keyed on the
+  subcategory's slug, with genuine names, pence prices, unit labels and halal/fresh flags —
+  SriMart's being electronics and homeware. `seedSubcategoryProducts` creates them in its own pass,
+  idempotent per **product** slug, uploading each placeholder object before its row (`#502`) and
+  skipping any key with no matching category so one vendor's fixture is inert in the other's run.
+  `SEED_REMOVE_GENERATED` now removes **both** vendors' generated rows.
+  **The first implementation of this slice was wrong and reached production before it was caught by
+  looking at the site.** It filled the tier with `generateProducts` output, which draws a noun from
+  one global pool and assigns it to a **random** subcategory ("Everyday Rice" under `cleaning`), and
+  whose pool is **groceries-only**, so SriMart — an electronics vendor — got "Value Lentils" under
+  `sri-chargers-cables`. Both faults are inherent to `generate-catalogue.ts`, whose own docstring
+  says its vocabulary deliberately does not resemble real vendor product; it exists to make queries
+  work harder for `#489`. It is left untouched (`GENERATOR_SEED` is load-bearing for that
+  measurement) and `SEED_SCALE_PRODUCTS_SRIMART` was removed. **The transferable lesson: a fixture
+  built to exercise query cost is not a fixture for looking at, and nothing mechanical separates
+  them** — every generated row was schema-valid, correctly related and correctly imaged, and every
+  local check plus the slice's own original spec passed. A second, quieter defect came from the fix
+  itself: `orange-juice-1l` collided with an existing top-level product, and because slugs are
+  unique per vendor and pending products are filtered by existing slug, the collision **silently
+  seeded one fewer row** rather than failing — `juices-soft-drinks` went live with a single product
+  until it was found by counting. Production now has 2 curated products in all 31 subcategories
+  across both vendors and **0** `gen-` rows. **One tracked exception: `#523`** — Workers AI refuses
+  `Halal Chicken Thighs 1kg` as NSFW on every attempt (code 8007), so it keeps its placeholder and
+  renders as the "no image" box; that issue also records why a permanently-refused product will
+  otherwise consume a slot on every scheduled run of `#518`'s fill job forever.
+
+- **`#518` — production's real catalogue seeded, its eight missing images carried across from
+  staging, and a scheduled job for the ones added later**
+  (`specs/2026-09-01-production-catalogue-and-image-fills/`). Also answers **`#504`**, the
+  batching-and-spend decision deferred from `#502`: the decision is **the real curated catalogue
+  only** — the ~2,000 `gen-*` scale products stay out of production and keep their shared
+  placeholder. Measuring both databases first changed the design twice. Production was neither
+  empty nor broken (21 products, all with real images, none awaiting a placeholder); what it
+  lacked was 4 Aheed categories, the 8 products in them, and all 31 subcategories. And **a
+  bucket-to-bucket copy would have written rows pointing at objects production does not hold**:
+  seeded placeholders are slug-derived (`products/{slug}/main.svg`, identical everywhere) but
+  generated images are `products/{productId}/{uuid}.webp`, and product ids are generated per
+  environment — so `scripts/copy-product-images.ts` matches products across environments on
+  `(vendorId, slug)` and mints a **new** destination key from the destination's own product id.
+  The copy is driven by the **destination's** need ("which products here still have only a
+  placeholder?") rather than the source's contents, which is a correctness property, not a style
+  choice: staging holds `p5b-validation-fixture`, a P5b validation artifact absent from the seed's
+  `CATALOGUE`, and enumerating the source would have pushed it into a live store. It reuses
+  `saveGeneratedProductImage`, so "claim primary, drop the placeholder it replaces" cannot drift
+  from the AI path. `lib/storage.ts`'s `StorageService` gained `getObject` — the port had no read
+  primitive at all — returning `null` on a 404 to match `headObject`'s posture, with the
+  200/404/error decision extracted to a pure, unit-tested `readGetObjectResponse`.
+  `scripts/fill-product-images.ts` plus `.github/workflows/fill-product-images.yml` cover products
+  added later: **a Cloudflare cron trigger is not possible here** — `@opennextjs/cloudflare@1.20.2`
+  generates a worker exporting `fetch` only, with `scheduled` appearing nowhere in the package, so
+  a `[triggers]` block would fire into a Worker with no handler — but no Worker is needed, because
+  `lib/image-generation.ts` calls the Cloudflare REST API rather than a Workers AI binding, so the
+  pipeline runs on a plain Node runner. The script builds its own client from the bare
+  `@prisma/client` specifier and passes it explicitly, since `lib/db`'s `@prisma/client/wasm`
+  cannot load in Node. `prisma/seed.ts` is unchanged. **Two things are deliberately not done here:**
+  the workflow cannot run until six S3/CDN secrets are added to the `production` GitHub environment
+  (it currently holds only `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and `DIRECT_URL`), and
+  **`#519`** was filed for two stale staging hosts found in production's `VendorDomain` — inert
+  today, pre-existing, and not touched by this slice.
+
+- **`#501` (parts 1 and 2) — a browse mode for `/search`, working "View all" links, and a
+  `/bundles` page** (`specs/2026-09-01-storefront-browsing-affordances/`). Slice A of the three
+  approved at Gate 1 on 2026-09-01; slice B was `#502`, slice C is `#503`. Bare `/search` ran its
+  query inside `if (query)` and gated the grid on `query &&`, so it returned 200 with an empty
+  content column — and `app/(storefront)/categories/page.tsx` pointed the shop page's only "View
+  all" straight at it, as did the header's search box when submitted empty. The page now branches:
+  no `q` calls `products.list(...)`, a `q` calls `products.search(q, ...)`, both with identical
+  filter and cursor options, so price, stock and speciality filters plus keyset pagination work the
+  same either way. **`#211`'s `list()`/`search()` split is preserved literally** —
+  `searchProducts`'s empty-query guard is untouched and the two functions stay separate; only the
+  *page's* reading of an empty box changed, and the docstring in `lib/repositories/products.ts`
+  that asserted the opposite was rewritten rather than left contradicting the code beside it. A new
+  `featured` param (URL-driven, no sidebar control) gives Featured Products a real destination, and
+  `components/product/ProductFilterForm.tsx` carries it in a hidden field — it is a plain `GET`
+  form, so without one, pressing Apply from a featured listing silently dropped the filter.
+  `nextPageHref` moved to a pure, unit-tested `components/product/search-href.ts`, since a page
+  file cannot export a helper for a test to import. A zero-result empty state closes the same
+  blank-column dead end reached by a search that matches nothing. All three shop-page rows now
+  carry a working "View all" (`BundleRow` gained the prop it lacked), the third pointing at a new
+  `app/(storefront)/bundles/page.tsx` that shares `hasAvailableItems` with the row so the two
+  cannot disagree about which bundles render. `/search`'s hardcoded `metadata` title, which
+  rendered "Aheed Food Centre" under SriMart too (the `#239` defect class), is now derived from the
+  vendor.
+  **Found while writing the spec, and not mentioned in `#501`: nothing was ever featured.**
+  `Product.isFeatured` is `@default(false)` and `prisma/seed.ts` never set it, so `ProductRow`
+  returned `null` and the Featured Products row was absent from the shop page in every freshly
+  seeded environment — a "View all" would have led to an empty listing. `seedFeaturedProducts` is
+  its own idempotent pass (the pattern `seedSubcategories` already uses, so it reaches databases
+  seeded before this slice rather than only new ones), marking six Aheed and two SriMart products,
+  deliberately fewer than the 12-item page size so a featured listing is visibly a subset.
+  **Part 3 of `#501` — horizontal scrollers on the product and bundle rows — is deliberately not
+  built**, so this does not close `#501`: the rows hold four products in a four-column grid, so a
+  scroller would have nothing to scroll, and delivering the department strip's affordance would
+  have meant widening the rows, a page-cost change `#501` never asked for. Tracked in `#511`.
+
+- **`#508` — a database-backed error event log, independent of Cloudflare Workers Logs**
+  (`specs/2026-09-01-error-event-log/`). A live incident showed the global error boundary's
+  generic "Something went wrong" page working exactly as designed (it deliberately shows a visitor
+  nothing about the error, not even the digest — `components/errors/ErrorPanel.tsx`, unchanged
+  here), but finding the real root cause afterward depended on `#246`, still unconfirmed whether
+  Cloudflare Workers Logs are even queryable from this team's environment. `instrumentation.ts`'s
+  `onRequestError` (`#480`) now also writes the real error — message, stack, digest, path, method,
+  router kind/type — to a new `ErrorEvent` table, via a second, deliberately uncached Prisma client
+  (`getPrismaUncached()` in `lib/db.ts`) rather than the memoized `getPrisma()`/`getPrismaWs()`,
+  since whether this hook runs inside a `cache()`-compatible request scope is unconfirmed and the
+  cost of guessing wrong is the exact cross-request-singleton bug this app has already hit once. The
+  write is wrapped so a failure (a database outage — plausibly the very thing that caused the
+  original error) degrades to today's `console.error` rather than compounding anything. A new
+  `/staff/errors` page lists the most recent 50 events, gated to **platform ADMIN only** — a
+  per-vendor store admin who'd otherwise pass `requireVendorRole("ADMIN")` is refused the same way a
+  non-admin is, since a stack trace can reveal internal file paths a vendor-scoped account has no
+  reason to see. No retention job was planned at `/propose`; added anyway during `/spec` after
+  finding `lib/repositories/order-lookup-rate-limit.ts` already carries the exact sweep pattern
+  needed (`#468`), so a 30-day probabilistic sweep runs on write rather than repeating that table's
+  original unbounded-growth mistake.
+
+### Documentation
+
+- **`/document` closeout for `#507`, `#514`, `#364` and `#511`.** `npm run sdd:audit` reported five
+  gaps — three slices plus **PR #533** (`af17005`) and **PR #535** (`881792b`) — and now reports every
+  slice and promotion documented. Five `specs/roadmap.md` rows, each carrying the lesson rather than
+  just the outcome: **#507/#514** (PR #531), where the guard rather than the fallback was the work,
+  since `getCurrentVendorIdOrNull` runs on every request; **#364** (PR #532), recording that **an
+  issue's own account of why something was deferred is a claim, not a constraint** — the `.webp`
+  suffix was held hostage by a validator the AI code path never runs; **PR #533**, their promotion;
+  **#511** (PR #534), recording that **a per-component test renders one instance and structurally
+  cannot see a collision between two on a page**, which is why two rows shipped identically-named
+  scroll arrows past a passing test suite; and **PR #535**, closing out the backlog carried through
+  the session. The last row also records the one item that cannot be closed in code: the six S3/CDN
+  secrets missing from the `production` GitHub environment, without which the now-armed
+  `fill-product-images.yml` cron fails on its first run.
+
+- **`/document` closeout for `#519` and `#523`.** `npm run sdd:audit` reported four gaps — both
+  slices plus **PR #527** (`4328ea0`) and **PR #529** (`3872851`) — and now reports every slice and
+  promotion documented. Four `specs/roadmap.md` rows: **#519** (PR #526), recording that a wrong
+  `VendorDomain` deletion produces a **200** rather than an error, so the verification has to compare
+  page content and the last-canonical-host guard has to exist before the command is ever typed;
+  **PR #527**, its promotion; **#523** (PR #528), recording that the GAP-011 migration trap fired for
+  the **third** time and was **caught before anything executed** — `--create-only` plus reading the
+  generated SQL is the step added after `#508`, and this is the run where it paid for itself; and
+  **PR #529**, its promotion, carrying the first migration since `#517` and verified directly against
+  production afterwards.
+
+- **`/document` closeout for `#518`, `#521` and the two promotions.** `npm run sdd:audit` reported
+  two gaps — **PR #517** (`8be2e8a`) and **PR #524** (`b3a046d`) had merged after the last roadmap
+  edit — and now reports every slice and promotion documented. Four `specs/roadmap.md` change-log
+  rows added: PR #517 promoting seven accumulated slices with one additive migration; **#518**
+  (**PR #520**, `358cd32`), recording why measuring both databases before designing turned a
+  "copy the bucket" task into a slug-keyed row migration and an assumed thousands-of-images job
+  into eight, and why a Cloudflare cron trigger is impossible on this adapter; **#521**
+  (**PR #522**, `4421c71`), recording that the slice's **first implementation was wrong and reached
+  production** — `generateProducts` files a groceries-only vocabulary under random subcategories, so
+  an electronics vendor got "Value Lentils" under `sri-chargers-cables` — and carrying the lesson
+  that **a fixture built to exercise query cost is not a fixture for looking at, and nothing
+  mechanical separates them**; and PR #524, recording why that promotion was not deferred (a GitHub
+  Actions `schedule:` only fires from the default branch, so the fill workflow could not run while
+  it sat on `staging`). Two issues filed by this work remain open and are named in the rows:
+  **#519** (stale staging hosts in production's `VendorDomain`) and **#523** (Workers AI refusing
+  halal meat product names as NSFW, and the scheduled job retrying them forever).
+
+- **`/document` closeout for `#508`.** Reconciles `specs/roadmap.md` with what actually shipped: a
+  new change-log row cites **PR #509**, merge `d9076f9`, `staging`; records `gates` green
+  (`quality`, `docs-gates`) and both `deploy-staging`/`deploy-docs-internal` completing successfully
+  post-merge. Confirms the slice's one real open risk from `/propose` — whether `onRequestError` has
+  a working Cloudflare Workers request context for `getPrismaUncached()` to resolve `DATABASE_URL`
+  from — is resolved: a temporary throw under `npm run preview` wrote exactly one real `ErrorEvent`
+  row, live. Adds a `CLAUDE.md` lesson recording that finding for future `onRequestError` work.
+  `#508` moved to `In Review` on Project #2. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run
+  sdd:audit` exits 0.
+
+- **`/document` closeout for `#501` (parts 1 and 2, slice A).** Reconciles `specs/roadmap.md` with
+  what actually shipped: a new change-log row cites **PR #515**, merge `38c9171`, `staging`, and
+  records that `/validate` found zero defects in the slice's own diff — every obstacle hit while
+  live-verifying traced to something outside it (a sandbox network timeout unrelated to the code, a
+  stale local `VendorDomain` row from an earlier session, and a shared dev database carrying ~2,000
+  leftover products from an unrelated earlier scale-seed). `#501` moved to `In Review` on Project #2
+  (stays open — part 3 remains deferred to `#511`). **`#514`, filed at `/validate` as a possible
+  `lib/tenant.ts` design gap, re-scoped smaller here**: `CLAUDE.md`'s existing SriMart branding note
+  already modeled the correct local convention (a port-less `Host` value); the actual root cause was
+  one earlier session's `VendorDomain` row using a port-inclusive value, not a gap in
+  `lib/tenant.ts` itself. Adds a `CLAUDE.md` lesson stating the port-less constraint explicitly
+  rather than leaving it implicit in one example. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run
+  sdd:audit` exits 0.
+
+### Fixed
+
+- **`#364` — image keys now carry the real file extension**
+  (`specs/2026-09-01-honest-image-key-extensions/`). `buildProductImageKey` and
+  `buildCampaignImageKey` both suffixed `.webp` unconditionally, while three server-side paths store
+  something else: `lib/product-image-pipeline.ts` (Workers AI returns PNG, Open Food Facts returns
+  whatever the remote sent), the campaign-banner generate route (PNG), and
+  `scripts/copy-product-images.ts` (the source object's type, verbatim). **Nothing ever rendered
+  wrong** — the object is stored with its true content type and the CDN answers on that — so the key
+  was the only thing lying, which is why it survived three slices unnoticed, including two this
+  session that propagated it. **The reasoning that had kept it does not hold.** `#364` recorded that
+  the suffix "has to keep passing `isCampaignImageKey`, which the browser-upload path enforces", and
+  framed the fix as a server-side transcode or a widening of validation that both upload paths
+  depend on. Reading the call sites showed those validators are called in exactly three places —
+  `features/admin/campaign-image.ts:89`, `features/admin/product-image.ts:124` and `:180` — **all on
+  the browser attach path**, which a server-generated key never touches. So the suffix was held
+  hostage by a check the AI path does not run, and both proposed options were larger than necessary.
+  A pure `imageExtensionForContentType` now maps the real type (tolerating parameters and case), and
+  both builders take an optional content type **defaulting to `IMAGE_CONTENT_TYPE`** — so every
+  browser-upload call site is unchanged, that path being WebP end to end (presigned PUT pinned to
+  `IMAGE_CONTENT_TYPE`, `headObject` content-type re-check on attach). An unknown type resolves to
+  **`.bin`, deliberately not `.webp`**: the obvious default would quietly recreate the defect for
+  exactly the inputs nobody anticipated. `isProductImageKey` and `isCampaignImageKey` stay
+  **WebP-only**, now saying so deliberately rather than by omission. Existing keys are not rewritten
+  and no migration is added — a PNG already stored under a `.webp` name keeps working, since keys are
+  immutable here by design. Also corrected `isPlaceholderImageKey`'s docstring, which justified
+  itself on the now-false claim that the builder "only ever emits `.webp`".
+
+- **`#507` and `#514` — a blocking admin alert, and a second local vendor unreachable by host**
+  (`specs/2026-09-01-admin-alert-and-local-vendor-host/`). Two small fixes filed *from* earlier
+  `/validate` passes, where each obstructed the verification rather than the feature.
+  **`#507`:** `BackfillImagesButton` reported its result through a native `alert()` (present since
+  `#304`), which blocks the whole tab until dismissed — a modal in an operator's way, and for
+  browser automation a full freeze: CDP calls, screenshots and even closing the tab hang until a
+  human clicks it. So the one admin control that starts a paid, long-running job was the one control
+  no automated check could exercise end to end. It was also the **only** `alert()` in the admin
+  panel. Replaced with an inline result matching `BundleForm`'s existing `role="status"` /
+  `role="alert"` pair. A non-OK response now reads the route's **`error`** field rather than
+  `message`, because `requireVendorRole` answers 401/403 with `error` — the old code would have
+  alerted `undefined` to an operator refused for the wrong role. Every new test asserts `alert` was
+  never called, which is the assertion that matters: one checking only for rendered text would pass
+  with the `alert()` still in place.
+  **`#514`:** `getCurrentVendorIdOrNull` always stripped the port before looking up
+  `VendorDomain.host` — right for real deployments, which never carry one — so a row seeded as
+  `srimart.localhost:8787` under `npm run preview` could never match, and the request fell through
+  to `/coming-soon` with nothing to say why. A fallback lookup on the raw host now runs **only when
+  the raw host differs from the port-stripped one**, lower-cased to match how `upsertVendorDomain`
+  writes rows. The guard is the point: this function runs on **every request**, so the risk was cost
+  rather than correctness, and the test asserts a portless host issues exactly **one** query —
+  unchanged from before.
+
+- **`#523` — the image fill job now gives up on products it can never fill**
+  (`specs/2026-09-01-image-fill-give-up/`). `@cf/black-forest-labs/flux-1-schnell` **permanently
+  refuses** some legitimate names: `Halal Chicken Thighs 1kg` returned
+  `AiError: Input prompt contains NSFW content` (code 8007) on **four attempts across three runs**.
+  That matters beyond one product — this store is a halal butcher, and `chicken-poultry`,
+  `beef-mince` and `lamb-mutton` are exactly the names most likely to trip a raw-meat filter — and
+  it would have **quietly stalled the scheduled job**: `getProductsWithoutImages` is newest-first
+  and **bounded**, so a product that can never succeed was re-selected on every run, consumed a
+  slot, failed, and left the genuinely fillable backlog untouched while the job reported success.
+  The per-product error handling was already correct; nothing **recorded** the failure, so nothing
+  could skip it next time. `Product.imageAttemptFailures` (new column, own migration) is
+  incremented by `recordImageAttemptFailure` — a singular `update`, never `updateMany` (`#382`),
+  scoped by `vendorId` in the `where` so a caller cannot touch another tenant's product — and
+  `getProductsWithoutImages` now excludes products at or past `MAX_IMAGE_ATTEMPT_FAILURES`.
+  **Three, not one:** the filter is flaky in *both* directions (`Gulab Jamun 1kg` and
+  `Extra Noodles 1L` were each refused once then accepted on retry), so one strike would abandon
+  products that do work. `saveGeneratedProductImage` resets the counter, so a product that later
+  loses its image is retried rather than excluded by historic failures. **Both** fill paths record
+  — the script and the admin route — since otherwise a product stays selectable through one while
+  the other has written it off. Every run now **reports how many products it skipped**: a give-up
+  rule that silently shrinks the work list is the same class of problem it was built to fix.
+  **The migration carried the GAP-011 trap and it fired**: `prisma migrate dev --create-only`
+  proposed `DROP INDEX` for all three hand-authored `pg_trgm` indexes alongside one unrelated column
+  on `Product`. They were removed before applying and the file records why — the **third** recorded
+  occurrence, and the first caught before anything executed (in `#508` the equivalent drops ran).
+  Verified live against dev: selected at 0 and 2 failures, excluded at 3, counter reset after a
+  successful save, a cross-tenant increment refused, and all three trigram indexes still present.
+
+- **`#519` — production's `VendorDomain` no longer maps staging hosts**
+  (`specs/2026-09-01-stale-vendor-domains/`). Production held **four** rows where it should hold
+  two — `staging.aheedfoodcentre.nocaped.com` and `srimart-staging.nocaped.com` alongside the two
+  correct production hosts, **all four marked `isCanonical: true`**, so each vendor had two
+  canonical hosts. Found while verifying `#518`'s production seed; almost certainly written by an
+  earlier seed run pointed at production while carrying staging's `SEED_*_HOST` values, the same
+  class of confusion as `#119`. They were inert in normal operation — staging's Worker resolves
+  against staging's database — but `lib/tenant.ts` treats a `VendorDomain` match as authoritative,
+  so they were a silent mis-tenanting waiting for anything else to resolve a host against
+  production's data (a restore, a diagnostic, a preview environment). The reverse direction was
+  checked before assuming it was one-way: staging holds only its own hosts plus `localhost`.
+  `scripts/remove-vendor-domains.ts` (new) takes explicit `--remove <host>` values rather than a
+  pattern — "delete anything containing `staging`" is the kind of rule that eventually deletes a
+  legitimate row in an environment nobody had in mind — and is a **dry run unless `--apply`** is
+  passed. Its load-bearing safety check refuses to leave any vendor without a canonical host:
+  removing the last one does not corrupt anything visibly, it makes the vendor serve
+  `/coming-soon` **with a 200**, so a typo in the removal list would be a live outage that looks
+  like a successful run. That guard was exercised, not assumed (exit 1). After the removal both
+  live sites were confirmed serving their **own** tenant by comparing page titles, not status
+  codes. `prisma/seed.ts` and `lib/tenant.ts` untouched; a seed-side guard rejecting a host that
+  does not match the connected environment stays in `#519`'s discussion, since the seed has no
+  reliable way to know which environment it is pointed at.
+
+- **`#502` — staging served 404s for every seeded product image, the button meant to fix that
+  matched nothing, and Open Food Facts repeated one wrong image without ever flagging it**
+  (`specs/2026-09-01-product-image-integrity/`). Four compounding defects, each confirmed against a
+  live environment: (1) `prisma/seed.ts`'s `seedGeneratedCatalogue` did its placeholder uploads
+  *after* its `existing >= count` early return, so once a database held the generated rows no later
+  seed run uploaded the objects into that environment's bucket — dev had all of them, staging none,
+  while staging's pages went on referencing them (production was unaffected: it carries no generated
+  products and its curated ones have real uploaded `.webp` images). The uploads now run before the
+  guard, and `scripts/restore-placeholder-images.ts` repairs databases whose rows already exist —
+  it reads rows and writes only storage, takes an explicit `--env-file`, and prints the resolved
+  host and bucket before acting (`#119`). (2) `getProductsWithoutImages` asked for
+  `images: { none: {} }`, matching **zero** products for either vendor because both seed paths give
+  every product a placeholder row; it now selects products whose images are all placeholders, which
+  covers the no-image case in the same clause since Prisma's `every` is vacuously true for an empty
+  relation — verified against a real database in `scripts/verify-repository-injection.ts`, not a
+  mock. (3) `saveGeneratedProductImage` wrote `isPrimary: false` while every storefront read selects
+  `where: { isPrimary: true }`, so a filled image would have uploaded, cost an AI call and never
+  displayed; it now claims primary and removes the shared placeholder it replaces. (4)
+  `lib/product-metadata.ts` returned Open Food Facts' top hit with no relevance check, so every
+  product whose name shared a keyword got one identical image — a pure `isRelevantMatch` floor now
+  rejects unrelated hits, `needsReview` is set on the Open Food Facts path as well as the AI one
+  (it was set only on AI, flagging the source *least* likely to be wrong), and the operator can
+  switch Open Food Facts off per run from a checkbox beside the Auto-fill button. Separately,
+  `ProductCard` now degrades a missing object to the same grey box a product with no image gets
+  rather than the browser's broken-image icon, which removes the failure mode rather than today's
+  instance. **Deliberately deferred:** the 10-per-click backfill cap stays (2,026 products would be
+  200+ clicks, but uncapped is an unbounded Workers AI spend from one button) — `#504`.
+
+### Added
+
+- **`#498` — bundle cards match the product-card design language, a neutral bundles heading,
+  keyset-compatible "Previous page", and subcategory tabs on every subcategory page**
+  (`specs/2026-08-31-storefront-cards-pagination-tabs/`). Four more gaps found by live review right
+  after `#496` shipped: (1) `BundleCard` was the only card on the storefront with no hover/tilt
+  effect — it now shares `ProductCard`'s `.skew-card` treatment (`app/globals.css`, P8.5a/`#345`);
+  (2) the bundles section's hardcoded `"Meal bundles"` heading and "one meal" subtitle (wrong for
+  the seeded non-food "Kitchen Pack", and would be wrong for SriMart's electronics bundles entirely)
+  are now the neutral "Value Bundles"; (3) category-page pagination only ever had "Next" — a
+  `back` search param now carries the comma-joined stack of prior cursors so "Previous" works too,
+  with no `OFFSET` and no `COUNT` query anywhere (this app's pagination is keyset-only by
+  architectural decision) — absolute page numbers are deliberately not built, since a keyset page
+  never fetches the total count numbering them would need; (4) a subcategory's own page rendered no
+  tabs at all (its own `children` is always empty, the tree being capped at two levels) —
+  `getCategoryBySlug` now also selects the parent's own `children`, so the exact same sibling tab
+  row (department + every subcategory) renders whether you're on the department's page or one of
+  its subcategories', with only the active pill changing.
+- **`#496` — a department page now shows everything in it, four more top-level departments, a
+  persistent "Shop" link, and a bigger hero slider** (`specs/2026-08-31-storefront-browsing-ux-fixes/`).
+  Four related gaps found by live review right after `#494` shipped: (1) a department's own page
+  (`/categories/fruit-veg`) showed only its 2 directly-assigned curated products, none of the
+  products under its subcategories, because `listProductsByCategory` matched an exact `categoryId` —
+  it now takes an array and aggregates a department with every one of its children, and
+  `SubcategoryLinks` gained a leading "All" pill making that aggregation visible rather than a silent
+  behaviour change; (2) the top department scroller had only 9 items, not enough to overflow a
+  typical viewport and actually need its scroll arrows — four more real curated departments (Frozen
+  Foods, Health & Beauty, Baby & Kids, Pet Supplies) added to `prisma/seed.ts`; (3) the landing page
+  had no persistent link into `/categories` at all (its "Shop List" link is deliberately hidden
+  there) — a new "Shop" link in the header fixes that, visible on every non-portal route; (4) the
+  landing hero's department slider was capped at a fixed 28rem regardless of viewport — now an even
+  `lg:grid-cols-2` split.
+- **`#494` — storefront subcategory navigation, so a subcategory (and anything assigned to it) is
+  actually reachable** (`specs/2026-08-31-storefront-subcategory-navigation/`).
+  `lib/repositories/categories.ts`'s `getCategoryBySlug` has always fetched a category's `children`
+  ("the only shape the storefront can render", per its own comment), but no page ever rendered them
+  and nothing linked to a subcategory's URL — found live on staging right after `#489` seeded 27
+  Aheed subcategories: `/categories/groceries` showed only its 2 directly-assigned products, none of
+  the products under its `rice-grains`/`lentils-pulses`/`cooking-oils` children, which were only
+  reachable by typing the URL directly or via search. New `components/product/SubcategoryLinks.tsx`
+  (a small presentational component, matching the existing `DepartmentScroller`/`DepartmentHero`
+  pattern) renders a category's children as clickable links above its product grid, and renders
+  nothing when there are none — which is always true for a subcategory itself, since the tree is
+  capped at two levels. No repository, service or schema change: the data was already fetched. The
+  admin side already worked (`components/staff/CategoryForm.tsx`'s parent picker), so anything
+  admin-created is now visible on the very next page load — the route is already `force-dynamic`
+  with no caching layer to invalidate.
+
+- **`#489` — a two-level category tree in the seed, and an env-gated ~2,000-product generated
+  catalogue, so the app can be measured at realistic row counts**
+  (`specs/2026-08-31-catalogue-depth-and-scale/`). `Category.parentId` has existed since P2a and
+  `lib/repositories/categories.ts` caps the tree at exactly two levels, but **no fixture had ever
+  created a single subcategory** — the capability was built and entirely unexercised. The seed now
+  creates 31 (27 Aheed, 4 SriMart) in their own pass keyed on the child's slug, so a database seeded
+  before this slice also gains them.
+  - `SEED_SCALE_PRODUCTS=2000` adds 2,000 deterministic generated products (seeded PRNG, not
+    `Math.random()`, so a recorded measurement is reproducible); `SEED_REMOVE_GENERATED=1` undoes it.
+    Aheed-only, so SriMart stays small and cross-vendor isolation checks stay fast.
+  - The generated path shares **one image object per subcategory instead of one per product** (27
+    uploads, not 2,000 — and `refreshProductImages` ran unconditionally on every seed run), and uses
+    `createMany` instead of 2,000 sequential nested creates. `createMany` is safe here specifically
+    because the seed runs in real Node on the WebSocket adapter, **not** the HTTP adapter `#382`
+    forbids it on. 2,000 products seed in ~22s.
+  - The generator lives in `prisma/generate-catalogue.ts`, not in `prisma/seed.ts`, because
+    `seed.ts` calls `main()` at module scope — a test importing it from there would have run the
+    whole seed against a real database as a side effect of `npx vitest run`.
+  - New `scripts/measure-catalogue-queries.ts` measures the Prisma read paths and prints a
+    catalogue-shape summary. Kept separate from `scripts/measure-nfr.ts`, which is deliberately
+    HTTP-only so it can run from a clean checkout (P7d R4/R6).
+  - **Removes the precondition that has blocked `#286` since P2** ("should not be built against seed
+    fixtures"), and with it the blocker on `#396`.
+
+### Changed
+
+- **`docs/developer-portal/nfr-baseline.md` gains a query re-measurement at catalogue scale
+  (`#489`).** Everything previously recorded was measured at `Product` = 22, where that document
+  itself concludes "none of them is index-sensitive yet" — so the headline `API p95 < 400ms` verdict
+  was measuring Neon's round-trip, not this app's queries. Re-measured on the dev branch at 2,018
+  products: **every path still meets the target**, worst 95.4 ms (4.2x margin), so **no remediation
+  issue was filed because there was no breach**. Product search is the only real signal (p95 75.1 ms
+  to 95.4 ms, +27%) and is the only path the review marks `scan`. `listProducts` came out *faster* at
+  ~100x the rows, recorded explicitly as evidence the figures remain round-trip dominated rather than
+  as an improvement. Existing tables untouched; `listOrdersForUser` recorded as not measurable (the
+  dev branch holds no orders with a `userId`).
+- **`docs/developer-portal/env-setup.md`** documents the two new seed vars and, for the first time, a
+  **dev** `SEED_AHEED_HOST`/`SEED_SRIMART_HOST` pair — only staging and production pairs were
+  documented, and neither var was set anywhere, so SriMart had never been seeded into the dev branch.
+
+### Fixed
+- **`#468`, `#469`, `#481`, `#482`, `#483` — the P9.1 auth rate limiter has never functioned, for
+  three independent, compounding reasons, since it shipped on 2026-08-29**
+  (`specs/2026-08-31-rate-limit-hardening/`). Started as two narrow follow-ups from P9.1
+  re-validation (`#468`: `AuthenticationAttempt`/`OrderLookupAttempt` grow unbounded with no
+  retention sweep; `#469`: the throttle is skipped, not refused, when no vendor resolves — a
+  confirmed exploitable brute-force bypass, since `User.email` is globally unique and unscoped from
+  tenant resolution). Grew to five while live-verifying `#469`'s fix, each new defect found by
+  confirming the previous fix actually worked end to end:
+  - **`#481`** — the sensitive-path list matched with `endsWith` against placeholder strings
+    (`/sign-in`, `/forget-password`) that never equal Better Auth's real registered endpoints
+    (`/sign-in/email`, `/request-password-reset`). Confirmed live: 7 wrong-password attempts against
+    the real endpoint all returned `401`, never `429`. Fixed with the corrected literal suffixes —
+    deliberately still `endsWith`, not Better Auth's own internal `startsWith` convention, which
+    matches a basePath-*stripped* path `authOnRequest` never sees.
+  - **`#482`** — `AuthenticationAttempt` never had a migration in the first place. PR `#461` added
+    the model to `prisma/schema.prisma` but no migration was ever committed for it, in any branch —
+    confirmed the table didn't exist in the dev database, and since `deploy-staging`/
+    `deploy-production` both run `prisma migrate deploy` from the same committed migrations, almost
+    certainly missing in staging and production too. Fixed by generating and applying the missing
+    migration (`prisma migrate diff`, since `#378` blocks `migrate dev`).
+  - **`#483`** — the root cause making `#469` and `#481` moot even once fixed individually: a bare
+    top-level `onRequest` key in `betterAuth({...})`'s config is accepted by TypeScript but never
+    invoked at runtime. Better Auth's router always installs its own internal `onRequest`, which only
+    calls a *plugin's* `onRequest` — never a bare `ctx.options.onRequest`. Fixed by wrapping the
+    unchanged rate-limit logic in a minimal plugin (`authRateLimitPlugin`) registered via
+    `plugins: [...]`.
+  - **Verified live, end to end, after all three fixes together**: 5 rapid wrong-password
+    `POST /api/auth/sign-in/email` attempts against the real endpoint return `401`; a 6th and 7th
+    return `429` with `{"error":"Too many requests"}`; exactly 5 `AuthenticationAttempt` rows are
+    written (the blocked attempts write none, closing `#468` too — its opportunistic
+    `deleteMany` sweep, added to both `checkAuthRateLimit` and `checkOrderLookupRateLimit`, only
+    fires on allowed calls). `checkOrderLookupRateLimit` had zero prior test coverage of any kind;
+    its new test file covers the pre-existing allow/block behavior as well as the sweep.
+  - **Also removed, unrelated to any of the five issues**: `board.json` (616 lines, a stale
+    `gh project item-list` dump) and `scratch.ts` (a 2-line exploration snippet), both accidentally
+    committed by PR `#461`. No schema-language change — only the migration `#482` needed.
+
+- **`#478`, `#479`, `#467` — the three gaps `#459`'s error-boundary slice left behind**
+  (`specs/2026-08-31-error-boundary-gaps/`). Found by re-reading that artifact against the code at
+  `/orient`, not against its own build notes, which recorded "Deviations from Spec: None."
+  - **`app/error.tsx` preserved neither site chrome nor vendor branding (#478)**, while `#459`'s
+    `plan.md` claimed it "is rendered *inside* the existing root layout, meaning the site
+    navigation, header, and footer will still be visible." `app/layout.tsx` renders
+    `<html><body>{children}</body></html>` and nothing else — the header and footer live one level
+    down in `app/(storefront)/layout.tsx` via `StorefrontChrome`, and `brandStyle()` (ADR-004 slice
+    4) is applied in exactly two places, `StorefrontChrome.tsx:30` and `app/(admin)/layout.tsx:41`.
+    A root `error.tsx` is a sibling of the root layout, so it replaced the whole route-group subtree
+    including both. **SriMart rendered Aheed's green on every 500**, and nothing in
+    `lint`/`typecheck`/`test` sees a second vendor's output. Fixed by adding
+    `app/(storefront)/error.tsx` and `app/(admin)/error.tsx`, which sit *inside* their group layouts
+    and so keep header, nav, footer and the vendor's injected primitives. The root `app/error.tsx`
+    is deliberately kept, not replaced: a boundary inside a layout cannot catch a throw *from* that
+    layout, so it remains the outer fallback for e.g. `getCurrentVendorProfile()` failing — which is
+    what makes the layering intentional rather than incidental.
+  - **Both boundaries used stock Tailwind red instead of the audited danger tokens (#479)**, so R3
+    ("must use the existing design system") was never met. `bg-red-100 text-red-600` became
+    `bg-danger-tint text-danger`. Those token literals are not cosmetic: P7 closeout (#251/#217)
+    darkened `--color-danger` off the raw brand red precisely because `#d32f2f` on the red tint
+    measured 4.36:1 and failed WCAG 2.2 AA at `text-sm`, and `tests/design-tokens-contrast.test.ts`
+    asserts that pair. The stock pairing sat outside that audit entirely. Every colour the new
+    shared panel uses is an already-audited pair. `app/not-found.tsx` — the sibling these files were
+    visibly copied from — had been using tokens all along.
+  - **Neither boundary had a test, and no validation row ever rendered one (#467).** The evidence
+    recorded for `#459` was a `200 OK` on a healthy page, which exercises no boundary at all: a
+    boundary only renders when something throws beneath it, so that `200` was equally consistent
+    with the files not existing. `tests/error-boundary.test.tsx` adds **23 tests** across all four
+    boundaries. The load-bearing ones assert that an `Error` carrying a config message, a `digest`
+    and a `stack` leaks none of the three into `textContent` **or** `innerHTML` — the surface
+    `#430`'s fail-closed throw actually lands on — plus one `console.error` per throw, `reset()`
+    wiring, and that no `red-<n>00` utility can come back.
+  - **New `components/errors/ErrorPanel.tsx`** holds the branded markup once, so the four boundaries
+    cannot drift apart the way the original two did. It is never passed the error object at all —
+    the structural half of the no-leak requirement, since a future "show details" toggle would have
+    to add a prop rather than arrive quietly.
+  - **`#459`'s own spec is corrected in place**, not left to be re-read as true: `plan.md` §2's
+    header/footer claim and `build-notes.md` §3's "Deviations from Spec: None" both now say what was
+    actually the case, pointing at this slice. **No schema change, no migration.**
+  - `#459`'s `validation.md` had also asked for `global-error.tsx` to be verified under
+    `npm run dev`, where Next does not substitute it at all (the dev overlay owns the screen), so
+    that step could never have observed what it claimed. This slice's `validation.md` uses
+    `npm run preview` and forces real throws, per `CLAUDE.md`.
+  - **`/validate` found this slice's own R7 could not be true as written, and `/fix` corrected the
+    root cause.** R7 claimed a boundary's `console.error` gives `wrangler tail`/Workers Logs
+    visibility; it cannot, since `error.tsx`/`global-error.tsx` are Client Components and that call
+    runs inside a `useEffect`, which only ever executes in the browser after hydration — confirmed
+    live by forcing a throw under `npm run preview` and finding no boundary-naming line in the
+    Worker's own log store. Fixed by adding **`instrumentation.ts`** exporting `onRequestError`
+    (`tests/instrumentation.test.ts`, new), which Next.js calls server-side, once, per request that
+    throws, independent of which boundary displays the fallback — re-verified live, producing
+    exactly one `"Unhandled request error:", { path, routerKind, routeType, error }` line per throw.
+    Each boundary keeps its own `console.error` (Next's documented client-side pattern, and what
+    `tests/error-boundary.test.tsx` actually proves); `requirements.md`'s R7 and `validation.md`'s L7
+    are corrected to say which mechanism gives which guarantee.
+
+
+### Documentation
+- **`/document` closeout for `#494`, `#496`, `#498`.** Reconciles `specs/roadmap.md` with three
+  staging builds `npm run sdd:audit` reported missing their change-log row: **PR #495**
+  (subcategory navigation, merge `4c64ea4`), **PR #497** (category aggregation, more departments, a
+  shop link, a bigger hero, merge `70c047b`), and **PR #499** (bundle card styling, a neutral
+  bundles heading, keyset "Previous" pagination, and subcategory tabs everywhere, merge `d2c242a`).
+  Each was a rapid live-review follow-on to the one before it — clicking through what the previous
+  slice actually shipped surfaced the next layer of gaps every time, rather than one pass covering
+  the whole storefront-browsing area. **A `CLAUDE.md` lesson strengthened**: the bare-`{...}`-in-MDX
+  trap (previously hit twice, both times editing an *existing* doc) recurred a third time inside
+  `#496`'s own brand-new `plan.md`, on its first draft — proof that writing fresh spec prose is
+  exactly as exposed as editing an existing file, with no "this is new" exemption. `gates` green on
+  all three PRs; `deploy-staging`/`deploy-docs-internal` confirmed green after each merge, and each
+  slice's live claims were re-verified directly against staging after deploy (not just under
+  `npm run preview`) — a full pagination round trip, the sibling tab row on a subcategory page, and
+  the bundle section's new heading and card styling all confirmed with real HTTP fetches against
+  `staging.aheedfoodcentre.nocaped.com`. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run sdd:audit`
+  re-run and exits with zero gaps.
+- **`/document` closeout for `#489`.** Reconciles `specs/roadmap.md` with what `/validate` and
+  `/ship` actually found: a new change-log row for **PR #492** (build, merge `a6ba350`, `staging`)
+  and a carry-forward row for **PR #488** (promotion, merge `5c6dca2`, `staging -> main`), which
+  `npm run sdd:audit` reported pending at Orient. `gates` (`quality`, `docs-gates`) green on PR
+  #492; `deploy-staging` and `deploy-docs-internal` both confirmed green post-merge. **Fresh-context
+  `/validate` exercised all 22 requirements live against the dev Neon branch**, not from code
+  review — removed the generated set (Aheed 18/SriMart 3, categories intact) → reseeded at
+  `SEED_SCALE_PRODUCTS=2000` (Aheed 2018, 27 distinct storage keys, 2000/2000 primary-image and
+  inventory counts, one generated image fetched live off the dev CDN) → reseeded a second time
+  (idempotent, unchanged) — `putObject` counts 21 → 48 → 21 confirmed the shared image pool and the
+  idempotent re-run. **One process note recorded in `specs/sdd-workflow.md`**: the feature branch
+  had been cut from `origin/main` (post-PR-#488) rather than `origin/staging` — harmless only
+  because the two were content-identical, caught by comparing `git merge-base HEAD origin/staging`
+  against `git merge-base HEAD origin/main`, fixed by rebasing before pushing. **Another recorded
+  there**: `prisma migrate reset --force` was refused by the coding agent's own sandbox during
+  `/validate`; the seed's own `SEED_REMOVE_GENERATED`/`SEED_SCALE_PRODUCTS` toggles proved the same
+  exact-count requirements without a full wipe. **`#489` moved to `In Review`** on Project #2;
+  `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run sdd:audit` re-run and exits with zero gaps.
+- **`/document` closeout for `#434`, `#435`.** Reconciles `specs/roadmap.md` with what actually
+  shipped and, unlike most prior closeouts, with what actually reached production in the same
+  session: two new change-log rows cite **PR #474** (build, merge `1de4df2`, `staging`) and
+  **PR #475** (promotion, merge `d7a048f`, `staging -> main`). `gates` was green on both PRs
+  (`quality`/`docs-gates` as separate jobs on #474); `deploy-staging` completed in the new
+  build-before-migrate order, and `deploy-production` then ran for real — the first live exercise of
+  both fixes on the production path, with the new `quality` job passing all five checks before
+  `Build (OpenNext)` → `Apply migrations` → `Deploy to Workers` ran in order. **R10, the row proving
+  the ordering change does something rather than just that the YAML was edited, was exercised live**
+  at `/validate` on a scratch branch (`scratch/verify-434`, deleted after): a deliberate build
+  failure produced a real workflow run where `Build (OpenNext)` concluded `failure` and
+  `Apply migrations` concluded `skipped`, confirmed afterward that no migration reached staging.
+  PR #475 also carried **PR #471** (doc-encoding repair, KMS index gap, P9.1 row corrections) to
+  production, since `main` was seven commits behind `staging` after PRs #464/#465/#466 bypassed it
+  directly — noted in the roadmap row rather than left implicit. **`#434` and `#435` closed and
+  moved to `Done`** on Project #2, auto-triggered by the promotion merge with no manual
+  reconciliation needed. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run sdd:audit` re-run and
+  exits 0.
+- **`/document` closeout for `#478`, `#479`, `#467`, `#468`, `#469`, `#481`, `#482`, `#483`.**
+  Reconciles `specs/roadmap.md` with the two staging builds and the one promotion `sdd:audit`
+  reported as undocumented: **PR #480** (error boundary gaps, merge `c9170f4`, `staging`), **PR
+  #485** (P9.1 auth rate limiter fix, merge `8d2bbd4`, `staging`), and **PR #486** (promotion,
+  merge `b919650`, `staging -> main`) — plus **PR #477** (P9.2 closeout documentation, merge
+  `a9f178c`, `staging -> main`), which had also reached production undocumented. `gates` was green
+  on PR #480, PR #485 and PR #486; `deploy-staging`, `deploy-docs-internal` and `deploy-production`
+  all confirmed green, with production `/api/health` reporting commit `b919650` and `db.ok: true`
+  after the promotion. `deploy-staging`'s first attempt on PR #485 failed with a transient `P1001`
+  against staging's direct Neon endpoint — a local `prisma migrate status` against the identical
+  `DIRECT_URL` succeeded seconds later, confirming the database was reachable and the failure was a
+  CI-runner network blip rather than a real outage; `gh run rerun --failed` then succeeded.
+  Recorded in `CLAUDE.md`'s branch-strategy section so a future `P1001` there gets a local-check
+  first, not a blind retry. **All eight issues closed and moved to `Done`** on Project #2,
+  auto-triggered by the PR #486 promotion merge. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt;
+  `npm run sdd:audit` and `npm run kms:validate` both re-run and exit clean.
+
+### Added
+- **`#459` — Global 500 Error Boundary.**
+  Added `app/global-error.tsx` and `app/error.tsx` to cleanly intercept unhandled application crashes (such as missing production configuration leading to a fail-closed crash). Instead of a raw browser 500 or generic Next.js fallback, users now see a branded, user-friendly "Something went wrong" UI that prevents leakage of sensitive error stack traces or Zod validation errors.
+
+### Changed
+- **`#434` — production and staging now build before they migrate.** (P9.2).
+  Both deploy workflows ran `npx prisma migrate deploy` *before*
+  `npx opennextjs-cloudflare build`, so a build failure left the database on a newly migrated schema
+  while the Worker continued serving the previous bundle. The adapter build is the step most likely
+  to fail — a root `proxy.ts` once passed `next build`, `lint`, `typecheck` and every test and failed
+  only there. Both workflows reorder to **build → migrate → deploy**; the old combined
+  "Build (OpenNext) & deploy to Workers" step is split so the migration can sit between them.
+  Building first is safe because the build touches no database: the Prisma client is generated from
+  `prisma/schema.prisma`. The window is narrowed, not closed — a `wrangler deploy` failure after a
+  successful migrate still leaves production migrated ahead of its code, which is #438's territory.
+- **`#435` — the production deploy path now runs the same checks a pull request runs.** (P9.2).
+  `deploy-production.yml` ran no lint, format, typecheck or test step, because `gates.yml` triggers
+  on `pull_request` only and nothing quality-related ran on a push to `main`. The five shared checks
+  move into a new reusable `.github/workflows/quality.yml` (`on: workflow_call`) that both
+  `gates.yml` and `deploy-production.yml` invoke, with the deploy job declaring `needs:` on it.
+  Chosen over duplicating the steps into each caller, which creates two definitions that drift the
+  moment a check is added to one and not the other. `gates.yml` becomes two jobs — `quality` and
+  `docs-gates` — because the KMS `ARTIFACT_INDEX` staleness check and the Gate 4 CHANGELOG diff both
+  need `github.base_ref`, which a push event does not have, so they cannot move into the shared
+  workflow. `deploy-staging` deliberately does not get the quality job: `gates` already ran those
+  checks on the PR that produced the merge.
+- **`deploy-production.yml`'s `environment: production` comment corrected.** It asserted a manual
+  approval gate via required reviewers that was never configured — that protection needs a paid plan
+  for private repos and was rejected with a 422 on this repo. Related: verified this slice that
+  **neither `main` nor `staging` has any branch protection at all** (both return
+  `404 Branch not protected`), so CLAUDE.md's suggestion to "accept branch-protection-only review"
+  described a fallback that does not exist. CLAUDE.md's branch-strategy section updated to say
+  plainly that nothing mechanically enforces the flow, citing PRs #464/#465/#466 merging straight to
+  `main` on 2026-08-30 as the live consequence.
+
+### Fixed
+- **Roadmap, changelog and build-notes encoding corruption from PowerShell backtick escapes.**
+  Five documentation lines across three files were written through a PowerShell double-quoted
+  string, where the backtick is the escape character. Every backtick intended as a Markdown code
+  fence was consumed: `` `0 `` became a NUL byte, `` `a `` a BEL, `` `b `` a backspace and `` `f ``
+  a form feed, so `` `0334f6d` `` rendered as `334f6d` and `` `app/global-error.tsx` `` as
+  `pp/global-error.tsx`. One line additionally carried a raw `0x97` (cp1252 em-dash), which made
+  `specs/roadmap.md` invalid UTF-8 — `grep` reported the whole file as binary and `git diff` could
+  not show it as text. A sixth line, in
+  `specs/2026-08-29-p9-1-fail-closed-config/build-notes.md`, had a UTF-16LE fragment appended to a
+  UTF-8 file. All repaired at byte level and re-verified: zero control characters, valid UTF-8,
+  `prettier --check` clean. This is the exact trap CLAUDE.md's Windows section warns about.
+- **`specs/2026-08-30-global-500-error-boundary/` was invisible to the KMS index.** All four files
+  carried front-matter that fails the KMS schema (`type: plan|requirements|validation|build-notes`,
+  `status: active`, `audience: [frontend]` — none of which are in the enums — and no `visibility`).
+  Corrected to the repo's actual convention: `plan.md` carries the single KMS artifact per slice
+  (`type: spec`, `audience: [dev]`, `status: approved`, plus `visibility`/`summary`/`tags`), and the
+  other three carry no front-matter, matching every other slice. `ARTIFACT_INDEX.md` rebuilt —
+  118 → 119 artifacts — so `npm run sdd:audit` passes.
+- **`npm run kms:validate` silently skipped those four files instead of failing.** Its escape hatch
+  for non-KMS front-matter keys on the absence of `visibility`, which is exactly what a malformed
+  KMS doc also looks like, so it reported `invalid front-matter (failing): 0` while skipping real
+  breakage. The hatch no longer applies under `specs/` or `docs/`: those trees are KMS-owned, so a
+  front-matter block there is always an attempt at this schema. Verified by reintroducing the
+  original front-matter and confirming all four errors are now reported as a hard failure.
+- **Roadmap accuracy, found re-validating P9.1.** The #431 row claimed the limiter coordinates
+  "across Vercel/Cloudflare edge workers" — this project has never run on Vercel. The #433 row
+  described the new `CHECK` constraints as "strictly positive inventory/quantity"; `Inventory.quantity`
+  is `>= 0` (zero stock is legal and routine) and only `OrderItem.quantity` is `> 0`. The #459 row
+  claimed validation "on staging" proving "OpenNext Edge routing" was undisrupted — the slice merged
+  straight to `main`, `staging` was fast-forwarded onto it afterwards, and this app does not use
+  Next's edge runtime at all. All three corrected against the code and the merge history.
+
+### Security
+- **`#340` — Cross-tenant writes prevented in reviews repository.** (P9.1).
+  Added `vendorId` enforcement to `upsertReview` and `deleteReview`. Previously, these functions implicitly relied on `productId` and `userId` ownership, which failed the explicit tenancy boundary requirement. The functions now strictly filter by `vendorId`, preventing cross-tenant manipulation. Callers in `lib/reviews-service.ts` supply the current tenant via request-scoped identity. Test exceptions for `reviews.ts` in `repository-vendor-scoping.test.ts` were removed.
+- **`#432` Slice 1 — Cross-tenant data integrity for Product → Category relation.** (P9.1).
+  Added a composite foreign key `(categoryId, vendorId)` to `Product` referencing `Category(id, vendorId)`. Previously, a vendor's product could cite another vendor's category. This structural schema change physically prevents cross-tenant references from being persisted.
+- **`#433` — Commercial CHECK constraints.** (P9.1).
+  Added native PostgreSQL `CHECK` constraints via a hand-authored migration to prevent logically invalid commercial data (e.g. negative prices, negative stock, bad price tiers). Prisma cannot natively model table-level checks in `schema.prisma`. Hand-authored migration `20260829232000_p9_1_data_integrity_hardening` contains the necessary DDL. Data audit scripts were run against the shadow DB to guarantee no constraints were violated by existing records.
+
+### Security
+- **`#431` — Production authentication rate limiting.** (P9.1).
+  Added a Workers-compatible abuse-control mechanism to bound credential stuffing and password-reset abuse. Better Auth's default rate limiter relies on an in-memory store (ineffective across isolates) and a database increment operation that crashes on HTTP Prisma clients. This slice explicitly disables Better Auth's limiter and instead intercepts sensitive paths (`/sign-in`, `/sign-up`, `/forget-password`, `/reset-password`, `/send-verification-email`) via Better Auth's `onRequest` hook in `lib/auth.ts`. The check reuses the proven Postgres-backed fixed-window rate-limiting pattern introduced for order lookups, enforcing a maximum of 5 attempts per IP per minute via a new `AuthenticationAttempt` table.
+- **`#430` — Fail closed when Stripe production configuration is missing or invalid.** (P9.1).
+  Previously, `getPaymentService()` and `getEmailService()` gracefully degraded to stub implementations if their respective API keys were missing. This allowed local development and CI to operate safely without real credentials, but posed a critical risk in production: a misconfigured environment would silently accept orders without ever processing a payment or sending an email.
+  Fixed by attaching `.superRefine()` validation to `paymentSchema` and `emailSchema` in `lib/config.ts`. If `process.env.NODE_ENV === "production"`, these schemas explicitly reject missing `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL`. (This entry originally credited `schema` alongside `emailSchema`; `schema`'s `superRefine` is an empty no-op carrying only a comment, and the Stripe keys live on `paymentSchema` — corrected 2026-08-30. The dead no-op itself is tracked as `#470`.) A new test file `lib/config.test.ts` asserts that this strict enforcement only applies in production environments, fully preserving the mock capability for dev/test safely. `vi.stubEnv` was used to robustly isolate environment variables in the tests.
+
+- **`#429` — a verified Stripe signature no longer confirms or cancels an order on its own.** Second
+  slice of **P9.1**. Signature verification is sound and untouched; the gap was downstream.
+  `app/api/webhooks/stripe/route.ts` acted on `metadata.orderNumber` alone, and
+  `Payment.providerReference` — the Checkout Session id, written post-commit — was never read back.
+  A session created in the same Stripe account with crafted metadata, or a metadata mix-up during an
+  integration change, both arrive correctly signed. Both transitions now also prove correspondence
+  against the stored payment, **in the `where` clause of the compare-and-set that already guarded the
+  status change**, never by fetching and then comparing in application code — the P7a lesson recorded
+  on `findOrderForGuestLookup`, where a missing credential *skipped* the comparison rather than
+  failing it. That placement makes the nullable case free: a stored `null` cannot equal a non-null
+  session id, so an order whose session write never landed is refused by the same predicate that
+  refuses a wrong one, with no separate branch. **`checkout.session.expired` /
+  `async_payment_failed` are bound too**, beyond the issue's literal ask — `failPayment` cancels an
+  order, returns its stock, reverses a loyalty redemption and frees a discount-code use, all
+  previously on an unbound order number. The two paths bind differently on purpose:
+  `confirmPayment` checks provider, session id, amount and currency; `failPayment` checks session
+  identity only, because cancellation asserts no money and refusing to release stock over a missing
+  `amount_total` would strand inventory indefinitely. `confirmPayment`/`failPayment` return result
+  unions instead of booleans — a bare `false` could not separate a duplicate delivery (normal and
+  silent; Stripe retries aggressively) from a mismatch (loud), and the route logs identifiers only,
+  never customer data. Every post-signature outcome still answers **200**, unchanged and deliberate.
+  `features/checkout/cancel-order.ts` (#428's shopper-facing cancel) moves off the webhook service to
+  a new **vendor-scoped** `cancelUnpaidOrder`: its credential is the capability token, it has no
+  Stripe session to bind, and a placeholder binding would have defeated the slice. Adds
+  `scripts/sign-stripe-event.ts`, committed because neither `stripe listen` nor a hand-built unit test
+  can produce a genuinely-signed *mismatched* event — the only input that exercises the refusal path.
+  No schema change, no migration. Deferred: **#454** (recovery for an order stranded
+  `PENDING_PAYMENT` by a refused binding; #101 covers webhooks that never arrive, not ones refused).
+- **`#427` / `#428` — an order number is no longer a credential.** First slice of **P9.1**.
+  `app/(storefront)/checkout/[orderNumber]/page.tsx` resolved a guest's order with the order number
+  alone and rendered their name, phone and delivery address; order numbers travel through emails,
+  shared links, browser history and support threads. `Order` gains a nullable, unique
+  `confirmationToken`, minted with `crypto.randomUUID()` inside `placeOrder`'s existing transaction
+  and carried on both of Stripe's return URLs. `findOrderForViewer` takes it as a fifth explicit
+  parameter: a member's order stays owner-only and ignores the token (a non-owner holding a valid one
+  is still refused), a guest order needs a non-empty match against a **non-null** stored value, and
+  the token is destructured out of the result beside `userId` so it never reaches `OrderSummary`.
+  Every refusal — no such order, wrong token, not the owner — takes one branch to `/orders/lookup`
+  instead of `notFound()`, so nothing confirms which order numbers are real. Orders placed before the
+  migration keep a null token and fall back to that same lookup (order number + email); deliberately
+  **not** backfilled, since minting tokens nobody was ever sent buys nothing.
+  **`app/api/checkout/cancel/route.ts` is deleted.** Stripe's `cancel_url` returns the browser with a
+  `GET`, so that route cancelled a live order and released its inventory for any link prefetcher,
+  mail scanner, chat unfurler or crawler that touched the URL — which a token alone would not have
+  fixed. The `GET` is now a non-mutating confirmation page at `/checkout/[orderNumber]/cancel`, and
+  the write sits behind a POST server action that re-proves the token rather than trusting the form's
+  hidden fields. The stub adapter's fallback destination in `features/checkout/place-order.ts` also
+  carries the token: that branch is **every** checkout wherever `STRIPE_SECRET_KEY` is unset, so
+  without it local preview and CI would refuse shoppers their own confirmation. Migration generated
+  with `prisma migrate diff`, not `migrate dev`, which demands a dev-DB reset over a drifted
+  checksum (**#378**); the same diff reported three `DROP INDEX` statements for the `pg_trgm`
+  indexes, the false drift CLAUDE.md predicts for hand-authored DDL, deliberately excluded. Deferred:
+  **#450** (a `getForStaff` comment still describing the old rule).
+
+### Documentation
+- **`CLAUDE.md` gains a note on `npm run preview`'s local observability query API**, found useful
+  while validating #429's live rows: `wrangler dev` captures every `console.*` line into a queryable
+  local store at `POST http://127.0.0.1:8787/cdn-cgi/local/explorer/api/local/observability/query`,
+  which is what actually proved a `binding-mismatch` refusal logs exactly once and an
+  `already-processed` duplicate logs nothing, rather than eyeballing an interleaved terminal.
+- **`/document` closeout for `#429`.** Reconciles `specs/roadmap.md` with what actually shipped: a
+  new change-log row cites **PR #455**, merge `5f7e32e`, `staging`; records `gates` green (1m10s) and
+  both `deploy-staging`/`deploy-docs-internal` completing successfully post-merge, with staging's
+  `/api/health` confirming commit `5f7e32e`. **All five live validation rows (R30–R34) were run for
+  real**, not deferred: a genuine Stripe test-mode checkout confirmed an order through the binding;
+  a signed-but-mismatched event was refused (`binding-mismatch`, order untouched); the genuine event
+  replayed cleanly (`already-processed`, silent, no second email); a mismatched `expired` event left
+  stock held and a genuine one released it. This is what proved the relation-filtered `updateMany` —
+  untested against real Postgres until this run, per the slice's own build notes — is actually
+  evaluated by the WebSocket adapter rather than silently ignored. **One gap found at Validate and
+  filed rather than patched into scope**: `cancelUnpaidOrder` (the shopper-facing cancel path split
+  off `failPayment` by this slice) has no unit test and no validation row reaches it — **#456**,
+  tagged Phase `P8` per the board's known limitation. **#429 moved to `In Review`** on Project #2; it
+  closes to `Done` only on promotion to `main`. Notes P9.1 has five issues remaining (**#430**–**#433**,
+  plus the pre-existing **#340**) of its eight. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt; `npm run
+  sdd:audit` re-run and exits 0.
+- **`/document` closeout for `#427`, `#428`.** Reconciles `specs/roadmap.md` with what actually
+  shipped: a new change-log row cites **PR #451**, merge `221aea4`, `staging`; records `gates` green
+  (1m6s) and both `deploy-staging`/`deploy-docs-internal` completing successfully post-merge. Notes
+  P9.1 has six issues remaining (**#429**–**#433**, plus the pre-existing **#340**) of its eight.
+  **Live validation surfaced a stale assumption, not a code defect**: this slice's own
+  `validation.md` expected local preview to run the stub payment adapter (no `STRIPE_SECRET_KEY`
+  set) for its live rows, but this repo's `.dev.vars`/`.env` both carry a real Stripe test-mode key
+  by default, so checkout redirects to hosted Stripe Checkout locally the same as staging/production.
+  R29–R31 were validated instead by resolving the guest order's token directly against the dev
+  database and driving the confirmation/cancel pages by URL — the same authorization code the stub
+  path would have exercised. Recorded in `CLAUDE.md`'s Stripe section so the next slice's
+  `validation.md` doesn't repeat the assumption. **#427 and #428 moved to `In Review`** on
+  Project #2; **#450** (filed at Build, a stale docstring deliberately left out of scope) tagged
+  Phase `P8` per the board's known limitation, matching #427/#428. `ARTIFACT_INDEX.md`/`docs.ts`
+  rebuilt (114 artifacts); `npm run sdd:audit` re-run and exits 0.
+- **`/document` closeout for `#426`.** Reconciles `specs/roadmap.md`'s #426 row (written at Build,
+  before the PR existed) with what actually shipped: cites **PR #447**, merge `7ab23c5`, `staging`;
+  records `gates` green (1m18s on the merged commit) and both `deploy-staging`/`deploy-docs-internal`
+  completing successfully post-merge. `/validate` found and fixed a genuine defect before merge — R3
+  claimed `P08 — Deployment & launch` holds zero open issues, contradicting R11's requirement that
+  **#420** stay open on it unchanged; the artifact was already correct (P08 shows exactly one open
+  issue, #420), so `requirements.md`/`validation.md` were fixed instead, shipped in commit `96936db`
+  on the same PR. `/validate` also finished R32's live check, left incomplete at Build — signed in
+  live as `demo-store-admin@example.com` under `npm run preview` and confirmed `/staff/bundles/new`
+  renders its create form. **#426 moved to `In Review`** on Project #2; the twenty new issues
+  (**#427**–**#446**) are tagged Phase `P8` per the board's known limitation. `ARTIFACT_INDEX.md`/
+  `docs.ts` rebuilt (113 artifacts); `npm run sdd:audit` re-run and exits 0.
+- **`#426` — P8 closed as a historical record; P9 and P10 created.** The `P8 — Deployment & launch`
+  milestone held **39 open issues** that were four different kinds of thing at once: genuine launch
+  gates, post-launch enhancements, bookkeeping, and unresolved security work that nothing marked as
+  such (**#340**, a cross-tenant write path). All 39 were redistributed with an explicit destination
+  each — **#340** to P9.1; **#113, #104, #227, #246, #175, #219, #101, #94, #236** to P9.2;
+  **#174, #350, #351, #398** to P9.3; twenty-three to P10; **#91** (the P8 epic) and **#408** (fully
+  sequenced by #420) closed with reasons; **#420** left open to close on its own promotion.
+  **P8.6 and P8.7 folded into P10** and their milestones closed one day after #420 created them,
+  with #420's gate analysis (#363 gating #401/#402, ADR-006 gating #402 and #400's per-store half,
+  #398's variant model gating #399 and #397's Pack Size facet, #399's second gate amending ADR-005)
+  **preserved in the P10 prose rather than discarded**. P8.1/P8.2/P8.3/P8.5/P8.6/P8.7 keep their
+  numbers and original text, marked with where their work went — renumbering would falsify
+  `specs/2026-08-23-p8.1b-closeout/plan.md` and the change-log rows citing them. Six milestones
+  created (`P9`, `P9.1`–`P9.4`, `P10`) and **twenty issues filed**: **#427**–**#433** (guest order
+  PII, cancellation authorization, Stripe session binding, payment fail-closed, auth rate limiting,
+  cross-tenant DB integrity, commercial CHECK constraints), **#434**–**#438** (migration-safe
+  deploy, release quality gates, backup/PITR restore, alerting, rollback), **#439**–**#442** (LCP
+  re-measurement, Playwright smoke suite, UAT, accessibility), **#443**–**#445** (game day, exact
+  release-candidate verification, GO/NO-GO), **#446** (CSP hardening). Seven P10 themes are recorded
+  as **prose, deliberately not filed as issues**. **Two claims were checked against the code and
+  not filed as written:** **#243** was already closed and was **not** reopened (#439 measures the
+  release candidate instead), and `/staff/bundles/new` proved not to be a broken journey —
+  `[bundleId]/page.tsx` branches on `bundleId === "new"`. Six other claims were confirmed true
+  against the code first, each cited to a file and line in `plan.md`. Extends the #267 board note to
+  cover P9 and P10, which Project #2's Phase field cannot express either. Sequencing and decision
+  work only — **no application code, including no fix for any security item filed**.
+  `specs/2026-08-28-p9-launch-readiness-restructure/`, roadmap v1.53.0.
+- **`/document` closeout for `#420`.** Reconciles `specs/roadmap.md`'s #420 row (written at Build,
+  before the PR existed) with what actually shipped: cites **PR #424**, merge `be57b26`, `staging`;
+  records `gates` green (1m20s) and both `deploy-staging`/`deploy-docs-internal` completing
+  successfully post-merge. Names the three follow-up issues filed at Build and confirms their board
+  placement (Backlog, Phase `P8`): **#421** (build the pre-launch set), **#422** (the business
+  question ADR-006 left open), **#423** (`kms/site-internal/next-env.d.ts` dirtying `sdd:preclear`
+  on every internal docs build). **#420 moved to `In Review`** on Project #2. `ARTIFACT_INDEX.md`/
+  `docs.ts` rebuilt (112 artifacts); `npm run sdd:audit` re-run and exits 0.
+- **`#420` — the `#408` storefront and fulfilment brief sequenced into the roadmap.** Fourteen
+  issues (**#394**–**#407**, filed 2026-08-27) moved off their stated `P8` holding position.
+  Before this slice `specs/roadmap.md` contained none of the strings `#408`, `#394` or `#407` —
+  the issues existed, sat on Project #2, and were sequenced nowhere, while the roadmap said P8.2
+  was next and the store is not live. Two phases **appended, not renumbered** (P8.1/P8.2/P8.3/P8.5
+  keep their numbers, P8.3 stays the unscheduled catch-all): **P8.6 — Storefront discovery &
+  conversion** (#394, #395, #396 paired with #286, #406, #405's link-only half, #400's
+  async-loading half, #397's three boolean certification facets, and a **gated** #404) and
+  **P8.7 — Fulfilment & merchandising data models** (#398's variant model, #399, #401, #402,
+  #397's Pack Size and Brand facets, #400's per-store half). A **pre-launch set inside P8.2** —
+  #407, #397's Country-of-Origin facet, the #403 investigation, #398's unit-price derivation half
+  — is sequenced here and built by a separate later slice under its own issue; **no feature from
+  the brief is built by this slice**. Also records the #397/#398/#400 phase splits, six gating
+  relationships, the earliest-phase milestone rule (a GitHub issue carries one milestone; three of
+  these are split), and the #267 board Phase-field limitation. GitHub milestones **P8.6** and
+  **P8.7** created and ten issues re-milestoned; all fourteen stay open.
+  **Three findings from checking the brief against the code rather than trusting it:** #407 is not
+  schema-free (no social field exists on `VendorConfig` or `VendorBranding`, so it needs an
+  additive migration); #403 is expected to ship no application code (`lib/payments.ts` uses hosted
+  Stripe Checkout with `mode: "payment"` and pins no `payment_method_types`, so wallets are
+  Dashboard-controlled — only Apple Pay domain registration is real work, and the live half waits
+  on #113); and #399 is gated **twice**, the second gate being a payments-capture decision amending
+  ADR-005, because `lib/payments.ts` sets no `capture_method` and the integration therefore captures
+  immediately. Carry-forward change-log row for **PR #419** added, which `npm run sdd:audit` had
+  reported as the one pending promotion.
+- **`ADR-006 — Store locations (multi-branch shape)` added**, settling the question that gated
+  #400's per-store half and #402. A store location is a child of `Vendor`, **never a second tenancy
+  axis and never a second mandatory filter in `lib/repositories/*`** — `vendorId` stays the sole
+  isolation axis, so adopting locations later is an additive migration rather than a rewrite of
+  every repository query and of `tests/repository-vendor-scoping.test.ts`'s premise. Resolves a
+  naming collision the brief never raised: **ADR-004 decision 1 already anticipates
+  `Region`/`Location` reference tables**, which are *geography reference data* and a different
+  concept from a trading site with stock and a collection counter — a trading site takes the more
+  specific name `VendorLocation`. **The business question — whether Aheed trades from more than one
+  site — is deliberately left open**; ADR-006 rules shape, not commerce, and `specs/mission.md`'s
+  out-of-scope line on multi-branch management is **not** amended. `ADR-004` (1.9.0 → 1.10.0) gains
+  a cross-reference on decision 1 so a reader with a locations question, who would open ADR-004
+  rather than ADR-006, finds the ruling.
+- **`/document` closeout for `#409`/`#411`/`#412`/`#415` (repository client injection, slices 2+3
+  of 3 — #409 fully closed out).** `specs/roadmap.md` gets a full closure row for **PR #417**
+  (merge `1cf7fd3`), recording `gates` green (1m15s), post-merge `deploy-staging` and
+  `deploy-docs-internal` both completing, and the #415 smoke check (10/10 sequential requests to
+  `https://staging.aheedfoodcentre.nocaped.com/` returning HTTP 200 with no Error 1102). Project
+  #2's **#409, #410, #411, #412, #415** all moved to **In Review** (stay open; each closes only on
+  promotion to `main`). Two lessons from this loop recorded where future sessions will actually
+  read them: `CLAUDE.md` gains a note that piping a live-writing script (e.g.
+  `scripts/verify-repository-injection.ts`) through `head` risks SIGPIPE killing it before its own
+  cleanup runs — hit at `/validate`, left one product/two images/one category behind in the dev
+  database until found and removed by hand; `specs/sdd-workflow.md` gains a note that a
+  `validation.md` row checking `sdd:audit` reports zero gaps cannot pass at `/validate` if it means
+  the *current* slice's own roadmap row, since that row is Document (final)'s job and can't exist
+  yet — write such a row pinned to a specific already-landed PR instead, the way slice 1's own R19
+  did. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (110 artifacts); `npm run sdd:audit` and
+  `npm run kms:validate` both confirmed clean after the edits.
+
+### Changed
+- **`#409`/`#411`/`#412` — repository client injection, slices 2+3, completing `#409`.** The
+  enforcement `#410` added could only cover four of the eight non-compliant files, so it shipped
+  scoped to a `FILES_IN_SCOPE` list. **That list is deleted**: `tests/repository-client-injection.test.ts`
+  now enumerates `lib/repositories/` from the filesystem and checks every file, so a newly added
+  repository module is covered the moment it exists. Slices 2 and 3 were merged into one because that
+  scoping window was slice 1's own declared weakness and two more loops would have kept it open.
+  - **Converted (26):** `categories.ts` (4), `loyalty.ts` (3), `vendor.ts` (5), `products.ts` (14).
+    All four now import `@/lib/db` with `import type` only. Resolution moved into the four existing
+    sibling services — **no new service files**.
+  - **Call sites keep the function names.** Each service imports the repository original under a
+    `…Repo` alias and re-exports a same-named wrapper, so 29 call sites changed only their import
+    path. `features/admin/storefront.ts` imported `updateVendorStorefrontConfig` under an alias, so
+    the sweep was by symbol, not by name — a name grep reported it as dead code.
+  - **Three dead Prisma clients removed.** `updateProductForVendor`, `setPrimaryProductImage` and
+    `quickUpdateInventory` each constructed an HTTP-adapter client and **never read it**. So no
+    `products.ts` export needs two clients — correcting "four of which need both clients", a figure
+    carried through `#409`'s plan and both issue bodies. ESLint enables no `no-unused-vars` rule of
+    any kind (verified empirically), which is why nothing caught it: filed as **`#416`**.
+  - **`updateVendorStorefrontConfig`'s `data: any`** replaced with a named
+    `VendorStorefrontConfigInput`, and its eight `brand*` writes iterated from a tuple instead of
+    sixteen hand-written identifiers — a typo in one had been enough to silently stop writing a colour.
+  - **Tests got simpler.** `tests/vendor-profile.test.ts` drops `vi.mock("@/lib/db")` and its dynamic
+    import for a stub client passed as an argument; the two email tests re-point their mock at
+    `@/lib/vendor-service`. Both email suites had been failing to load — 695 → 709 passing.
+  - `scripts/verify-repository-injection.ts` extended to 14 checks spanning reads and writes across
+    all four files, including the WebSocket `$transaction` path, with cleanup verified by re-count.
+    It now **refuses to run** against any host named in `secrets/staging.vars` or
+    `secrets/production.vars`, before constructing a client, with no override flag.
+- **`#415` — Worker `cpu_ms` raised 50 → 300.** Error 1102 ("Worker exceeded resource limits") kept
+  recurring on staging at 50, observed live at `2026-08-27T12:46:36Z` (Ray ID `a31b2e161d0a63c5`).
+  React SSR plus Prisma's WASM query-compiler instantiation on a cold isolate is genuinely CPU-bound;
+  Workers bills CPU actually used, not the ceiling, so the raise carries no cost on its own.
+  Confirmation on deployed staging is a Ship-stage check, not a pre-merge one.
+
+### Documentation
+- **`/document` closeout for `#409`/`#410` (repository client injection, slice 1 of 3).** The
+  `specs/roadmap.md` row this slice's own branch added is now updated with **PR #413**
+  (merge `464b59d`) — unknown at Build/Ship time. Records that `gates` was green on the PR,
+  `deploy-staging`/`deploy-docs-internal` both completed, and Project #2's **#410** moved to
+  **In Review** (stays open; only closes on promotion to `main`). No reconciliation was needed
+  against `/validate`'s findings — nothing surfaced there beyond what `build-notes.md` already
+  recorded. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (109 artifacts); `npm run sdd:audit` and
+  `npm run kms:validate` both confirmed clean after the edit.
+
+### Changed
+- **`#409`/`#410` — repository client injection, slice 1 of 3.** `CLAUDE.md` requires every
+  `lib/repositories/*` export to take its Prisma client as an explicit parameter, so a plain `tsx`
+  script can exercise it against a real database. **32 of 109 exports across 8 files did not**, and
+  nothing checked it: `tests/repository-purity.test.ts` covers only the request-context half of the
+  rule, and its docstring actively declared internal `getPrisma()` calls "compliant". They are not —
+  `lib/db.ts` builds its client from `@prisma/client/wasm` (mandatory on Workers), whose query
+  compiler **Node cannot load**, so a self-resolving export cannot run in a script at all. Measured
+  against the dev Neon branch, not argued: an injected-client call passed, the self-resolving
+  equivalent failed with `ERR_UNKNOWN_FILE_EXTENSION`, and the same query through the script's own
+  client passed.
+  - **New:** `tests/repository-client-injection.test.ts` — AST call-expression check (not a grep:
+    these files legitimately name `getPrisma()` in prose and in `ReturnType<typeof getPrisma>` type
+    positions). No function-level allowlist; temporarily scoped by a **file** list that #412 deletes.
+    Proven to fire by reintroducing the defect and watching it fail.
+  - **Converted (6):** `listCustomersForAdmin`, `checkOrderLookupRateLimit`, `getCatalogueHealth`,
+    `getLoyaltyLiability` now take `prisma` explicitly; `createCodeForVendor`/`deactivateCodeForVendor`
+    **relocated** to `lib/discounts-service.ts` rather than parameterised — they are pure facades over
+    functions that already take a client, so a parameter would have left two identical entry points.
+  - **New services:** `lib/customers-service.ts`, `lib/reports-service.ts`,
+    `lib/order-lookup-rate-limit-service.ts`. Resolution has to live in `lib/` because ADR-004 slice
+    2's `no-restricted-imports` rule forbids `@/lib/db` in `app/`/`features/`/`components/` — a caller
+    there physically cannot hand a client in.
+  - **New:** `scripts/verify-repository-injection.ts`, proving all five converted paths run against a
+    real database with a Node-native client. The **guest order-lookup rate limiter** — a security
+    control that could not be exercised outside a live request — now demonstrably refuses past its
+    5-per-minute threshold.
+  - Which client each path uses is unchanged; `deactivateCodeForVendor` still resolves `getPrismaWs()`
+    for its `updateMany` (#382), and `tests/repository-transaction-safety.test.ts` is untouched.
+  - Slices 2 (**#411** — `categories`, `loyalty`, `vendor`) and 3 (**#412** — `products.ts`, then
+    delete the file scoping) remain open. The rule is not fully enforced until #412 lands.
+
+### Documentation
+- **Roadmap row for the `#382` production promotion (PR #393)** — carry-forward from the previous
+  slice, the one gap `npm run sdd:audit` reported at this Orient.
+- **`CLAUDE.md`'s repository-layer section rewritten** to state the rule once, name **both** enforcing
+  tests, and record the `@prisma/client/wasm` finding. Adds the third instance of this rule claiming a
+  false enforcement — and its distinct lesson: *a test that correctly enforces its own invariant can
+  still launder a second, unenforced invariant if its comments opine on one.*
+- **Roadmap change-log rows for P8.5d, the P8.5c+P8.5d production promotion, and the full `#382`
+  saga** (`specs/roadmap.md`) — the three gaps `npm run sdd:audit` reported at this pass:
+  `specs/2026-08-25-p8.5d-multi-buy-tier-pricing/` (PR #380, staging), the PR #381 promotion
+  (`staging -> main`, closing #347/#348), `specs/2026-08-26-auth-http-transaction-fix/` (PRs #383,
+  #384 — two real, independently-correct fixes that were still insufficient), and
+  `specs/2026-08-27-prisma-many-http-transaction-fix/` (PR #391 — the fix that actually closed the
+  bug). **Correction against issue #382's own write-up, found writing this pass's roadmap row**:
+  its "corrected root cause" section named `restoreCartFromOrder` as a 4th broken call site: traced
+  by hand and found already safe (its `prisma` parameter always resolves to `getPrismaWs()` via
+  `placeOrder`); the real 4th site, `updateVendorStorefrontConfig`, was omitted from the issue
+  entirely. Corrected via an issue comment rather than silently left stale. `#390` (nominal/branded
+  `getPrisma()`/`getPrismaWs()` types, filed at Build) tagged Phase P8 on the delivery board — it
+  had none. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (108 artifacts). `npm run sdd:audit` confirmed
+  exiting 0 after this pass.
+
+### Fixed
+- **#382, corrected root cause**: four writes could 500 intermittently or unconditionally with
+  `Transactions are not supported in HTTP mode` — never Better Auth, despite the identical error
+  message and throw site. Prisma 6's client-side query compiler (`engineType = "client"`) wraps
+  `updateMany`/`createMany` in an internal transaction the HTTP-mode adapter can't execute,
+  regardless of `where`-clause shape or match count (confirmed empirically against a live Neon DB);
+  a direct `.$transaction()` call on the HTTP client fails the same way unconditionally.
+  `upsertBundle`/`setBundleImage` (bundle save/image upload), `deactivateCode` (discount
+  deactivation), and `updateVendorStorefrontConfig` (`/staff/storefront` save) all now route
+  through `getPrismaWs()` instead of `getPrisma()`. A new regression test,
+  `tests/repository-transaction-safety.test.ts` (same no-allowlist AST pattern as
+  `tests/repository-purity.test.ts`), statically enforces that no `updateMany`/`createMany` call
+  site in the repository layer passes `getPrisma()` to a function that needs a transaction-capable
+  client, and that no repository file calls `.$transaction(` directly on `getPrisma()`. Verified
+  the test actually catches the bug by temporarily reverting the fix and confirming it fails on
+  exactly these four sites and no others. See
+  `specs/2026-08-27-prisma-many-http-transaction-fix/` for the full investigation and
+  `specs/2026-08-26-auth-http-transaction-fix/build-notes.md`'s "RESUMED" section for how the
+  original (correct-but-insufficient) diagnosis led here. The diagnostic instrumentation from that
+  earlier investigation (see below) is fully reverted.
+
+### Diagnostic (temporary — not a real change, will be reverted)
+- **RESOLVED — all instrumentation below has been reverted; kept for history.**
+- **#382 investigation**: two live fix attempts (`authDb()` Proxy wrapper, then also disabling
+  Better Auth's rate limiter) both still crashed identically on staging. Temporary `console.log`
+  instrumentation added to `lib/auth.ts` to observe via `wrangler tail` whether Better Auth's
+  adapter is actually reading `$transaction` from the wrapped client at runtime, since local Node
+  testing against a real Prisma client with real staging credentials shows the wrapping working
+  correctly in isolation. This commit exists only to get a live answer; it will be reverted.
+  **Update**: the `authDb()` diagnostic confirmed the wrapped client is NOT the crash source —
+  live logs show `typeof wrappedDb.$transaction === "undefined"` on every access, including on the
+  exact request that still crashes immediately afterward. A second, more direct diagnostic now
+  patches every `getPrisma()` instance to log a stack trace the moment its real (unwrapped)
+  `$transaction` is actually called, to find the true caller.
+  **Update 2**: that diagnostic *also* never fired, live, on the exact request that still crashed —
+  neither the `authDb()`-wrapped client nor `getPrisma()`'s own instance-level `$transaction` is
+  ever called. The throw (`PrismaNeonHttpAdapter.startTransaction`, confirmed via `wrangler tail`)
+  is a **prototype** method on a class `@prisma/adapter-neon` never exports directly (created
+  internally by `PrismaNeonHttp.connect()`), so it's shared across every instance regardless of
+  which `PrismaClient` wrapper called it. Patched via `connect()` instead, to reach that prototype
+  directly and catch the call regardless of which client instance is actually involved.
+  **Update 3**: the prototype patch *did* fire, but its captured stack trace bottoms out entirely
+  inside Prisma's own query-plan interpreter (`interpretNode`/`execute`/`singleLoader`) — Prisma 6's
+  client-engine-runtime doesn't preserve the original application call site across its internal
+  async dispatch, so no amount of logging at the throw site can attribute this to a specific
+  caller. Reoriented: instrumenting `attachBundleImage`'s own sequential steps directly (before/after
+  each `await`) to find which of *its* operations is running when the crash happens, since Prisma's
+  own internals can't say.
+  **Update 4**: the step-logging diagnostic merged to `staging` (PR #388, `fe1ed5d`), but its
+  `deploy-staging` run never acquired a runner — a GitHub Actions outage, confirmed via
+  `githubstatus.com`. This PR carries no code change; it exists only to retrigger that stuck deploy
+  via a fresh push (rerunning/cancelling the stuck run directly failed with contradictory API
+  errors, itself a symptom of the same outage) and to land the prior session's pause notes, which
+  were pushed to the already-merged `fix/auth-diag-382d` branch and never actually reached
+  `staging`.
+
+### Fixed
+- **Any authenticated action could intermittently 500** with a generic "This page couldn't load —
+  a server error occurred" page, on both staging and production. Root cause: `lib/auth.ts`'s
+  `getAuth()` handed Better Auth's Prisma adapter the app's HTTP-mode client (`getPrisma()`), which
+  has a `$transaction` method that throws `Transactions are not supported in HTTP mode` instead of
+  being absent. Better Auth's own Prisma adapter (`@better-auth/prisma-adapter`) already falls back
+  to a non-transactional path for exactly this case, but only when `typeof db.$transaction !==
+  "function"` — since the HTTP client's `$transaction` genuinely is a function (just one that
+  throws), that guard never tripped and the adapter called the throwing method instead. Fixed by
+  wrapping the client passed to `prismaAdapter()` in a `Proxy` that hides `$transaction`, so the
+  adapter's own fallback engages — deliberately not switching to `getPrismaWs()`, which would have
+  fixed the crash at the cost of a new WebSocket connection on every authenticated request. Found
+  live while shipping and validating P8.5d (#348, PR #380/#381), tracked and fixed as its own issue
+  (#382) per this repo's SDD gates rather than folded into that unrelated slice. **This alone was
+  not sufficient** — re-verified live, the crash persisted with an identical error digest, which
+  turned out to be a second, independent trigger for the same underlying throw rather than proof the
+  first fix failed (Next.js's `digest` hashes a stack trace that Prisma's shared transaction
+  dispatcher makes caller-agnostic). The second cause: Better Auth's **built-in rate limiter
+  defaults to enabled whenever `NODE_ENV=production`** — never a deliberate choice in this app — and
+  its storage wrapper hits the identical `db.$transaction` fallback pattern via `incrementOne`. Fixed
+  by explicitly disabling it (`rateLimit: { enabled: false }`); re-verified live with 5+ consecutive
+  attempts, not a single clean run, given the bug's own intermittency.
+
+### Added
+- **P8.5d — multi-buy tier pricing** (#348). A vendor can run "3 for £10.00" on a product; it applies
+  automatically with nothing typed, shows on the card and the cart line, and the checkout charges it.
+  **Modelled as a PRICE, not a discount** — nothing here touches `DiscountCode`, no
+  `DiscountRedemption` is written and no `remainingRedemptions` consumed. The codeless-`DiscountCode`
+  route was rejected at `/propose` on three counts: `DiscountRedemption`'s `@@unique([orderId])`
+  allows one redemption per order (so a tier plus a typed code could not both be recorded),
+  `evaluateCode` is subtotal-scoped and cannot express a per-line quantity predicate, and #273 exists
+  because redemption rows were once written around `placeOrder`'s transaction.
+  **A group price, not a reduced unit price**: whole groups charge `groupPricePence`, remainder units
+  charge `basePrice`. Exact integer pence at every quantity — a per-unit model cannot express "3 for
+  the price of 2" (`1000 / 3` charges £9.99, a penny short, on every group forever). A tier that
+  would cost more than buying singly is clamped away, so a staff typo cannot overcharge for buying
+  more. New `ProductPriceTier` model, one row per product (migration
+  `20260825190000_p8_5d_product_price_tier`, generated by datamodel diff), pure `lib/tier-pricing.ts`,
+  `lib/repositories/product-tiers.ts` with explicit vendor-scoped reads, tier configuration on the
+  existing `/staff/products` form, and seed tiers for both Aheed and SriMart.
+  **`OrderItem` needed no schema change** — it already stored `unitPricePence` and `lineTotalPence`
+  separately, the second redundantly. `unitPricePence` stays the base price and `lineTotalPence`
+  becomes the tiered total, so the multi-buy is auditable per order without a redemption row.
+  `computeTotals` gained an *optional* explicit line total, so every pre-existing caller behaves
+  identically and no existing `tests/order-totals.test.ts` case changed.
+  **Consequence worth knowing:** a tier sits *inside* the subtotal, so the vendor's
+  `minimumOrderPence` and the free-delivery threshold are judged on the tier-reduced figure — the
+  opposite of how discount codes and loyalty redemption behave, and deliberate. Codes stack with
+  tiers and apply to the tier-reduced subtotal.
+  Scoped to **product** tiers only; bundle-scoped tiers are #377, so P8.5c's bundle cards continue to
+  claim no saving. Tier scheduling is #379, blocked on #363's hardcoded vendor timezone.
+  **This slice does not discharge #147** — that is an order-level, discovery-based promotion inside
+  the discounts engine; #147, #146, #148 and #149 all remain open, and `specs/roadmap.md`'s claim to
+  the contrary is corrected on this branch.
+- **P8.5c — curated bundles** (#347). A `Bundle` is a vendor-curated list of products already in the
+  catalogue; "Add all N to basket" expands it into ordinary `CartItem` rows through the existing
+  `addCartItems` transaction, so checkout, stock decrement, Stripe, loyalty and discounts are all
+  untouched. Deliberately **not** a purchasable SKU — that shape would need its own inventory, its
+  own decrement inside `placeOrder`'s transaction and its own cases in four other subsystems, to
+  sell things the catalogue already holds. New `Bundle`/`BundleItem` models (migration
+  `20260825140000_p8_5c_bundles`, generated by datamodel diff, no hand-authored DDL),
+  `lib/repositories/bundles.ts` pure with `lib/bundles-service.ts` as its sibling facade, a section
+  on `/categories` between the departments and the product rows, `/staff/bundles` CRUD with image
+  upload, and seed bundles for both Aheed and SriMart.
+  **There is no stored price and no savings claim, deliberately.** A bundle's total is summed from
+  its constituents' live `basePrice` at read time, so it cannot drift; but nothing in the current
+  discounts engine reduces what a bundle actually charges (`DiscountCode.code` is required, so there
+  is no codeless-discount path at all). That mechanism is **P8.5d (#348)**, and until it ships the
+  card shows the derived total and claims no saving rather than rendering a figure the checkout
+  would not honour. `app/(landing)/page.tsx` is untouched, so P8.5f's landing slim-down stands.
+
+### Fixed
+- **Creating a bundle (or, more broadly, anything going through `isUniqueViolation()` and the
+  `getPrisma()` HTTP adapter) with a duplicate slug crashed with an unhandled `500`** instead of
+  returning the intended form error. `lib/repositories/prisma-errors.ts`'s `isUniqueViolation()`
+  checked only Prisma's normalised `P2002` code; `getPrisma()`'s HTTP adapter (`PrismaNeonHttp`,
+  used for the large majority of writes app-wide) throws the same underlying error but with the raw
+  Postgres SQLSTATE `23505` instead, which the predicate missed. Fixed at the shared helper so every
+  caller benefits, not just bundles — `lib/repositories/categories.ts` had the identical latent
+  exposure. Found live at `/validate` for P8.5c (#347); regression-tested in
+  `tests/prisma-errors.test.ts`.
+
+### Documentation
+- **P8.5c closeout** — `specs/roadmap.md`'s P8.5c row (added at Gate 4, before `/validate`) is
+  reconciled with what actually shipped: cites **PR #374** (it previously cited no PR at all), and
+  replaces "R14 left uncorrected on purpose" with how `/validate` actually resolved it, plus the two
+  live defects `/validate` found and `/fix` corrected (seed fixture, `isUniqueViolation`). `CLAUDE.md`
+  gains a permanent note on the `PrismaNeonHttp`/`PrismaNeon` error-code discrepancy (`23505` vs
+  `P2002`) that caused the duplicate-slug crash, under the Database section's existing hybrid-strategy
+  explanation. Filed **#375** — auditing `categories.ts`/`discounts.ts`/`loyalty.ts`/`products.ts`'s
+  own `isUniqueViolation` call sites for the same exposure, deferred rather than done here since it
+  needs live reproduction per call site, not a guess. Issue #347 moved to **In Review** (merged to
+  `staging`, not yet promoted — deliberately batching with P8.5d rather than promoting solo, matching
+  the a/b/e/f precedent); #372/#373 (already-filed P8.5c follow-ups) and #375 tagged Phase `P8` on the
+  delivery board.
+
+- **P8.5 (slices a, b, e, f) closeout** — `specs/roadmap.md` gained the four build rows and the
+  promotion row `npm run sdd:audit` flagged as missing (P8.5a/b/e had shipped to `staging` across
+  earlier sessions with no roadmap citation; P8.5f's own build and its `/fix` pivot away from
+  `proxy.ts` are recorded together with the PR #369 promotion that shipped all four to production).
+  `CLAUDE.md` gained a permanent note on why no `proxy.ts`/`middleware.ts` can currently be built on
+  this project's pinned `@opennextjs/cloudflare` (Next 16 forces Proxy files onto the Node.js
+  runtime and forbids opting out; the adapter rejects any Node-runtime middleware outright) and what
+  to reach for instead (an explicit prop from the rendering layout, same pattern as `isPortal`).
+  Issue #362 (P8.5f's own tracking issue, missed from PR #369's `Closes` list because its
+  `requirements.md` still read a stale "no issue opened yet") and #279 (superseded by
+  `DepartmentCampaign`'s shipped staff UI) closed manually with explanation. A stale, merged
+  sub-agent worktree (`feature/p8.5a-product-card-upgrade`) found and removed, closing #366.
+
+### Fixed
+- **Campaign and discount schedules were stored an hour from what staff typed** (P8.5f). An
+  `<input type="datetime-local">` submits a naked wall-clock string with no offset, and ECMAScript
+  reads such a string in **the runtime's own** timezone — so `lib/campaign-form.ts`'s
+  `new Date("2026-08-25T07:25")` meant `07:25Z` on the Worker, while `CampaignForm.tsx` rendered it
+  back with `date.getHours()` in the admin's browser and showed `08:25`. Write and read assumed
+  different zones and the gap was exactly the BST offset; the database held an instant nobody chose.
+  `features/admin/discount-codes.ts` carried the same defect independently, where it decided when a
+  code starts being redeemable. New pure `lib/local-datetime.ts` pins `STORE_TIMEZONE =
+  "Europe/London"` and reads offsets from `Intl.DateTimeFormat` rather than the process clock, so
+  conversion is identical on the Worker, in CI and in the browser — asserted by running its tests
+  under both `TZ=UTC` and `TZ=America/New_York`. Nothing in `lint`/`typecheck`/`test` caught this:
+  each runs in a single process where the two wrong assumptions cancel, and the existing test
+  asserted only `toBeInstanceOf(Date)` — a `Date` built from the wrong instant is still a `Date`.
+  Rows written before this fix still hold the old instants; correcting them is deliberately out of
+  scope. Per-vendor timezones are **not** introduced (both vendors are UK) — see ADR-004 1.9.0.
+- **`/categories` was titled "Categories — Aheed Food Centre" for every vendor**, so SriMart's shop
+  page advertised Aheed's trading name. Now vendor-derived, matching the landing page. Same defect
+  class #239 removed elsewhere; fixed here because this slice rewrote the page.
+- **`DepartmentHero`'s carousel `aria-label` still read "Shop by department"** (P8.5b), which is now
+  the literal heading of `/categories`' own section of the same name — the landing page's own hero
+  carried the phrase this slice requires be absent from `/` entirely. Renamed to "Department
+  spotlight", which is a more accurate name in its own right (one department at a time, not the full
+  list `/categories` shows) rather than merely a dodge.
+
+### Changed
+- **The landing page is hero-first** (P8.5f). The department scroller and the New Arrivals /
+  Featured Products rows moved to `/categories`, rebuilt from a bare `<ul>` of links into the shop
+  page; the landing page keeps its hero and trust strip. The search box and "Shop List" link are
+  hidden on `/` only.
+- **The postcode delivery checker moved from the homepage hero into the header** and now persists.
+  It was a `method="GET"` form whose answer lived in `?postcode=` and vanished on the first
+  navigation; it is now a server-action form (no client JS) storing a `delivery-postcode` cookie,
+  attributes mirroring `lib/cart-identity.ts`. **Only the postcode is stored, never the verdict** —
+  that is recomputed each render against the vendor's current prefixes, so widening a delivery area
+  cannot leave a shopper holding a stale refusal. Consent posture unchanged: a functional store
+  preference, inside the essential set the cookie banner already describes, written only on
+  deliberate submission.
+
+### Added
+- **`app/(landing)/` route group** (P8.5f) — a second route group holding only the `/` page, so the
+  header can differ on `/` from every other route (a layout cannot see which page it wraps) without
+  a root-level routing file. Both `app/(storefront)/layout.tsx` and `app/(landing)/layout.tsx` render
+  the shared `components/layout/StorefrontChrome.tsx`, passing an explicit `isLanding` boolean into
+  `Header` — the same pattern `isPortal` already used. **Superseded a root `proxy.ts`** (Next 16's
+  rename of `middleware.js`) within the same day: Next 16 forces every Proxy file onto the Node.js
+  runtime and forbids opting out, while this project's pinned `@opennextjs/cloudflare` (latest
+  published, `1.20.2`) unconditionally rejects any Node-runtime middleware it detects
+  (`process.exit(1)`, confirmed identically under local `npm run preview` and on a real `staging`
+  deploy, PR #367 — the push never went live). Documented in `specs/architecture.md` 1.20.0.
+  "Auto-Generate" button on the campaign banner panel. Reuses the existing `lib/image-generation.ts`
+  port (Cloudflare Workers AI, `flux-1-schnell`) that has backed product images since P8; no new
+  infrastructure. The request body carries only a `categoryId` — prompt and storage key are built
+  server-side, so a caller can neither steer the model under this store's branding nor aim a write
+  at another vendor's object.
+
+### Documentation
+- **New SDD Operator Runbook** (`docs/developer-portal/sdd/operator-runbook.md`, `id:
+  sdd-operator-runbook`, `type: runbook`) — a human-executable manual for the Orient/Propose/Spec/
+  could run the same commands, read the same files, and recognize the same failure modes the
+  assistant would. Per stage: purpose, inputs, what happens behind the scenes, a manual procedure,
+  expected results, a troubleshooting table, where to investigate, and decision points requiring a
+  human call — plus a consolidated troubleshooting table and decision-point summary at the end.
+  Derived from `specs/sdd-workflow.md`, `.claude/commands/*.md`, `scripts/sdd-check.ts`'s actual
+  source, and the git hooks/CI workflows — not invented — with two things it observed live in the
+  same session: a stray sub-agent worktree at `.claude/worktrees/` and the delivery board showing
+  `Backlog`/`In Progress` for three issues (#345, #346, #356) already merged to staging. First drafted
+  at `.claude/onboarding.md` (never committed) then moved into the KMS-indexed `docs/developer-portal/`
+  tree at the user's request, since `docs/developer-portal/onboarding.md` already exists for a
+  different purpose (new-developer setup) and this needed its own name. Verified against the real
+  pipeline, not just assumed: `npm run kms:validate` (0 invalid front-matter), `npm run
+  kms:build-index` (102 -> 103 artifacts), and `npm run kms:assemble:internal && (cd
+  kms/site-internal && npx next build --webpack)` (107 pages built, including
+  `/dev/sdd-operator-runbook`). Went through Build only — no `/propose`/`/spec` — scaled down per
+  `specs/sdd-workflow.md`'s own "scale the loop to the change" rule: a single new doc file, no
+  `app`/`lib`/`prisma` code touched, no tracked issue, so `specs/roadmap.md` and the delivery board
+  have nothing to reconcile against once this merges.
+
+### Fixed
+- **`specs/2026-08-25-p8.5e-hero-campaigns/plan.md` broke `deploy-docs-internal` on merge** — a bare
+  `"Shop {name}"` in prose (not backtick-quoted) parses as a JSX expression referencing an undefined
+  `name` in the assembled MDX, crashing the internal docs site's build with `ReferenceError: name is
+  not defined` (`deploy-docs-internal` run `32810911550`, PR #359's merge). Same class of trap
+  CLAUDE.md's "KMS docs" section already documents for a bare `<1%` — nothing in `lint`/`typecheck`/
+  `test`/`build` catches it, only the separate `kms:assemble:internal` + Nextra build pipeline does,
+  on the next push. Fixed as its own follow-up (not amending the already-merged PR, matching #218's
+  precedent) by wrapping the reference in backticks: `` "Shop `{name}`" ``. Same text in
+  `requirements.md` R11 fixed too, though it isn't part of the assembled site (no front-matter).
+  Verified with the actual check — `npm run kms:assemble:internal && (cd kms/site-internal && npx
+  next build --webpack)` — not just the root build.
+
+### Documentation
+- **`specs/sdd-workflow.md` 2.22.0 -> 2.23.0 gains worktree awareness** (#357). The workflow had no
+  concept of a sub-agent building in an isolated git worktree (`.claude/worktrees/agent-<id>/`, the
+  Agent tool's `isolation: "worktree"`) — live-hit the same session this line was written, when a
+  fresh `/validate` context found nothing wrong because it never knew to run `git worktree list`,
+  and the P8.5e (#356) artifact lived only in one. Orient now runs `git worktree list` on re-entry;
+  Document (build notes) and Clear's checklist require the worktree's path/branch to be named in
+  `build-notes.md` rather than left for `git worktree list` to rediscover later; Validate checks for
+  a named worktree and runs every check against that path, not the main checkout; Ship gains a step
+  to remove a worktree once its branch merges, since nothing does that automatically.
+- **`kms/schema/repo.ts`'s `EXCLUDE_DIRS` gains `.claude`** (#357). Its file walk had no exclusion
+  for `.claude/worktrees/*` — a full, separate checkout each sub-agent builds in — so
+  `npm run kms:build-index`, run while three sub-agent worktrees sat on disk, indexed their entire
+  `specs/`/`docs/` trees as belonging to the main repo (99 -> 599 "artifacts", live-caught and
+  reverted before commit). Confirmed nothing under `.claude/` was legitimately indexed before this
+  change, so the exclusion loses no coverage.
+- **`vitest.config.mts` gains an `exclude` for `.claude`** (#357), same root cause a second place:
+  vitest's own default excludes (`node_modules`, `.git`) don't cover it either, so `npx vitest run`
+  with any sub-agent worktree on disk picked up and executed *that worktree's* test files against
+  *its own* `node_modules` — a real crash (`react-dom`/jsdom internals failing to resolve), not a
+  false pass, caught live while re-verifying this same fix. `[...configDefaults.exclude,
+  "**/.claude/**"]` keeps vitest's own defaults rather than silently dropping them.
+- **`specs/decisions/ADR-004-multi-tenancy.md` 1.7.0 -> 1.8.0** (P8.5e, #356). Decision 5 amended again: the "general campaign surface" the 2026-08-24 amendment deferred is this slice, built with the staff UI that amendment named as the prerequisite. Names the accepted risk explicitly — a campaign's `headline`/`subtitle` are free text, not derived from product or discount data, a deliberate narrow exception the human approved at `/propose` having been shown it — and what stays structured regardless: `imageKey`/`linkUrl`/the schedule, and the panel's real product-price callout, which renders unconditionally whether or not a campaign is active.
+- **Spec for P8.5e — staff-editable hero campaigns** (#356, `specs/2026-08-25-p8.5e-hero-campaigns/`). Gate 2: `plan.md`, `requirements.md` (R1–R25), `validation.md`. A new `DepartmentCampaign` model (one row per top-level department) plus a staff CRUD UI at `/staff/promotions`, layered onto `DepartmentHero` (#346) without changing its output for a department with no live campaign. Triggered by a human review of the live P8.5b hero against the AI Studio prototype it was drawn from, which found the data-only hero can't produce photographic, benefit-led copy.
+- **Build notes** at `specs/2026-08-25-p8.5e-hero-campaigns/build-notes.md`, naming six known-shaky areas — the unrun migration first (same situation P8.5a/b's were before merge), then the never-browser-tested upload path, per-vendor rendering, the newly-enforced `linkUrl` convention, the untested staff status labels, and the untested image-attach refusal path.
+- **#352 closed as superseded**, with a named gap in the closing comment rather than a clean supersession: this slice's banner upload requires a headline alongside the photo, where #352 asked for artwork with no other change. The underlying need (real vendor artwork reaching the hero) is met; the literal "icon swaps for a photo, nothing else changes" shape is not.
+
+### Changed
+- **P8.5e — staff-editable hero campaigns built** (#356, `specs/2026-08-25-p8.5e-hero-campaigns/`). New `DepartmentCampaign` model (one row per top-level `Category`) and staff CRUD at `/staff/promotions`, gated `requireVendorRole("ADMIN")` and following `/staff/categories`' exact `<PanelRefusal>` pattern. `DepartmentHero` (#346) gains an optional per-panel override: a **live** campaign (`isCampaignLive` — `isActive` plus an optional `startsAt`/`endsAt` window) swaps the heading for the campaign's headline/subtitle and, when it has a banner, renders it full-bleed with a gradient scrim in place of the icon-corner layout, dropping the chevron cutout for that panel only. **A department with no live campaign renders byte-for-byte identically to before this slice** — proven by a test that diffs rendered HTML rather than asserting shape. **The real product-price spotlight callout is never suppressed by a campaign** — the one part of every panel that stays data-derived regardless, which is what keeps this from reintroducing #233's unbacked-claim failure. The CTA button's visible label is likewise never campaign text (`Shop {name}`, always), a deliberate narrowing of the approved direction recorded in `plan.md`. Banner upload (`components/staff/CampaignBannerUploader.tsx`) is a near-direct copy of `VendorLogoUploader.tsx`'s presign/PUT/attach flow, scoped to a category; `lib/campaign-image.ts` reuses every image constant from `lib/product-image.ts` (R18) and adds only the `categories/{categoryId}/{uuid}.webp` key-shape rules. `isCampaignLive` lives in a new dependency-free `lib/campaign-liveness.ts`, not in the repository file, so a unit test (or a future client component) can reach it without pulling in `@prisma/client/wasm` — the same reason `lib/product-image.ts` stays import-free. `lib/campaigns-service.ts` carries four thin `getPrisma()`-wrapping exports that exist only because `app/**`/`features/**`/`components/**` are ESLint-forbidden from importing `@/lib/db` at all (ADR-004 slice 2, found at Build, not anticipated when the spec's R3 asked for `prisma` as an explicit repository parameter). 39 new tests (594 total, up from 555).
+
+### Documentation
+- **`specs/design-system.md` 1.8.0 -> 1.9.0 gains a Motion subsection** (P8.5a, #345). Three rules that until now lived only in `CLAUDE.md`, which is an assistant guardrail file rather than the doc a human opens before writing a component: a transition names its properties (never `transition-all`, never a global element-selector rule — #324 and #326 are the two defects behind that); animate only properties that cannot move layout; and every motion effect has a reduced-motion opt-out, CSS effects via `@media (prefers-reduced-motion: reduce)` and JS timers via `matchMedia`. States plainly that no lint rule checks any of it and that WCAG SC 2.2.2 is only ever verified in a browser.
+- **Build notes** for the slice at `specs/2026-08-24-p8.5a-product-card-upgrade/build-notes.md`, naming five known-shaky areas for validation to target first — per-vendor rendering above all, since `tests/vendor-theme.test.ts` passing is not evidence for it (#251's precedent).
+- **#351 filed**: the product card nests `<button>` inside `<a>`, which HTML's content model for `<a>` forbids. **Pre-existing** — `AddToCartButton` has always done it and P8.5a did not widen it — but recorded rather than left as folklore, since `jsx-a11y` has no rule for it and the correctness currently rests on every handler calling `preventDefault()`.
+
+### Changed
+- **P8.5a — product card upgrade built** (#345, `specs/2026-08-24-p8.5a-product-card-upgrade/`). Three parts. **Skew geometry** lives in `app/globals.css` as `.skew-card*` rather than Tailwind utilities, because the counter-skew is a parent/child relationship (the card skews `-2deg`, every `.skew-card-inner` skews back `+2deg`) that utilities cannot express. Transitions name `transform` and `box-shadow` explicitly — both banned alternatives (`transition-all`, a global element-selector rule) are the documented causes of #324's layout thrashing and #326's broken carousel dot — and neither property affects layout, so nothing here can shift the page. The hover shadow is `color-mix(in srgb, var(--color-primary) 22%, transparent)`, **not** the reference's hardcoded `rgba(27,94,32,.18)`, which is Aheed's green and would have rendered wrong for SriMart's blue. This also adds the **repo's first CSS `@media (prefers-reduced-motion: reduce)` block**; `PromoCarousel.tsx` handles the preference in JS because it governs a timer, and this one governs a pure CSS effect. **Cart-aware stepper**: `components/cart/CartQuantityStepper.tsx` replaces the pre-add quantity picker for products already in the cart, and its writes are coalesced by `components/cart/quantity-coalescer.ts` — a plain, non-React module precisely so the "N clicks in the window produce one flush carrying the last value" behaviour is testable with fake timers and no DOM (8 new tests; 546 total, up from 538). **That coalescing is load-bearing, not a refinement**: `revalidateCartSurfaces()` calls `revalidatePath("/", "layout")` on every write, so a per-click stepper across a twenty-card grid would reproduce #236's measured ~20-mutation failure by design — and client-side coalescing is the mitigation #236's own text names. #236 stays open and is no longer aggravated. State adopts a new server value **during render** via React's documented prop-change pattern rather than an effect, so no `react-hooks/set-state-in-effect` suppression was needed. **Low-stock badge**: `ProductSummary` now carries `stockQuantity` and `lowStockThreshold`, read from the `Inventory` row that was already joined for `inStock` — no new query, no migration. `lib/cart-summary.ts` memoises the cart read with React `cache()` so the header and a product grid on the same page share one `getSummary()` call; the file documents why that is request-scoped memoisation and not the cross-request Prisma caching `CLAUDE.md` forbids.
+
+### Documentation
+- **Spec for P8.5a — product card upgrade** (#345, `specs/2026-08-24-p8.5a-product-card-upgrade/`). Gate 2: `plan.md`, `requirements.md` (R1–R17), `validation.md`. Three parts — skew geometry with every colour resolved through a semantic token (the reference's hover shadow is `rgba(27,94,32,.18)`, Aheed's own green, against a platform where SriMart renders blue/purple/red); a cart-mutating quantity stepper replacing today's pre-add picker; and a low-stock badge from the `Inventory` join that already exists. No schema migration. **The coalescing requirement (R8) is the substance of the spec**: `features/cart/shared.ts`'s `revalidateCartSurfaces()` calls `revalidatePath("/", "layout")` on every cart mutation, so a stepper firing one server action per click across a twenty-card grid reproduces #236's measured pathology by design — and client-side coalescing is the mitigation **#236 itself names** in its "worth checking when picked up" section. #236 stays open, no longer aggravated. Also recorded: `Header.tsx:83-86` already loads the cart on every storefront page, so the grid needs no new data, only a memoised read (R9); and this slice introduces the repo's **first CSS `@media (prefers-reduced-motion)` block** (R4) — `PromoCarousel.tsx:55`'s JS `matchMedia` check is currently the only instance anywhere. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (99 -> 100 artifacts).
+
+### Documentation
+- **`specs/decisions/ADR-004-multi-tenancy.md` 1.6.0 -> 1.7.0** (P8.5b, #346). Decision 5 said promotional content is data "— `VendorPromotion` rows". The **principle survives and is now satisfied more strictly**; the mechanism named in the ADR does not. Amended in place with the reason rather than deleted: the hero is generated from the vendor's own categories and real product prices, so a panel cannot advertise something the catalogue does not contain — which is exactly the failure (`PromoSlider`'s unbacked "20% off all fresh produce") that #233 existed to stop. The amendment also records that a future general campaign surface must include a staff UI in its scope, since that absence is what made the first attempt inert: `VendorPromotion` rows were seed-only and no vendor could ever edit one.
+- **Build notes** at `specs/2026-08-24-p8.5b-department-hero/build-notes.md`, naming six known-shaky areas — the unrun destructive migration first, then the un-rerun seed, then every WCAG SC 2.2.2 obligation, which the jsdom test deliberately does **not** cover because a jsdom assertion there would look like coverage without being it.
+- **#352 filed**: `Category.imageKey` plus a staff upload, to swap the hero's icon for real artwork. Genuinely additive — the component already accepts an optional `imageKey` and both branches are tested, so nothing in the hero changes when it lands.
+
+### Changed
+- **P8.5b — department hero built, and `VendorPromotion` deleted** (#346, `specs/2026-08-24-p8.5b-department-hero/`). `components/layout/DepartmentHero.tsx` replaces `PromoCarousel` in the homepage hero slot. Departments, names and order come from `listTopLevel()`; each panel's price callout names a real product at its real price via a **single** new query, `listCategorySpotlights()` — one bounded read for every department rather than one per department, since "one row per group" is not expressible in Prisma without the raw SQL `CLAUDE.md` bans in application code. Nothing is hardcoded copy: #239 is the precedent, where a hero literal was accidentally true for one vendor and wrong for the other. **Image-optional by design**: `Category` has no image column and #279 records that no vendor artwork exists, so each panel falls back to `categoryIcon()`'s existing slug-to-lucide mapping and accepts an `imageKey` that nothing supplies yet — which is what makes a future `Category.imageKey` purely additive. The chevron cutout is a `clip-path` polygon in `app/globals.css`, expanding on hover; it lives in CSS rather than as a Tailwind `group-hover:` variant because an inline `clipPath` cannot be overridden by a utility — an earlier draft had a `group-hover:` with no `group` ancestor, so it never fired, caught while checking the build against R8 rather than by any tool. **Accessibility is carried from `PromoCarousel`, not from the prototype**, whose hero auto-advances every 5.5s with hover-pause only: an always-visible pause control with an accessible name, rotation paused on hover *and* keyboard focus, and no rotation under `prefers-reduced-motion`. 9 new tests (547 total, up from 538); the rotation and focus behaviour is deliberately left to a browser check in `validation.md` rather than asserted in jsdom, where it would look like coverage without being it. One of those tests corrected its own wrong assumption — off-screen panels carry `aria-hidden`, so only the current heading is in the accessibility tree.
+- **`VendorPromotion` dropped** (migration `20260824190000_p8_5b_drop_vendor_promotion`), along with `components/layout/PromoCarousel.tsx`, `lib/repositories/promotions.ts`, `lib/promotions-service.ts` and its seed data. **Superseded, not unused** — the two leave different records for whoever later asks why a campaign model disappeared. It was one generic banner that never gained a staff UI, so its rows stayed seed-only and no vendor could edit a campaign; what replaces it models the actual merchandising concept and is derived from real data. #279 and #280 describe gaps in that model and are commented as superseded, closing when this reaches production per the `Done` = in production rule. Six unrelated files carried doc comments citing `lib/promotions-service.ts` or `lib/repositories/promotions.ts` as the pattern to copy; all six now point at living examples, since a reference to a deleted file is the "ruling nobody can follow" failure `CLAUDE.md` already records twice.
+
+### Documentation
+- **Spec for P8.5b — department hero** (#346, `specs/2026-08-24-p8.5b-department-hero/`). Gate 2: `plan.md`, `requirements.md` (R1–R21), `validation.md`. An icon-led, **image-optional** department hero with 1-click filtered routing, replacing `PromoCarousel` in the homepage hero slot. **The shape is dictated by a schema fact, checked rather than assumed: `Category` has no image field at all**, and #279 records that no vendor artwork exists (`VendorPromotion.imageKey` is null for both seeded vendors) — so a photographic hero needs both a migration and photography, and all 39 images in the prototype are unsplash URLs the CSP blocks outright. The hero therefore draws chevron `clip-path` geometry in the vendor's palette with `categoryIcon()`'s existing slug-to-lucide mapping, and the panel component takes an **optional** image so adding `Category.imageKey` later is purely additive. Departments come from `listTopLevel()`, never the prototype's five hardcoded Aheed departments — #239's precedent, where a hardcoded hero claim was accidentally true for one vendor and wrong for the other. R10–R13 carry `PromoCarousel`'s **WCAG SC 2.2.2** contract (pause control with an accessible name, pause on hover *and keyboard focus*, no rotation under `prefers-reduced-motion`) rather than the prototype's hover-only pause; `validation.md` states plainly that no lint rule checks SC 2.2.2, so those rows need a real browser. Retiring `VendorPromotion` (R14–R16) is smaller than it looks: **there is no staff UI for promotions** — the rows are seed-only — so nothing editable breaks. **The model is deleted because it is superseded, not because it is unused** — confirmed 2026-08-24, and recorded that way because the two leave very different records for whoever later asks why a campaign model disappeared. `VendorPromotion` was one generic banner (title, description, optional image, link); the surfaces replacing it model the actual merchandising concept and are derived from real data — the department hero itself, curated bundles (#347), multi-buy tiers (#348), with offers and clearance anticipated on the same principle but deliberately not yet tracked as issues. The precedent for preferring that is in this repo already: `PromoSlider` advertised "20% off all fresh produce" that no discount in the engine backed, which is what #233 replaced it to stop, so keeping an unbacked banner alongside data-derived promotions would reintroduce the same class of claim. #279 and #280 are therefore closed as **superseded**, not deferred — both describe gaps in a model that ceases to exist. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (99 -> 100 artifacts).
+
+### Documentation
+- **CLAUDE.md gains a Storage (ADR-003) note: raster images cannot be validated visually under `npm run preview`, accept it and check on a deployed environment instead** (#235). Live-reverified 2026-08-24 against both the staging and dev CDN zones: a `Referer: http://localhost:8787/` request gets **403** on both — Cloudflare hotlink protection at the CDN edge, not a CSP or application defect, and not fixable in code. Two things this reverification adds to the record: **`.svg` is not covered by the rule at all**, so every seeded *product* image (all `.svg`) already loads fine locally — only raster assets are blocked, which today means just the vendor logo; and **provisioning the dev CDN host (#277) did not incidentally fix this**, since the restriction is zone-level and the dev zone carries the identical rule. Decided, rather than fixed: the human chose "accept and document" over allow-listing local origins or disabling the rule on the dev zone, since either infra change widens what can hotlink real images for a defect whose actual blast radius (one PNG) is now known to be small. #235 stays open pending that documentation landing; closes with this PR.
+- **P8.5 — Storefront Conversion Overhaul proposed, decomposed and placed on the roadmap** (umbrella #344; slices #345 product card upgrade, #346 department hero, #347 curated bundles, #348 multi-buy tier pricing). Gate 1 only — no spec, no code. Inserted **before P8.2** so the storefront that goes live is the new one; the number is out of sequence deliberately, because renumbering P8.2/P8.3 into the sequential slot would falsify `specs/2026-08-23-p8.1b-closeout/plan.md`, which cites P8.2 by name as a shipped record. Origin is a revised AI Studio prototype (`docs/ui-ref-revised/`, untracked) and a written brief — the same kind of event that inserted P2.5. **The grounding pass is the substance of this entry.** The prototype is a look-and-behaviour reference, not portable code: 39 `images.unsplash.com` URLs against `next.config`'s `img-src 'self' data: https://*.nocaped.com`, ~200 hardcoded `#1B5E20` literals against a platform where SriMart renders blue/purple/red, a cart in `useState`, and a bundle-to-cart handler that fuzzy-matches products by first word with a `products[0]` fallback. Its hero auto-flips every 5.5s with hover-pause only and no `prefers-reduced-motion`, failing WCAG SC 2.2.2 — `components/layout/PromoCarousel.tsx` already solved that and its contract is the one the slice carries. **Three rows of the brief's competitor matrix are wrong about this repo**, recorded because the ranking rests on them: inline quantity steppers are ranked #6 "low effort / high priority" but `AddToCartButton` `variant="card"` has shipped them since P3a; the postcode delivery checker is marked absent but the homepage hero has had one backed by `lib/delivery.ts` since P7.5c; dietary facet filtering is marked absent but `ProductFilters`/`ProductFilterForm` already expose halal/fresh/organic. The other 23 rows are unverified — a full re-baseline was offered and deliberately deferred. **Two prerequisites are already-tracked open issues**: #279 (no vendor promo artwork exists) blocks #346, and #236 (rapid cart mutations reach "This page couldn't load" at ~20) blocks #345's cart-aware stepper, which multiplies that exact mutation rate. Bundles are modelled as a curated list expanding into ordinary cart lines rather than a purchasable SKU, on the human's decision — reusing `features/cart/add-list-to-cart.ts` and leaving checkout, stock decrement, refunds and loyalty untouched, at the accepted cost of a derived rather than stored bundle price.
+- **Roadmap change-log row for the P8.1 production promotion** (PR #343, merge `a8ee54a`) — the promotion half of `npm run sdd:audit`, which reported it as *pending carry-forward* at this Orient because it merged after the roadmap was last edited. Records that #235, #269 and #277 stay open and In Review by deliberate choice: all three are checks that need a deployed site, and P8.1b's validating sandbox had no outbound network, so what is missing is the observation, not the code.
+- **Roadmap change-log row for P8.1b** (#335, #336, #337, PR #341, `specs/2026-08-23-p8.1b-closeout/`) — the row `npm run sdd:audit` checks for at the next Orient, covering all ten issues the slice closed through (#335, #336, #337, #252, #269, #273, #276, #277, #235, #253) and their move to **In Review** on the delivery board. **Correction against `plan.md`'s own closure claim, found at `/document` rather than repeated**: `plan.md` said this slice empties P8.1's "Core Debt & Compliance" bucket; four originally-listed issues (`#137`/`#151` — blocked on ADR-005's undecided refund policy, already recorded as unscheduled under P7.5's carry-forward note; `#104`/`#221` — an operational Resend domain-verification prerequisite no code slice can close) remain open and untouched by either P8.1a or P8.1b, carried forward in the roadmap rather than silently dropped. Two process lessons added to `specs/sdd-workflow.md`'s Validate-stage trap catalogue: a `validation.md` row demanding a function's "first two parameters" be `prisma`/`vendorId` failed for a function whose real second parameter is a second Prisma client the transaction needs — the requirement's own text made no ordering claim; and a row grepping `ARTIFACT_INDEX.md` for a slice's front-matter `id` could never have passed for any slice, since the generated index never renders that field. `ARTIFACT_INDEX.md`/`docs.ts` rebuilt (99 artifacts, unchanged count).
+
+### Changed
+- **P8.1b — every request-scoped facade relocated out of `lib/repositories/`, behind a gate that actually enforces it** (#335, closing #252). Thirteen exports moved into sibling `lib/<name>-service.ts` modules — `cart`, `categories`, `discounts`, `loyalty`, `orders` (`getOrderRepository`, `getWebhookOrderService`, `getGuestOrderLookupService`), `products`, `reviews`, `roles`, `vendor` — so every export left in `lib/repositories/` takes its client and `vendorId` explicitly and reads no request context, which is what lets a plain `tsx` script exercise `placeOrder`'s atomicity, the stock/points/discount concurrency guards and the order-lookup credential pair against a real database. Facades that inlined query bodies (cart, products, reviews, loyalty's ledger, seven of `getOrderRepository`'s methods) were **split** rather than moved: the queries stay in `lib/repositories/` as pure functions, so more code is now under `tests/repository-vendor-scoping.test.ts` than before, not less. No behaviour change — 529 existing tests pass with only import paths edited. **`tests/repository-purity.test.ts` is the actual deliverable**: an import-level, whole-file check with **no allowlist**, verified to fail by introducing a violation and observing it named. `lib/repositories/roles.ts` was never on #252's list and was the hardest case — it had no pure functions at all, so it needed a split written rather than a move, with `requireVendorRole` now running in `lib/roles-service.ts` and the resulting actor passed to the repository as data; that is what makes its hierarchy rules (who may grant ADMIN, the last-admin self-demotion guard) testable at all. `lib/repositories/vendor.ts`'s two request-scoped accessors moved for the same reason, which is what let the gate land with zero exceptions. Also corrects **CLAUDE.md's false claim** that `tests/repository-vendor-scoping.test.ts` "allowlists all nine by name … so the list cannot quietly grow" — that test checks vendor *scoping*, not facade *location*, held six of the nine plus two functions never on the list, and was structurally blind to the three facades that delegate rather than inline queries. `lib/repositories/promotions.ts` carried a copy of the same wrong claim; both fixed.
+- **CLAUDE.md's `core.autocrlf` guidance marked as fixed rather than live.** PR #328's `.gitattributes` resolved it; the section said otherwise, so a `format:check` failure on untouched files now reads as real drift instead of the expected artifact.
+
+### Added
+- **Guest machine-readable data export** (#337, closing #253). Guests had erasure (Art. 17) since the P7 closeout but no Art. 15 export, despite `/orders/lookup` already rendering the whole order in human-readable form — a format gap, not an unmet right. `exportGuestOrderData` sits beside `eraseGuestOrderData` in `lib/repositories/data-rights.ts` and verifies the same order-number/email pair inside its `WHERE` (`userId: null` included), returning `null` for both "no such order" and "wrong email" so the route cannot leak which. Served from `app/(storefront)/orders/lookup/export/route.ts` with `Content-Disposition: attachment` and `Cache-Control: no-store`, rate-limited with the same throttle as the lookup page — an export endpoint returns a whole order in one request, so leaving it off would have widened the surface #123 closed. `GuestOrderExport` is deliberately narrower than `PersonalDataExport` rather than a reuse of it: that shape is built around a `User` identity, linked accounts and sessions, none of which a guest has, and emitting them as empty arrays would assert "we hold nothing of this kind about you" when the question does not apply. The document states its own household-mailbox scope limit rather than leaving a recipient to assume it covers every order on that email.
+
+### Fixed
+- **P8.1b — dev/staging environment hygiene** (#336, closing #273, #276, #277). **#273:** the dev Neon branch carried two hand-inserted `DiscountRedemption` rows (`seq` 888888/999999) that bypassed `placeOrder` and rendered a discount line on orders that were never discounted. Removed by `scripts/remove-fixture-redemptions.ts`, run against the dev branch: both rows gone, and the two affected orders (`AHE-20260811-XCVTT3`, `AHE-20260810-UQG827`) now read `discountPence=0` with no `discountUse`. Its target guard is a **pure, unit-tested module** (`lib/db-target-guard.ts`) rather than something proven by pointing a deletion script at staging to watch it refuse — that demonstration deletes staging rows if the guard is broken. It compares Neon *endpoints* with the `-pooler` suffix normalised away, since a guard holding only a direct URL would wave through the pooled URL for the same database, and fails closed on a missing or unparseable target. **#276:** `prisma/seed.ts` warns loudly on its one silent path (`SEED_AHEED_HOST` set, `SEED_SRIMART_HOST` unset), which produced a database that looked correctly seeded while holding one vendor — so every multi-tenant check against it silently proved nothing. **#277/#235:** `.env.example` and `docs/developer-portal/env-setup.md` now pair `aheed-images-dev` with the dev CDN host and carry an explicit table of all three bucket/host pairs, naming the dev host as the only one without a hotlink rule — the mispairing meant anything written locally was unreachable from the URL the app composes for it, with a correct-looking key in the DB and no error anywhere.
+
+### Documentation
+- **Roadmap change-log row for P8.1a frontend & accessibility debt** (#334, PR #338, `specs/2026-08-23-p8.1a-frontend-a11y-debt/`) — the row `npm run sdd:audit` checks for at the next Orient. Two process lessons recorded in `CLAUDE.md`/`specs/sdd-workflow.md` while still cheap to write down: a spec's front-matter `id` cannot contain a literal `.` (`kms/schema/frontmatter.ts`'s regex is `^[a-z0-9-]+$`), caught only by `gates`' KMS front-matter check on push rather than any local command — `plan.md`'s `id` was fixed to follow the existing dotted-phase convention (dash instead of dot, `-plan` suffix); and a fourth instance of the established `validation.md` literal-check trap, where a bare `grep -n "overflow-clip"` matched the fix's own explanatory code comment, not just the className it was meant to prove was unique.
+
+### Fixed
+- **P8.1a — frontend & accessibility debt** (#334, closing #254, #287, #333, #281). Four independent fixes: (1) `/orders/lookup` skipped heading ranks (`h1` -> `h4` -> `h3`, no `h2`) — fixed with two visually-hidden `sr-only` `h2`s ("Delivery Status", "Order Items") and promoting the pipeline step labels from `h4` to `h3`. (2) `/staff/reports`'s `<h1>` read "Sales & Pence Financials", stale since P7.5d+e added three non-sales sections below it — renamed to "Store reports", with the three revenue tiles moved under a new `<h2>Sales</h2>` and their own headings demoted to `h3`. (3) `lib/repositories/loyalty.ts`'s `saveLoyaltySettings` dropped an unused `const prisma = getPrisma()` left over from P5a — the write already went through `getPrismaWs()`. (4) `components/layout/Header.tsx`'s brand/logo container gains `h-10 overflow-clip`, capping it at the logo's own height so a browser extension's content script (confirmed: Coupert) injecting an element inside it can't stretch the row — deliberately scoped to that container alone, not the whole row, because `ViewSwitcher`'s dropdown lives in the same row and an ancestor `overflow-clip` there would have clipped it. Separately, `lib/vendor-theme.ts`'s `brandStyle()` widened `--color-action`/`-accent`/`-danger`'s contrast clamp to include each colour's own matching tint, closing a real unguarded pairing (`text-danger` on `bg-danger-tint`, found by grepping actual component usage) — `--color-primary` already covered every tint/cream pairing the app renders `text-primary` on, so this is narrower than clamping the raw tint/cream backgrounds themselves, which stay untouched. `tests/vendor-theme.test.ts` gains a regression test for the three same-tint pairings across both seeded vendors.
+
+### Documentation
+- **Roadmap change-log rows for the header logo fix (#329, PR #330), the `.gitattributes` LF policy (#327, PR #328), and the staging→main promotion (PR #331).** The promotion row is what `npm run sdd:audit`'s promotion half requires — it is the only SDD gate that fires *after* Ship, which is exactly how PRs #118/#121/#134 once sat undocumented. Recorded before the promotion merges, so the row rides the promotion itself rather than trailing it.
+
+### Changed
+- **Added `.gitattributes`, pinning all text files to LF in both the repository and the working tree** (#327). The repo ran `core.autocrlf=true` with no `.gitattributes` and had CRLF stored in some blobs, which caused two long-standing problems. First, any commit touching `CHANGELOG.md` or `specs/roadmap.md` renormalised the whole file — a nine-line entry staged as 2289 insertions / 2280 deletions, which is why PR #326 had to isolate its normalisation into a separate commit just to stay reviewable. Second, `npm run format:check` failed locally against dozens of untouched files, because Prettier defaults to `endOfLine: "lf"` and the checkout was CRLF; CLAUDE.md documented that artifact along with a multi-step ritual for distinguishing it from real drift. `eol=lf` rather than a bare `text=auto` is the operative part — it pins the working tree, which is what makes local Prettier agree with CI. Verified: `git add --renormalize .` produces zero changes (every blob was already LF after PR #326), and `npx prettier --check .` now reports "All matched files use Prettier code style!" across the whole repo. Image and font types are marked `binary` explicitly; no tracked `.bat`/`.cmd`/`.ps1` files exist, so LF everywhere is safe.
+
+### Fixed
+- **UI — the header logo caused a visible layout jerk on every page refresh** (`components/layout/Header.tsx`). The logo was `h-10 w-auto` with no reserved box and no `width`/`height`, so it occupied **zero width** until its bytes decoded, then snapped to ~72px and shoved the entire header row — search bar and nav included — sideways. This is a layout shift, not an animation, which is why the `transition-all` sweeps in #323/#324 could not have caught it, and why it survived them. It is made far worse by the logo being 1.9 MB (83% of page weight, already tracked as #243): the larger the payload, the later and more jarring the jolt. Fixed by pinning `aspect-9/5` (1.8, matching both seeded logos at 298x160 and 1664x928) alongside the existing `h-10`, which reserves the 72x40 box before the image loads, plus `object-contain` so a vendor whose logo is a different shape is letterboxed rather than distorted — and still never shifts. Dimensions cannot come from the database: `VendorBranding` stores only `logoStorageKey`, with no width/height. Audited the other four storefront images while here — `ProductCard` (`aspect-4/3` + intrinsic `width`/`height`), `ProductImageGallery` (`width`/`height`), `PromoCarousel` (`h-32 w-32`) and `CartContents` (`h-16 w-16`) all reserve their boxes correctly; the header logo was the sole outlier, and the only one positioned above the whole page.
+
+### Fixed
+- **UI — carousel pagination dot stopped animating** (`components/layout/PromoCarousel.tsx`). The `transition-all` -> `transition` sweep in PR #324 correctly stopped the layout thrashing, but over-corrected at one site: Tailwind v4's `transition` property list contains no `width`, so the active promo dot's `w-2` -> `w-4` expand began snapping instead of animating. Restored with an explicit `transition-[width,background-color]`. Safe at this site specifically because the dot row is `absolute bottom-3 left-1/2`, i.e. out of document flow, so animating its width cannot move page layout. Verified by compiling Tailwind 4.3.3 directly rather than relying on documentation; the same check confirms `translate`, `scale` and `rotate` **are** in the default list, so the `ProductCard` hover-lift and `DepartmentScroller` hover-scale were never affected by the sweep.
+
+### Documentation
+- **UI polish & docs integration slice: specs corrected and completed** (`specs/2026-08-22-ui-polish-docs-integration/`). `requirements.md` R1 and `validation.md` V1 described a global transition rule in `app/globals.css` (`200ms cubic-bezier` on interactive elements, plus a `button:active` scale-down) — and V1 was ticked `[x]` against it — but that rule was removed in `a9d886c` precisely because it was the cause of the page-refresh layout thrashing. Both rewritten to state the rule that actually holds (per-component transitions naming their properties; never `transition-all`, never a global element-selector rule), with the superseded text preserved and attributed rather than deleted. `build-notes.md` updated for the same reason.
+- **Added the slice's missing `plan.md`.** It was the one required spec file never written, which is also why the slice never appeared in `ARTIFACT_INDEX.md` — the KMS index keys artifacts on `specs/<slice>/plan.md`. Index rebuilt (`npm run kms:build-index`, 97 artifacts). This closes both failures reported by `npm run sdd:audit`.
+- **`specs/roadmap.md`:** added the missing change-log row citing the slice, and repaired PowerShell backtick damage in the two 2026-08-22 rows, where a literal CR byte (`0x0D`) sat mid-line inside `resolveLines` and four pairs of backticks had become backslashes.
+- **`CHANGELOG.md`:** removed two stray NUL bytes (`0x00`) at end of file. They made every tool treat this file as binary — ripgrep refused to search past them, and `git diff` could not produce a text diff — which is a good way for a changelog defect to hide.
+
+### Changed
+- **Documentation Architecture:** Restructured the entire docs/ directory into a role-based architecture (Shopper, Staff, Admin, Marketing, BA, Ops, Dev). Rewrote end-user documentation to hide technical implementations and focus entirely on user workflows.
+
+### Added
+- **Shop Your List Partial Matches** (Issue #115): Implemented partial-match fallback in `resolveLines` (lib/shopping-list.ts). When a pasted list line contains terms that don't all match a single product, the candidates with the most matched terms are returned as "ambiguous" for user review, instead of discarding the line completely.
+
+### Changed
+- **Header UI**: Added a "Shop List" button to the main navigation (beside the search input) for better discoverability.
+- **Cart UI**: The Cart popover now automatically closes when navigating away (e.g. to checkout or the full cart view).
+
+### Added
+- **P8.1 — Unified Role-Aware Help Centre** (#318, `specs/2026-08-21-p8-help-centre/`). Replaced the dead 'Help Guide' link in the global storefront header with a unified `/help` page. The page statically renders delivery, loyalty, discount, and privacy FAQs for shoppers. For authenticated `STAFF` and `ADMIN` users, it dynamically renders an 'Internal Staff Resources' section containing instructions on using the View Switcher and a direct link to the Operational Runbook.
+
+### Fixed
+- **UI:** Replaced `transition-all` with `transition` across storefront components (`ProductCard`, `Header`, `PromoCarousel`, etc.) to prevent jarring layout thrashing/animations on page refresh when components dynamically mount and adjust dimensions.
+- **Vendor repository exports** (#318 follow-up): Exported `getVendorConfig`, `getVendorBranding`, `updateVendorLogoKey`, and `updateVendorStorefrontConfig` from `lib/repositories/vendor.ts` — these were referenced by the storefront page and server actions but missing from the module. Resolved build failure on staging.
+- **Prettier formatting**: Re-ran Prettier across 9 files touched by the Storefront Branding UI (PR #315) and Help Centre (PR #319) that had not been auto-formatted before merging.
+
+### Changed
+- **Cart UI**: Converted the top-header Shopping Cart into a bottom-right Floating Action Button (FAB). This completely decouples the cart from the header layout, providing a stable, jump-free header when toggling between Shopper and Staff views, and improves mobile accessibility.
+
+### Changed
+- **Header UI**: Replaced the disjointed 'Staff Panel' button and 'Tier Toggle' with a unified 'View Switcher' dropdown in the main Header. Staff and Admin views correctly configure the header layout to hide the shopper search bar and cart drawer. The View Switcher respects role-gating so STAFF users only see Shopper and Staff views.
+
+
+### Changed
+- **Admin UI**: Unify admin Operations Portal layout with storefront theme. Removed custom PortalHeader in favor of standard `<Header />`, moved TierToggle to PanelNav, added horizontal scrolling to PanelNav tabs, and configured `app/(admin)/staff/page.tsx` to read the tier cookie so Admin users can successfully preview the limited staff layout.
+
+### Fixed
+- **CI**: Injected missing Cloudflare AI secrets (CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN) into the production worker runtime in .github/workflows/deploy-production.yml.
+
+### Added
+- **Documentation**: Added missing roadmap change-log entry for P8 smart image generation (and PR #292 carry-forward) to satisfy the SDD audit.
+- **P7.5d+e — staff panel completion: order-search index, product filters, tier CRUD, customer
+  directory & non-sales reports** (#264, closing #265, #160, #161, #169, #163, #136,
+  `specs/2026-08-20-p7.5de-staff-panel-completion/`). **P7.5's final slice** (epic #260), combining
+  slices d and e because all five underlying issues live on the same `/staff/*` surface behind the
+  same demo-admin `npm run preview` rig, and standing that rig up twice is the real cost — the same
+  reasoning that combined c+f. Built #163 first, since it was the only item carrying
+  production-migration risk and must not gate the four pure-assembly items.
+  **The staff order search stops being a sequential scan** (#163): the repo's **first
+  `CREATE EXTENSION`** installs `pg_trgm` and adds three GIN trigram indexes over
+  `Order.orderNumber`, `Order.guestEmail` and `User.email`. No application code changed —
+  `staffOrderWhere()` was already correct, only slow, because a leading-wildcard `ILIKE` cannot use
+  any of `Order`'s three B-tree indexes. Taken as a **deliberate hand-authored-DDL exception** under
+  the P7d (#218) ruling, which costs a disclosure in the migration naming what Prisma's schema
+  language cannot express (an index's access method or operator class) and a pointer comment on
+  `model Order`; both are present, as is the standing consequence that `schema.prisma` no longer
+  fully describes the database. The `User.email` arm the plan left open **is** index-servable.
+  **`/staff/products` gains search and a status filter** (#169): a plain GET form mirroring
+  `/staff/orders`, with pagination that carries the filter. New pure `lib/staff-products-query.ts`
+  deliberately inverts the orders module's default — an absent or unrecognised status applies **no**
+  `isActive` filter, because P6b1 shipped this list showing hidden products on purpose so an owner
+  can find what they switched off; three of its twelve tests exist only to pin that.
+  **Loyalty tiers become creatable and deletable** (#136): duplicate keys are refused by
+  `@@unique([vendorId, key])` through the existing `isUniqueViolation` helper rather than
+  check-then-insert, so concurrent creates cannot race and the same key stays creatable for another
+  vendor. Delete deliberately leaves `LoyaltyLedgerEntry` alone — `tierKey` is a snapshot with no
+  foreign key, so a ledger row naming a removed tier is correct, not dangling. The per-row Remove
+  control binds to a separate top-level form via `form="delete-tier"` and carries the key as its own
+  name/value, since HTML forbids the nested form the single-form layout would otherwise need (P7a,
+  #162 pattern).
+  **A customer directory exists** (#160, new `/staff/customers`): a customer is derived from
+  vendor-scoped `Order`, never from the global `User` table, which makes the tenant boundary
+  structural rather than a filter someone must remember. Guests appear by email; P7b-erased orders
+  (both `userId` and `guestEmail` nulled) collapse into one honest "Erased customers" aggregate
+  rather than being dropped, so the directory still reconciles against `/staff/reports`.
+  **Non-sales reports** (#161): catalogue and stock health, loyalty liability, and discount
+  redemption config. **No sales analytics** — production still runs Stripe test keys (#113), so
+  there is no real trading data to design it against. Liability calls `visibleBalance()` per account
+  rather than `SUM(balancePoints)`, which would overstate it by every lapsed balance still sitting in
+  the table — the same class of knowably-wrong aggregate as #238, the defect P7.5a exists to fix.
+  Also on the branch: the **PR #285** roadmap promotion row `sdd:audit` reported as pending
+  carry-forward, and a `CLAUDE.md` correction — its staff-panel rule pointed at
+  `app/(admin)/staff/layout.tsx`, a file that has never existed (the shell is
+  `app/(admin)/layout.tsx`), and it now also records `loyalty/page.tsx` as a second `PanelRefusal`
+  instance, converted here.
+- **P7.5c+f — per-vendor storefront identity: copy, promotions & contrast-clamped colour** (#263,
+  closing #239, #233, #255, and #266 which was folded in at Propose,
+  `specs/2026-08-20-p7.5cf-vendor-storefront-identity/`). Third slice of **P7.5** (epic #260),
+  combining slices c and f because neither can be proven by the test suite — `brandStyle()` injects
+  per-vendor tokens as an inline style that outranks `tokens.css`, so both halves are only
+  observable in live rendered HTML for two hosts, and that rig is the expensive part.
+  **The storefront stops speaking in Aheed's voice** (#239): ~12 hardcoded strings were classified
+  rather than columnised. The hero's "Free Delivery Over £30" now reads
+  `freeDeliveryThresholdPence` — Aheed's threshold *is* £30, so the literal was accidentally true for
+  the vendor it was written for and wrong for SriMart at £50; it was hiding a data bug, not just a
+  copy one. A minimum-order badge follows the same rule and both hide when the rule doesn't apply.
+  Unverifiable claims ("100% Certified Halal Meat", "Same-Day Local Dispatch") are deleted rather
+  than made configurable; the four trust tiles become three statements true of the *platform* and
+  checkable against this repo (locality delivery, Stripe payment, order-status email). Only genuine
+  vendor identity became columns — `VendorConfig.bannerNote` and `.heroSubtitle`, both hiding when
+  null, since platform-written filler is still a claim made on a vendor's behalf. Three surfaces #239
+  never listed were found during Build: the search-placeholder fallback, the hero `h1`'s tagline
+  fallback (the one slot that keeps a fallback — an empty `h1` is an accessibility defect), and
+  `{localityName} Groceries` in the logo-fallback wordmark, which rendered "Reading Groceries" under
+  SriMart's name and survived because Aheed has a logo so nobody ever saw it.
+  **Promotions become real vendor data** (#233): new 1:N `VendorPromotion` model
+  (`lib/repositories/promotions.ts` + request-scoped `lib/promotions-service.ts`, so the #252
+  allowlist gains no tenth facade) driving a new `PromoCarousel` in the hero's image slot. It replaces
+  `PromoSlider`, a hardcoded array of three invented offers that rendered for every vendor and
+  advertised discounts nothing in the engine backed — SriMart has no discount codes at all.
+  `imageKey` is **nullable on purpose**: a promo with no artwork renders as a token-styled card, so
+  both vendors ship live-verifiable promotions with zero uploads, and seeding keys for objects nobody
+  uploaded is how #244 happened. The carousel carries a real pause control, pauses on hover/focus and
+  honours `prefers-reduced-motion` — `PromoSlider` auto-advanced every 5s with no way to stop it,
+  failing WCAG 2.2 SC 2.2.2.
+  **Per-vendor colour returns with a guarantee** (#255): new zero-import `lib/color-contrast.ts`
+  converts sRGB to OKLCH, lowers lightness until the value clears AA against every surface it renders
+  on, and preserves hue and chroma (reducing chroma rather than clipping channels when out of gamut,
+  because clipping shifts hue — the one property the module exists to protect). `brandStyle()` now
+  derives `--color-primary`/`-action`/`-accent`/`-danger` and the two hover shades per vendor through
+  that clamp. Measured: Aheed `#4caf50` 2.78:1 → `#1e8929` 4.50:1 and `#f57c00` 2.70:1 → `#ba5d00`
+  4.51:1; SriMart `#1e88e5` 3.68:1 → `#0078d3` 4.54:1. Aheed's `#d32f2f` already measures 4.98:1 and
+  comes back untouched, which `tests/color-contrast.test.ts` pins — the clamp must not damage a
+  compliant colour. **The clamp is load-bearing, not a safety net:** Aheed's own primitives fail
+  hardest of anything in the repo, so an unclamped restoration would have re-broken the vendor that
+  has been live longest. Backgrounds (`--color-surface-muted`, the three tints) stay plain aliases —
+  clamping them would move the surface rather than the foreground (#281).
+- **P7.5b — order money provenance: points earned and discount code on order pages** (#262, closing
+  #138, #150, `specs/2026-08-20-p7.5b-order-money-provenance/`). Second slice of **P7.5** (epic
+  #260). An order's money summary now explains itself, with no schema change — both relations
+  already existed.
+  **The discount says which code produced it** (#150): `Order.discountPence` is one generic figure
+  that since P5b can combine a loyalty redemption *and* a code, so labelling the whole amount with a
+  code's name would state something false. New `splitDiscount` (`lib/order-totals.ts`) divides it —
+  code share from the stored `DiscountRedemption.amountPence` snapshot, loyalty share by
+  **subtraction**. Deliberately not recomputed from `pointsToPence(points, pencePerPointRedeemed)`:
+  the ledger stores redemptions in points and that config can change after an order, so a recomputed
+  share would drift from the figure beside it. `lib/order-totals.ts` keeps **zero imports**, which is
+  what structurally prevents it reaching vendor config.
+  **Orders show the points they earned** (#138): read from the EARN ledger row `confirmPayment`
+  writes inside its own transaction, so the figure is a settled fact. An order still awaiting payment
+  shows a line carrying **no digits** rather than an estimate — the tier multiplier is snapshotted
+  onto the EARN row precisely because it moves. A guest order says nothing at all, in any status.
+  New `OrderPointsNote` is a separate component rather than part of the money card, because
+  `OrderItemsCard` is shared with `/staff/orders/{n}`: the staff view gets the same attributed
+  discount rows (deliberately — two stories about one order is the defect this phase removes) while
+  points, an account fact, stay off it. The confirmation email uses the same `splitDiscount`, not a
+  second arithmetic.
+- **`/document` closeout for P7.5b (#262, PR #272, merged to staging) — P7.5's second slice.**
+  Roadmap (v1.39.0) gains the build/validate/merge row, plus a backfilled row for **P7.5a's
+  promotion to production** (PR #271, `staging → main`, merge `b8066e2`) that `npm run sdd:audit`
+  reported as pending carry-forward. `/validate` closed R19/R20 with a full live Stripe test-card
+  checkout → webhook → confirmation round-trip via the Stripe CLI, not unit tests alone; `CLAUDE.md`
+  gains a new "Local Stripe webhook testing" section recording the `stripe listen` signing-secret
+  and Resend sandbox traps hit along the way. Delivery board reconciled: #262 confirmed **In
+  Review**. New issue **#273** filed (Phase P8, Backlog) for two hand-inserted dev-DB
+  `DiscountRedemption` fixture rows found during validation, unrelated to this slice's code.
+  `ARTIFACT_INDEX.md` rebuilt; `npm run sdd:audit` and `npm run kms:validate` both clean; the
+  internal KMS docs site (`kms/site-internal`) rebuilds and compiles cleanly.
+
+### Changed
+- **`specs/roadmap.md` (v1.42.0)** — P7.5d+e's `/document` closeout (#264). Roadmap gains the
+  slice's build/merge row (PR #289) and the production-promotion row (PR #290, which also carries
+  **P7.5 — Pre-launch closeout of P3/P5/P6 deferred debt is closed** — fourteen carried-forward
+  P3/P5/P6 issues resolved across the phase's six slices, and "safe to start P8" is now a statement
+  the roadmap can point at). The promotion row records that `deploy-production`'s migration step
+  (`CREATE EXTENSION pg_trgm` + three trigram indexes) applied cleanly, confirmed directly from the
+  workflow's own log, and the post-promotion issue-state check confirming no accidental closure
+  among the nine issues explicitly carried into P8.
+- **`specs/2026-08-20-p7.5de-staff-panel-completion/requirements.md`** — R27 and R36 corrected at
+  `/validate` after being found genuinely broken (R27 demanded an impossible keyset pagination for
+  a `groupBy` aggregate with no stable key; R36 directly contradicted R25's own per-customer-spend
+  requirement) — both amended rather than shipped disclosed-but-unreconciled. Detail in
+  `build-notes.md`'s "Deviations from the spec" section.
+- **`specs/decisions/ADR-004-multi-tenancy.md` (v1.5.0)** — decision 5 amended by P7.5c+f (#263).
+  It said per-vendor primitives are injected and "the **semantic** layer and every component stay
+  unchanged." Components still are; the semantic *layer* no longer is, because `brandStyle()` now
+  derives the foreground tokens per vendor through `clampForContrast`. The original wording was
+  written when "semantic layer unchanged" and "vendors are differentiated" were compatible — #251
+  broke that tie by decoupling three tokens into audited constants, and the clamp resolves it
+  properly rather than picking a side. Also records that promotional content is vendor data on the
+  same principle (#233).
+- **`specs/design-system.md` (v1.8.0)** — the "do not restore the brand hex into the semantic layer"
+  rule now says **raw** brand hex, and explains why the word matters: writing a primitive straight
+  into the semantic layer stays forbidden (Aheed's `#4caf50` and `#f57c00` measure 2.78:1 and 2.70:1,
+  the worst in the repo), while deriving one through the clamp is the opposite operation — it cannot
+  return a value below the ratio it was given — and is how per-vendor colour is now delivered. A
+  reader applying the old wording literally would have rejected the mechanism that enforces it.
+- **`specs/decisions/ADR-005-payments-money-flow.md` (v1.5.0)** gains a P7.5b implementation note
+  recording the subtraction rule and the two upstream clamps that make it safe (`lib/discounts.ts`
+  bounds a code's face value; `clampRedemption` fills only the headroom it left), so `splitDiscount`
+  needs no defensive cap — and stating that recomputing the loyalty share from vendor config must not
+  be "fixed" back in later.
+- **`specs/roadmap.md` (v1.41.0)** and **`specs/sdd-workflow.md` (v2.20.0)** — P7.5c+f's `/document`
+  closeout (#263). Roadmap gains the slice's build/merge and production-promotion rows, including the
+  live-verification detail (four DB-mutation rows and the carousel's pause control all closed live,
+  not left disclosed-but-unverified) and an honest note that this session's sandboxed network egress
+  couldn't reach either deployed domain directly, so "production is serving this commit" rests on the
+  `deploy-production` workflow's own log rather than an independent curl. `sdd-workflow.md` gains two
+  process lessons this loop surfaced: a generalisation of the `PromoSlider`/P4a bare-word-match trap
+  to `validation.md` rows whose literal grep command is a stricter or looser proxy for its own
+  requirement's actual wording (three instances found this pass, none real defects); and the root
+  cause of PR #283's `mergeable: CONFLICTING` — PR #275's squash-merge had left `origin/main` without
+  P7.5b's original commits as ancestors, which broke the *next* regular-merge promotion with a
+  spurious conflict in the shared log files, resolved with a content-identical reconciliation merge
+  pushed to `staging` rather than a forced rewrite. Promotion PRs should use a regular merge, never
+  squash, to avoid recreating this.
+
+### Fixed
+- **P7.5a — staff reports correctness & checkout cart preservation** (#261, closing #238, #237,
+  #234, `specs/2026-08-19-p7.5a-reports-cart-integrity/`). First slice of **P7.5**, the pre-launch
+  closeout of P3/P5/P6 deferred debt (epic #260). The three places this system asserted something
+  false to the person acting on it.
+  **Revenue no longer counts orders that were never paid for** (#238): `getFinancialsForStaff`
+  aggregated on `vendorId` alone, so abandoned checkouts and cancelled orders were reported as money
+  taken — **39% overstated**, measured on staging. New `REVENUE_STATUSES` in `lib/order-status.ts`
+  (`CONFIRMED`/`OUT_FOR_DELIVERY`/`DELIVERED`), written as a literal and deliberately **not** derived
+  from `STAFF_QUEUE_STATUSES`, which is a worklist and omits `DELIVERED`. Avg Basket Value derives
+  from the same two figures, so one filter corrects all three tiles.
+  **The admin panel is no longer edge-cached** (#237): `/staff/reports` served a signed-in admin
+  stale financials despite `force-dynamic` — so Next was not the cache. The app emitted no
+  `Cache-Control` on any HTML route, leaving an intermediary free to invent a policy. Every
+  `/staff/:path*` response now carries `private, no-store, must-revalidate`; storefront routes are
+  deliberately untouched.
+  **A failed payment no longer destroys the basket** (#234): `placeOrder` clears the cart inside the
+  order transaction (load-bearing for double-submit safety), and when `createPayment` threw, the
+  compensation returned stock, points and the discount-code use but not the cart — so "please try
+  again" left the shopper an empty basket. New `restoreCartFromOrder` refills the originating cart,
+  called from `placeOrder`'s `catch` rather than `releaseOrder` (which the Stripe webhook shares for
+  sessions that expired hours earlier), and **only when `releaseOrder` actually cancelled**, so a
+  racing confirmation cannot hand the shopper a duplicate basket for an order they paid for.
+
+### Changed
+- **`specs/architecture.md` (v1.16.0) — Cloudflare's edge cache is documented as active, not
+  optional.** Its caching section listed "Cloudflare's own edge cache in front of the Worker" as
+  something that *could* be added; #237 proves it is already there and was caching authenticated
+  admin pages. Now states the rule: a per-session or role-gated route must declare its cacheability
+  explicitly, because `force-dynamic` governs Next's rendering and not what sits in front of the
+  Worker — two different things with an identical symptom.
+- **`specs/decisions/ADR-005-payments-money-flow.md` (v1.4.0)** gains a P7.5a implementation note.
+  Its P3c note described the payment-failure compensation as releasing stock, which understated it
+  after this slice; the note records both constraints on `restoreCartFromOrder` (called outside
+  `releaseOrder`; only on a real cancellation) that a later consolidation would otherwise undo.
+- **`specs/roadmap.md` (v1.37.0)** gains the **P7.5** phase entry — six slices covering fourteen
+  issues, with eleven others explicitly deferred to P8 and **#137/#151 explicitly not scheduled**
+  (structurally unreachable until refunds exist) — plus the PR #259 promotion row that
+  `npm run sdd:audit` reported as pending carry-forward.
+- **`/document` closeout for P7.5a (#261, PR #268, merged to staging) — P7.5's first slice.**
+  Roadmap (v1.38.0) gains the build/validate/merge row, including the real dev-Neon-branch
+  credential failure `/validate` hit mid-run (handled per `CLAUDE.md`'s hard stop — recreated, not
+  guessed) and the two live rows it unblocked (R5, R13) once the branch was recreated. Delivery
+  board reconciled: #261 confirmed **In Review**. New issue **#269** filed (Phase P7, Backlog) for
+  R8 — confirming the new `/staff/*` cache header actually stops staleness on the real Cloudflare
+  edge, deliberately deferred past Ship rather than exercised for its own sake once
+  `deploy-staging` was already green. `ARTIFACT_INDEX.md` rebuilt; `npm run sdd:audit` and
+  `npm run kms:validate` both clean.
+- **`/document` closeout for P7 closeout (#251, PRs #256/#257, now in production) — P7 is closed.**
+  Roadmap gains the build/validate/fix, staging-merge and promotion rows, plus a phase-closure
+  summary. `CLAUDE.md` gains a new "Design tokens & per-vendor branding" section recording the
+  `brandStyle()` trap `/validate` found (a jsdom test that parses `tokens.css` directly proves
+  nothing about what a browser renders when a parallel per-vendor CSS-injection mechanism can
+  silently override the same tokens). `specs/design-system.md`'s per-vendor-theming note corrected
+  to match verified reality — it previously said both the primitive and semantic layers are
+  overridden per vendor; only primitives, `--color-primary`/`--color-surface-muted` and the three
+  semantic tints are, since the `/fix` that landed with #251. Delivery board reconciled: #251/#217/
+  #220/#222/#90 confirmed `Done`; #252/#253/#254/#255 (all filed during this slice or its `/fix`)
+  given **Phase P8** so they don't sit unscheduled and un-phased. `ARTIFACT_INDEX.md` rebuilt;
+  `npm run sdd:audit` and `npm run kms:validate` both clean.
+
+### Added
+- **P7 closeout — accessibility gate, RLS determination, guest data rights** (#251, closing #217,
+  #220, #222 and the phase epic #90, `specs/2026-08-19-p7-closeout/`). One combined slice, decided
+  at `/propose`.
+  **Accessibility:** `eslint-plugin-jsx-a11y`'s recommended set now runs at `error` across `app/`,
+  `components/` and `features/` — `eslint-config-next` already activated six of its rules but all at
+  severity 1, so `npm run lint` exited 0 with real defects present. `CartDrawerShell` (the live cart
+  drawer) gains the keyboard half of the dialog contract it lacked: focus moved into the panel on
+  open, a `Tab`/`Shift+Tab` trap, focus restored to the cart button on close, `Escape`, and
+  `aria-labelledby` naming its own heading. Key handling sits on `document` rather than the dialog
+  container, because a container handler stops firing the moment focus leaves — which is when
+  `Escape` matters most. New `tests/a11y/*` assert all of it in jsdom.
+  **Guest UK GDPR erasure:** P7b gave account holders export, erasure and rectification; a guest who
+  checked out without an account had no route to any of them. `/orders/lookup` now offers erasure
+  behind the same order-number/email pair, rate-limited by the same limiter and budget (a fast "no
+  such order" is an oracle for guessing pairs). `eraseGuestOrderData` verifies the pair itself, at
+  the query level, inside the transaction — there is no window between proving ownership and
+  erasing. One order per request, stated up front in both the form and the confirmation.
+- **`tests/repository-vendor-scoping.test.ts`** — the compensating control for RLS. Walks each
+  repository's TypeScript AST and asserts every exported function querying a `vendorId`-bearing
+  model takes a vendor id, and that a function given one actually references it. Twelve exceptions
+  allowlisted with reasons.
+
+### Changed
+- **Three semantic colour tokens darkened for WCAG 2.2 AA** — `--color-action` `#4caf50` →
+  `#2e7d32`, `--color-accent` `#f57c00` → `#a85400`, `--color-danger` `#d32f2f` → `#c82d2d`, plus
+  both derived hover shades. The `--color-brand-*` primitives keep their exact brand-kit values;
+  only the semantic layer moved, which corrected **45-plus call sites across 20-plus files with no
+  component edits**. The brand values fail AA in combinations the UI actually renders: action and
+  accent on white at 2.78:1 and 2.70:1 (both under even the 3:1 UI threshold), and `--color-danger`
+  on `--color-danger-tint` at 4.36:1 — the standard error-message treatment at `text-sm` in
+  checkout, every account form and `OrderStatusBadge`. `tests/design-tokens-contrast.test.ts` reads
+  `tokens.css` directly and asserts 17 pairs, so a future "restore the brand colours" edit fails.
+  `specs/design-system.md` records why, and its Accessibility section — which already mandated
+  icon-only `aria-label`s, no heading skips and non-brand-green button contrast — now notes that
+  `CartDrawer.tsx` broke three of those rules while the doc stated them. Rules nobody executes are
+  not controls.
+- **ADR-004: row-level security determined NOT adoptable** (v1.4.0). Decision 2 deferred RLS to P7
+  on the guess that per-request session vars on Workers isolates would be "fiddly". Measured, it is
+  unavailable: `PrismaNeonHttp` has no session for a `SET LOCAL` GUC to live on, and the adapter
+  refuses transactions in HTTP mode outright (`Transactions are not supported in HTTP mode`) — so
+  the batched escape hatch does not exist at the adapter layer either. Adopting RLS would mean
+  routing every read through WebSockets, the configuration that caused #187. Evidence in
+  `specs/2026-08-19-p7-closeout/rls-experiment.md`, re-runnable via `scripts/rls-experiment.ts`.
+  Neon's JWT-on-connection RLS would sidestep it but is gated behind Neon Auth, which `CLAUDE.md`
+  keeps off. ADR-004 states the residual gap rather than implying parity.
+- **`CLAUDE.md`'s repository-facade rule no longer contradicts itself.** It directed facades into a
+  sibling `lib/<name>-service.ts`, then held up `getCartRepository` as the thing to match — while
+  that function's own *location* is the violation, so a reader following it literally reproduced the
+  defect. Now says to copy the shape, not the address, and names all nine non-compliant factories
+  (#252).
+
+### Fixed
+- **The WCAG AA contrast fix above never reached a real rendered page — found at `/validate`,
+  fixed at `/fix`** (#251). `lib/vendor-theme.ts`'s `brandStyle()` injects per-vendor branding as an
+  inline style on every page's root element, and was re-declaring `--color-action`, `--color-accent`,
+  `--color-danger` and their hover shades straight from each vendor's raw primitive colour — the
+  same 1:1 mapping `tokens.css` used *before* this slice darkened those five independently of the
+  primitives. An inline style always beats a stylesheet rule, so every real page kept rendering the
+  pre-slice, AA-*failing* hex regardless of `tokens.css`; the jsdom contrast test never caught it
+  because it reads `tokens.css` directly rather than rendering through the real layout. Fixed by no
+  longer re-declaring those five tokens per vendor — they now resolve to the platform's fixed,
+  audited default everywhere. `--color-primary`, `--color-surface-muted` and the three semantic
+  tints are unaffected and still vary per vendor, since `tokens.css` still defines those as plain
+  primitive aliases. **Consequence:** SriMart's own action/accent/danger primitives (never
+  contrast-audited) no longer drive those three roles — SriMart now renders the same audited colours
+  as every vendor there, trading its prior, unaudited differentiation for a real AA guarantee. Filed
+  as **#255**: whether/how to bring back per-vendor differentiation for these three tokens with a
+  real contrast guarantee is its own decision.
+
+### Removed
+- **`components/cart/CartDrawer.tsx`** — dead code. Added by P7a (`624a842`) and never imported by
+  anything, as `git log -S` confirms across all branches; the live drawer is `CartDrawerShell.tsx`,
+  rendered by `Header.tsx`. It held both violations the new accessibility gate found. #251's spec
+  originally targeted it for the dialog-semantics work, which would have asserted accessibility
+  properties of a component no user can reach.
+
+### Added
+- **P7d — Workers observability and the first NFR measurement** (#218,
+  `specs/2026-08-19-p7d-observability-nfr/`). `wrangler.toml` gains a top-level `[observability]`
+  block (`enabled = true`, `head_sampling_rate = 1`, inheritable by both envs) — until now there was
+  no way to take a server-side latency measurement at all, while `specs/mission.md` had set
+  `LCP < 2.5s` and API `p95 < 400ms` as Gate-3 criteria from the start. `scripts/measure-nfr.ts`
+  (+ `npm run nfr:measure`) measures client-observed TTFB percentiles over public routes with no
+  database credential or session, so the numbers are reproducible from a clean checkout. Results are
+  recorded in the new `docs/nfr-baseline.md`, which labels every figure client-observed or
+  server-side rather than blurring the two.
+  **API p95 meets its target** (worst warm route 138.92 ms vs 400 ms; cold start 924.94 ms recorded
+  separately rather than averaged away). **LCP breaches it by ~5x** — 11,700 / 12,482 / 12,633 ms
+  across three Lighthouse runs. The cause is one asset: the vendor logo is **1,926,055 bytes, 83% of
+  page weight**, rendered into a 40 px-tall box on every storefront page, and it is `docs/logo.png`
+  uploaded unresized. Filed as **#243**; not remediated here because the fix is an account/plan
+  decision plus asset ops, not repo code.
+- **`Order(vendorId, userId, createdAt)` index** (migration
+  `20260818233907_p7d_order_user_history_index`). `specs/architecture.md` §3.4 claimed an
+  `Order(userId, createdAt)` index served order history; **it never existed**, so `listForUser`
+  (which filters `{vendorId, userId}`) could only walk the *vendor's* orders and discard other
+  customers' rows — one shopper's history costing the whole store's order volume. At 118 rows the
+  fix is not observable, and the baseline says so rather than claiming a speed-up.
+
+### Fixed
+- **Two persistent docs corrected against the artifact rather than against each other.**
+  `specs/architecture.md` §3.4 named two indexes that did not exist and both omitted the leading
+  `vendorId` ADR-004 requires; the paragraph is now reconciled to `prisma/schema.prisma`.
+  `specs/tech-stack.md` still presented Next.js Data Cache / ISR as the catalogue caching strategy,
+  which `specs/architecture.md` has documented as unworkable on this stack since P2a — whichever
+  document a reader opened first decided what they believed.
+- **A `<1%` table cell in `docs/nfr-baseline.md` broke the internal KMS docs site build.** MDX
+  parses a bare `<` followed by a digit as the start of an invalid JSX tag name, which failed
+  `deploy-docs-internal`'s Nextra build the moment this doc was assembled into the site. Reworded
+  to "under 1%"; the app's own `gates`/`build` never touch this pipeline, so the app-level slice
+  PR's CI stayed green while this broke on the next push. Found and fixed at `/ship` for #218
+  (PR #245/#247).
+
+### Changed
+- **#46 settled: keep plain `<img>`.** Cloudflare Image Transformations are **not enabled** on this
+  zone (`/cdn-cgi/image/…` returns 404 in all three URL forms), so a `next/image` custom loader
+  would ship byte-for-byte identical images. `ProductCard` and `ProductImageGallery` gain intrinsic
+  `width`/`height`, and the gallery's first image loads eagerly at high priority;
+  `@next/next/no-img-element` is now off repo-wide with the reasoning inline, replacing a mix of
+  inline disables that made the warning meaningless. Admin and staff surfaces untouched.
+- **`CLAUDE.md` now states that "no raw SQL" governs application code, not migrations.** This was
+  never actually undecided — `specs/architecture.md` §3.1 has said it since the schema was written —
+  but it was absent from the file read at decision time, which is why GAP-011 sat deferred behind an
+  answer that already existed one document over. Unblocks the `pg_trgm` question (#163/GAP-011) and
+  the same question in #220 (RLS).
+
+### Documentation
+- **#236 re-driven with real Server Action calls** (25 sequential at ~1.1 s and 30 back-to-back both
+  clean; **20 concurrent produced 3 connection-level failures**). The reported sequential ceiling did
+  not reproduce — the constraint is concurrency, not rate. Whether those failures are server-side or
+  the client's own socket pool is **deliberately not asserted**: separating them needs the persisted
+  Workers Logs that only exist after `deploy-staging`. **#163** and **#236** stay open with their
+  measurements recorded; **#244** is new — production's vendor logo object was never uploaded, so
+  every production page renders a broken image (verified with and without a `Referer`, ruling out
+  hotlink protection).
+- **`/document` closeout for the validation debt bucket (#231, PRs #240/#241).** Roadmap gains the
+  `/fix` and Ship-time rows (PR #240 to staging, PR #241 promotion to production, post-promotion
+  issue-state check confirming no accidental closure). `docs/gap-register.md` gains GAP-024 (the
+  `/staff/runbook` `PanelRefusal` gap `/fix` corrected). Two lessons recorded while still cheap:
+  `CLAUDE.md` gets a new "Staff panel pages" section (every `/staff/*` refusal branch must render
+  `PanelRefusal`, never `return null`, since the layout shell still renders around a `null` page);
+  `specs/sdd-workflow.md` gets a third instance of the grep-matches-the-explanation trap, this time
+  in a requirement's own literal text (R40 was broader than its own `validation.md` row).
+  `ARTIFACT_INDEX.md` rebuilt; `npm run sdd:audit` and `npm run kms:validate` both clean.
+- **`/document` closeout for P7d (#218, PRs #245/#248/#247, now in production).** Roadmap gains the
+  build/validate, staging-merge, `deploy-docs-internal` fix, and promotion rows. `CLAUDE.md` gains a
+  new "KMS docs" section and `specs/sdd-workflow.md`'s Validate pre-flight names the real check for
+  any slice touching `docs/`/`specs/` — the app's own `lint`/`build` never build the internal KMS
+  site, so a defect there (this slice's MDX-breaking `<1%` table cell) merges clean and only fails
+  on the next push. `docs/nfr-baseline.md`'s Observability section reconciled with what Ship actually
+  found: persisted-Workers-Logs confirmation stayed blocked in that environment even after deploy
+  (both `wrangler tail` and the Cloudflare dashboard), filed as **#246** rather than left as an
+  implicit promise. `ARTIFACT_INDEX.md` rebuilt; `npm run sdd:audit` and `npm run kms:validate` both
+  clean.
+
+### Added
+- **`sdd:audit` now checks promotions, not just slices** (#207,
+  `specs/2026-08-18-validation-debt-bucket/`). A merged `staging → main` PR with no
+  `specs/roadmap.md` change-log row was structurally invisible to the audit, which is how the same
+  gap recurred five consecutive times, each caught by eye at a later `/orient` while the check
+  reported green. `scripts/sdd-promotions.ts` holds the matcher as a pure, importable module —
+  `sdd-check.ts` calls `process.exit()` at module scope, so importing *it* from a test would kill
+  the run. A row must cite `PR #NNN` or the merge SHA; a bare `#NNN` deliberately does not count,
+  since issues and PRs share one number space here. The check **skips rather than fails** when `gh`
+  is unavailable, and reports a promotion merged after the last roadmap edit as a *pending
+  carry-forward* rather than a gap, so it can't fire falsely on every branch cut after a promotion.
+  **On its first real run it found three promotions nobody knew were undocumented — PRs #118, #121
+  and #134** — whose rows are backfilled here.
+- **Test coverage for `reverseRedemption`'s null-owner path** (#224). P7b made
+  `LoyaltyLedgerEntry.userId` nullable, forcing a behaviour change that `/validate` called the
+  highest-risk edit in that diff and that shipped verified by code reading alone: when the
+  redeeming user has been erased, the `LoyaltyAccount` credit is skipped while the `REVERSAL` row
+  is still written. Five cases in `tests/loyalty-repository.test.ts`, including a live-owner
+  contrast case so the null assertions prove a real branch.
+
+### Fixed
+- **The homepage hero no longer loads a CSP-blocked external image.**
+  `app/(storefront)/page.tsx` hardcoded an `images.unsplash.com` photo — the only external image
+  URL in the codebase — while P7a's `Content-Security-Policy` allows
+  `img-src 'self' data: https://*.nocaped.com`. It had been failing its CSP check in production
+  since PR #206 promoted the CSP on 2026-08-17, and rendered identically for every vendor, which
+  P6.6's own R12 forbids. Confirmed still live and blocked on staging at `64e4a46`
+  (`unsplashLoaded: false`). The hero keeps its token-driven brand panel and glow; a real
+  per-vendor hero image needs a `VendorConfig` field and a migration (**#233**).
+- **`/staff/runbook` now refuses a signed-in non-staff visitor the same way every other staff page
+  does.** Its role check returned `null` on refusal instead of rendering `<PanelRefusal>`, so a
+  signed-in customer got a blank content area inside the admin shell (HTTP 200, no message) rather
+  than "Staff only — this area is restricted to store staff." Found at `/validate` by exercising the
+  exact row `build-notes.md` had disclosed as never fired; fixed to match the other 8 `/staff/*`
+  pages' pattern.
+
+### Changed
+- **P6.6's and P6.6c's exit gates rewritten so they can be walked** (#192 item 4). Six of P6.6's
+  eight validation rows asked a reader to confirm the UI "matches the prototype" — unfalsifiable,
+  the same defect P6.5's gate was rewritten to remove. P6.6c had never used the Gate-2 format at
+  all: checkbox bullets on both sides, so no numbering to map one onto the other. Now `R1..R14` and
+  `R1..R17` respectively, every row naming a command, a file property or an observable behaviour.
+  P6.6c's navigation requirement states a required **subset** rather than "all 9 tabs", which P6.7
+  falsified by legitimately adding a tenth. **Neither rewrite was edited to match the code**: where
+  the artifact fails an obligation, the obligation stands and the gap is tracked.
+- **`docs/gap-register.md` 2.4.0** — GAP-016..GAP-023, six of them found by actually walking the
+  rewritten gates and by #103's live window rather than by reading anything.
+  `specs/sdd-workflow.md` 2.17.0 and `CLAUDE.md` updated: both described `sdd:audit` in terms the
+  promotion check made incomplete.
+
+### Validated
+- **P3c's R7 payment-failure path proven live for the first time** (#103), in a deliberate,
+  separately-confirmed window against staging's Worker (13:21:05Z → 13:25:00Z). With an invalid
+  `STRIPE_SECRET_KEY`, order `AHE-20260818-U82BM2` was left `CANCELLED` with two `OrderStatusEvent`
+  rows (`PENDING_PAYMENT` → `CANCELLED`, *"Payment provider unavailable; order cancelled and stock
+  released."*) and `Inventory.quantity` restored to **exactly** its pre-order value. The key was
+  restored from `secrets/staging.vars` and the restore proven by a new Stripe Checkout session
+  created through the real app — not by the write's exit code, since Cloudflare secrets cannot be
+  read back.
+- **P6.6 and P6.6c walked against their rewritten gates**, which found two defects no amount of
+  reading would have caught: **SriMart, an electronics store in Reading, advertises certified halal
+  meat** because `Header.tsx`/`page.tsx` hardcode Aheed grocery copy (**#239**), and the staff
+  financial report **counts cancelled and unpaid orders as revenue** — £1,162.64 of a £3,003.49
+  headline, 39%, never collected (**#238**). Both were reachable only by exercising the artifact
+  against a second tenant and against real order data.
+- Deferred with issues filed, not remembered: **#232** (wishlist link never built), **#233**
+  (per-vendor hero image), **#234** (payment failure destroys the cart while telling the shopper to
+  try again), **#235** (CDN hotlink 403s local preview, so no image renders there), **#236** (rapid
+  cart mutations still reach a failure ceiling), **#237** (admin financial report served stale from
+  cache despite `force-dynamic`).
+
+### Docs
+- **`/document` pass reconciling P7b (#216) + the local dev environment tier (#226) with their
+  live promotion to production** (PR #229, `staging → main`, merge `6a6f51d`). `specs/roadmap.md`
+  gains the dev-environment slice's first-ever roadmap entry (build through staging merge, PR #228,
+  never recorded until now) and a promotion row covering both slices together — staging was 13
+  commits ahead of `main` at promotion time, so a docs-only slice and a GDPR feature carrying a
+  real migration went out in the same PR. `npm run sdd:audit` confirms all slices documented.
+  `CLAUDE.md` gains a new Windows-shell lesson: `npx tsx -e "<script>"` fails **silently** (no
+  stdout, no stderr, exit 0) the moment the inline script imports an installed package, hit three
+  times during `/validate`'s live R10 isolation check before switching to a real `.ts` file — write
+  ad hoc DB scripts to a file inside the repo, not `-e`, for anything beyond a trivial one-liner.
+- **Local `dev` environment tier** (`specs/2026-08-18-dev-environment/`, closes #226). `docs/
+  env-setup.md` gains a "Local development (dev)" section: one disposable Neon **branch** per
+  developer (not a project, unlike staging/production — a personal branch holds no real vendor
+  data, so ADR-004's "separate projects, not branches" ruling doesn't apply), branched off
+  **staging** so it inherits current schema + seed/demo data with no `db:seed` step, and reset by
+  delete-and-recreate. Deliberately **local-only**: no `wrangler.toml` env block, no deploy, no CI,
+  no GitHub environment, not routed through `scripts/configure-env.mjs` — both files are untouched
+  by this slice. Object storage is one **shared** `aheed-images-dev` R2 bucket across every
+  developer, not per-developer. Fixes the actual behaviour this replaces: `.env`/`.dev.vars`
+  previously pointed local `next dev`/`npm run preview` straight at the **staging** database and
+  bucket, so every local validation pass either risked staging data or needed scratch infra stood
+  up by hand — `.env.example`/`.dev.vars.example`'s `S3_BUCKET` placeholder is corrected from
+  `aheed-images-staging` to `aheed-images-dev` accordingly. Docs-only; no application code, no
+  schema change. Live-branch proof (a personal branch boots with seed data intact and is provably
+  isolated from staging) is deferred to `/validate`, once a developer has created their own branch
+  by hand per the new doc section.
+- **`/document` pass reconciling P7b's staging merge (PR #223) with what `/validate` actually
+  found.** `specs/roadmap.md` now records the real `/validate` → `/fix` cycle: a genuine spec
+  contract violation (`getDataRightsRepository()` had been added to `lib/repositories/data-rights.ts`
+  and called `getCurrentVendorId()` with no explicit `vendorId`, breaking that file's own "every
+  export takes prisma/vendor explicitly, no request context" property) and a `validation.md` gap
+  (the slice's migration was never instructed to be applied to staging before the write-path
+  harness, unlike the catalogue-debt-bucket slice's own `validation.md`). Both fixed before shipping;
+  R15's coverage gap (harness never exercised `DiscountRedemption`) closed in the same pass.
+  `CLAUDE.md` gained a new "Repository layer" section recording the facade-placement rule generally
+  (`lib/auth-rbac.ts`'s pattern — a request-context wrapper beside, not inside, `lib/repositories/`)
+  so future slices don't rediscover it; `specs/sdd-workflow.md` gained the missing-migration-step
+  trap so it's written into every slice's `validation.md` that ships a migration, not left to be
+  rediscovered per-slice. Filed **#224** (untested `reverseRedemption` null-owner refund path,
+  a real behaviour change reached sideways through this slice's migration) rather than leaving it
+  as an unverified `/validate` note. Issue #216 moved to **In Review** (staging only, not promoted).
+
+### Added
+- **UK GDPR data-subject rights — download, correct and erase your data** (P7b, issue #216,
+  `specs/2026-08-18-p7b-data-rights/`). `/privacy` §5 already told customers they could "access,
+  rectify, or request deletion" by contacting a "privacy compliance team" that exists nowhere in
+  the app, and none of the three had a mechanism behind it: no export path anywhere in the
+  codebase, no account deletion, and `/account` rendering name/email/role as static text with no
+  edit control. New `/account/data` offers all three. **Export** (Art. 15) is a JSON download
+  served by a route handler, covering account details, orders, addresses, reviews, basket, loyalty
+  and discount redemptions — and deliberately no credential material: linked accounts disclose the
+  provider name only, sessions their metadata but never the token. **Erasure** (Art. 17) keeps the
+  money and drops the person — orders are tombstoned with totals and items untouched, addresses
+  redacted in place (`Order.addressId` is not nullable, so the row cannot go), reviews/basket/
+  loyalty balance deleted, and the loyalty ledger and discount redemptions retained but detached.
+  **Rectification** (Art. 16) is name-only for now; email change needs verification mail and is
+  deferred to #221 behind #104.
+- Everything is **vendor-scoped** (ADR-004 global identity + row-level `vendorId`): erasing at one
+  store leaves your account at another untouched, and the shared sign-in is deleted only when no
+  other vendor still holds data. The platform-wide alternative was rejected because it needs
+  un-scoped repository methods, and this repo's one existing un-scoped read is what became P7a's
+  order-disclosure defect. `countOtherVendorData` is the single permitted cross-vendor query,
+  contracted to return an integer and never rows — recorded in ADR-004 so it doesn't read as
+  precedent.
+
+### Changed
+- **`LoyaltyLedgerEntry.userId` is now nullable with `ON DELETE SET NULL`** (additive migration
+  `20260818021500_p7b_loyalty_ledger_user_nullable`). It was non-null with `Cascade`, so deleting a
+  `User` destroyed the ledger rows that are the only explanation of a surviving order's
+  `discountPence` — a financial audit trail the order must retain, and a violation of that model's
+  own documented append-only invariant. Consequently `reverseRedemption` now skips the
+  `LoyaltyAccount` balance update when the owner has been erased (there is no balance left to
+  credit) while still writing the `REVERSAL` row, so the trail balances and the idempotency guard
+  still holds.
+- **`specs/roadmap.md`'s P7 and P8 lines no longer both claim backups and monitoring.** P7 said
+  "backups + monitoring" while P8 said "backups/PITR, monitoring", so each phase could assume the
+  other owned them — the same shape that let GAP-010 sit unbuilt behind an accounted-for row.
+  Resolved at `/propose`: **P8 owns them**; P7 stops at what lives in the repo. P7's remainder is
+  now four tracked slices — #216 (this), #217 accessibility, #218 observability + index/query
+  review, and #220 row-level security, the last being an already-approved ADR-004 obligation the
+  first decomposition had missed entirely.
+
+### Fixed
+- **Production R2 bucket CORS applied** (#180, GAP-007 → `Fixed`) — owner action, no code change.
+  `aheed-images-production` had never had a CORS policy, so every browser-direct presigned `PUT`
+  failed preflight. This stopped being a dormant P6 leftover the moment PR #214 promoted the
+  multi-image manager: **every admin image operation in production was failing**. Absence confirmed
+  first (`The CORS configuration does not exist [code: 10059]`), then verified by live `OPTIONS`
+  preflight in both directions — both production origins return `204` with the origin echoed, while
+  the staging origin and an unknown origin both return `403` with no `Access-Control-Allow-Origin`,
+  proving the policy discriminates rather than being permissive.
+
+### Docs
+- **`/document` pass reconciling both promotions to production (PR #214) and a real
+  closing-keyword incident.** `specs/roadmap.md` now records the catalogue-debt-bucket slice's
+  actual staging outcome (both R2/R15 blockers found and resolved before Ship — one was a test-
+  harness bug, the other a local-only R2 CORS limitation, not app defects) and the combined
+  production promotion. **Issue #174 was closed by accident during that promotion** — a `/fix`
+  commit message quoting the exact wrong text it was correcting (`"closes #174"`, inside a sentence
+  saying the opposite) still matched GitHub's closing-keyword scanner, which reads every commit in
+  the merged set, not just the PR body. Caught within minutes via the routine post-promotion
+  issue-state check, reopened with an explanatory comment, board status corrected. Recorded a
+  sharper version of this trap in `specs/sdd-workflow.md`'s Ship section: `closingIssuesReferences`
+  doesn't see every commit message, so it isn't sufficient on its own — the literal string
+  `closes #NNN` (or any closing-keyword variant) must never appear anywhere near an issue number
+  that must stay open, including inside a quotation.
+
+### Fixed
+- **The homepage's "New Arrivals" and "Featured Halal Deals" rows rendered nothing at all**
+  (issue #211, closes #208's remainder). Both fetched products via
+  `productsRepo.search("", {...})`; `search()`'s empty-query guard — correct for its real caller,
+  the `/search` page — unconditionally returns zero results, and `ProductRow` renders `null` for
+  zero products. Neither row's title appeared anywhere in `npm run preview`'s rendered homepage
+  before this fix. Added `ProductRepository.list()` for filtered listing without search text;
+  `search()` itself is unchanged.
+
+### Added
+- **Real `Product.isFeatured` flag** (additive migration), replacing the `isHalal` proxy the
+  homepage's featured rail ran on (GAP-013, #208). Admin checkbox in `ProductForm`, rail retitled
+  "Featured Products". Deliberately independent of `originalPrice`'s existing discount-badge
+  derivation — featured and "on offer" stay two separate concepts.
+- **Multi-image admin management** (GAP-014, #173): add a second (or third...) image, set which one
+  is primary, remove one, reorder them — `lib/repositories/products.ts`'s `addProductImage`/
+  `promoteProductImage`/`removeProductImage`/`reorderProductImages`, four new server actions, and
+  `components/staff/ProductImageManager.tsx`. The real gap was bigger than "remove and reorder are
+  missing": no code path had ever created a second `ProductImage` row — `attachProductImage` only
+  ever repointed the single primary, unchanged by this slice.
+- **`StorageService.deleteObject`** (GAP-015, #174 partial): removing or replacing a product image
+  now deletes the superseded object from storage. Decided inline delete over a scheduled sweep — no
+  new infrastructure, `wrangler.toml` still has no cron triggers. Doesn't cover an abandoned upload
+  (object written, `ProductImage` row never created) — #174 stays open for that narrower remainder.
+  `specs/architecture.md` and ADR-003 updated; both previously documented delete as "deliberately
+  absent".
+
+### Docs
+- **`/document` pass for the P6.5 residual-validation `/validate` + `/fix` + `/ship` cycle
+  (PR #209).** Added the roadmap row recording the actual merge (`74b6d02`) and the `/fix` pass
+  that preceded it — the Build-time row predicted the outcome before Ship ran, matching the pattern
+  already seen for PR #205/#206. Rebuilt `ARTIFACT_INDEX.md`. Confirmed issue #192's board item is
+  `In Review` (not `Done` — merged to `staging` only) and that #208/#176 are correctly placed.
+  Recorded a lesson in `specs/sdd-workflow.md`'s Ship section: a PR body referencing an issue that
+  must stay open is a closing-keyword trap even in prose that isn't the canonical `Closes #NN`
+  form — verify with `gh pr view <N> --json closingIssuesReferences` before merging.
+
+### Fixed
+- **Gap-register reconciliation: the registers were wrong on seven of fifteen rows**
+  (specs/2026-08-17-p6.5-residual-validation/, issue #192). Two `status: approved` registers were
+  sharing one GAP-ID space with no cross-reference — `docs/sdd/self-review/GAP-REGISTER.md` held
+  GAP-001..004, `docs/gap-register.md` held GAP-005..015. Consolidated into `docs/gap-register.md`
+  as the single master; the P6.5 file keeps its narrative and points there. Every row was then
+  re-derived from the code rather than from what the row claimed about itself: GAP-007 cited the
+  closed P6b2 upload issue (#167) instead of the open CORS prerequisite (#180); GAP-008, GAP-009,
+  GAP-010, GAP-012 and GAP-013 all still read `Deferred` after the work had shipped. **GAP-012 was
+  fully built and nobody knew** — `features/orders/reorder-items.ts` is a complete server action
+  wired into the order detail page while both the register and issue #124 reported it outstanding.
+  GAP-013's rail ships but is populated by an `isHalal` proxy rather than a real featured flag
+  (**#208** filed). GAP-014's wording understated what exists (add and set-primary are built;
+  remove and reorder are not). The register's "0 P0 (Critical Code/Security) gaps" and "100%
+  functionally complete, fully tested, and verified" claims are removed — both were false on the
+  day they were written, given P7a's unlisted unauthenticated cross-vendor order-disclosure hole.
+- **P6.5's exit gate certified a document instead of the code.** Its `validation.md` R1/R2 asked
+  only that the gap register exist and *claim* zero unresolved Critical/High gaps, and its six rows
+  were labelled `R1..R6` against a `requirements.md` that had no numbered requirements at all.
+  That is the mechanism that let GAP-010 sit as an accounted-for `Deferred` row while staff bulk
+  transitions had never been built. Both files rewritten: numbered `R1..R11`, every row now naming
+  a command, a file property, or a behaviour to exercise against the artifact.
+- **#176 verified fixed and closed**, and `specs/sdd-workflow.md`'s Validate-stage guidance for it
+  corrected. The fix had landed as GAP-002 of P6.5, but its only evidence was 26 unit tests — the
+  reported symptom was never re-fired, so the issue stayed open and the workflow doc kept telling
+  future sessions that local-preview browser sign-in 403s and needed a temporary **uncommitted**
+  patch to `lib/auth-origin.ts`. Live-verified against `npm run preview`: `Origin:
+  http://localhost:8787` reaches credential checking (`401` on a wrong password) while `Origin:
+  http://localhost` correctly returns `403 INVALID_ORIGIN` — **the inverse of what the doc
+  documented**, so a validator following it would have called a working app broken. Confirmed from
+  a real Chrome session as well (`POST /api/auth/sign-in/email` → `401`). Because the origin check
+  runs before credential validation, a deliberately wrong password proves this with no real
+  credential involved.
+
+### Docs
+- **Backfilled the PR #206 promotion row in `specs/roadmap.md`** (`staging → main`, merge
+  `081f618`) — the fifth consecutive promotion to reach production without a change-log row.
+  `sdd:audit` checks for a missing *slice* row and structurally cannot see a missing *promotion*
+  row; rather than record that observation for a fifth time, it is now tracked as **#207**.
+- **`/document` pass for the P7a `/validate`+`/fix`+`/ship` cycle (PR #204).** Backfilled two
+  missing promotion rows in `specs/roadmap.md`'s change log — PR #203 (`staging → main`, closing
+  P8 operational-debt issues #98/#156/#197) and today's P7a fix (PR #204, merged to `staging`) —
+  the same recurring "`sdd:audit` catches a missing slice row, not a missing promotion row" gap
+  #144 first named. Corrected the 2026-08-13 P7a-closure row's claim that staff bulk transitions
+  had shipped (they hadn't; #162, now actually built). Recorded that issue #123 was closed
+  prematurely on 2026-08-13 — accurate now that the guest-lookup fix landed, but the underlying
+  feature was broken/insecure at the time it was marked done. Rebuilt `ARTIFACT_INDEX.md`.
+
+### Fixed
+- **P7a compliance/hardening: three defects found and fixed at its first-ever `/validate` pass**
+  (specs/2026-08-13-p7a-compliance-hardening/). P7a shipped ungated (direct push, no PR, no
+  `gates`) on 2026-08-13; this is the first time it was checked against its own spec. Missing
+  `Content-Security-Policy` header added to `next.config.mjs`, scoped to the app's actual external
+  hosts (per-vendor CDN, R2's presigned-upload endpoint) so image upload wasn't silently broken.
+  Staff bulk order transitions (`requirements.md` §4.3/GAP-010, issue #162) were never built
+  despite the roadmap claiming otherwise — added `advanceOrderStatusBulk` (one `$transaction` per
+  batch, legality re-checked per order against its own persisted status) and wired multi-select
+  checkboxes into `/staff/orders` via HTML5's `form=` attribute rather than nested `<form>`s. Guest
+  order lookup (`/orders/lookup`) reused `findOrderForWebhook` — documented in its own file as the
+  one deliberately un-scoped read in the codebase, meant for Stripe's server calls only — with an
+  optional email field, so an order number alone disclosed any order's contents, any vendor, no
+  auth, no throttle; this is exactly the gap issue #123 deferred pending a real credential-pair/
+  rate-limiting decision, which P7a's own `requirements.md` §4.1 had already settled (Order Number
+  + Email) without the implementation enforcing it. Fixed with a vendor-scoped, email-matched query
+  (`findOrderForGuestLookup`) and a new Postgres-backed 5/minute rate limiter
+  (`OrderLookupAttempt`, additive migration `20260817120702_p7a_order_lookup_rate_limit`) — no
+  Cloudflare rate-limiting binding is provisioned, so this reuses existing Neon/Prisma rather than
+  inventing infrastructure. All three verified live against real Postgres on staging.
+
+### Docs
+- **Backfilled `specs/roadmap.md`'s missing PR #200 promotion row.** `sdd:audit` only checks that a
+  roadmap entry cites a `specs/<slice>/` path, so a missing *promotion* row (as opposed to a missing
+  *slice* row) goes uncaught — the same class of gap **#144** recorded for P5a. PR #200 (`staging →
+  main`, merge `399ecef`) carried PR #195's doc reconciliation plus buckets A/C and the demo-accounts
+  fix (#199) to production with no migration; production `/api/health` reconfirmed at `399ecef`.
+
+### Fixed
+- **SriMart's `VendorConfig` delivery values re-seeded on staging** (#98): `npm run db:seed` had
+  never run with both `SEED_AHEED_HOST` and `SEED_SRIMART_HOST` set against staging, so SriMart's
+  delivery fee/threshold/minimum sat on `VendorConfig`'s schema defaults (£3.49) instead of the
+  vendor-specific values already written in `prisma/seed.ts` (£2.99, free over £50, £10 minimum).
+  Re-ran the seed with both host vars set; verified live against staging Postgres —
+  `deliveryFeePence: 299, freeDeliveryThresholdPence: 5000, minimumOrderPence: 1000` — confirming
+  SriMart's checkout now renders its own values, not Aheed's/the schema default's. No code change;
+  a live data operation, recorded here per Gate 4.
+
+### Docs
+- **ADR-004 schema-drift check closed** (#197, split from #65): `prisma migrate diff
+  --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma` run against a
+  throwaway local Postgres shadow database (Docker, discarded after) reported "No difference
+  detected" — the hand-authored `20260808130000_multitenancy_vendor_scope` migration exactly
+  matches `schema.prisma`. No reconciling migration needed. Recorded in ADR-004's implementation
+  breadcrumb.
+
+### Added
+- **`demo-srimart-admin@example.com` in the demo-accounts roster** (#141): a store admin on the
+  platform's second vendor (SriMart), needed to close P5a's R56 gap — every other vendor-role demo
+  account attaches to the same (first ACTIVE) vendor, so a cross-vendor write could only ever be
+  tested in one direction. `DemoAccount` gains an optional `vendorSlug` field (omitted = existing
+  "first ACTIVE vendor" default) so an account can target a specific second vendor.
+  R56's reverse leg verified live against staging with a repository-level check
+  (`vendorConfig.update({ where: { vendorId: <srimart-id> }, ... })` leaves Aheed's row's
+  `updatedAt` untouched) rather than an interactive browser sign-in, which isn't something the
+  assistant can do itself even for a non-sensitive demo account — see
+  `specs/2026-08-11-p5a-loyalty-points/validation.md`'s R56 row.
+
+### Added
+- **`sdd:preclear` now checks `ARTIFACT_INDEX.md` staleness** (#132), mirroring `gates.yml`'s own
+  check so it can't surface for the first time on an open PR — P4b lost a CI run and a fix commit to
+  exactly that. Rebuilds the index into memory, diffs it against what's on disk with the generated
+  timestamp/commit footer normalised out, and restores the original bytes when the only difference
+  is that footer, so a footer-only rebuild doesn't masquerade as real uncommitted work for the
+  clean-tree check. Found and fixed a bug in its own first version while testing on Windows: a
+  `core.autocrlf` checkout holds `\r\n` on disk while `kms:build-index` always writes `\n`, so the
+  raw byte compare needs line endings normalised too, not just the footer text.
+
+### Docs
+- **The multi-issue `Closes #a, #b, #c` GitHub limitation** (#112): GitHub only honours the closing
+  keyword for the first issue in a comma-separated list, silently leaving the rest open on merge.
+  Documented in `specs/sdd-workflow.md`'s Ship section and `.claude/commands/ship.md` — promotion
+  PRs are exactly where this bites, since slice PRs merge into `staging` (never the default branch),
+  deferring every issue closure to the promotion PR.
+
+### Removed
+- **Eleven orphaned debug scripts** (#191): five ad-hoc Puppeteer scripts at the repo root
+  (`parse-logs.js`, `test-action.js`, `test-checkout.js`, `test-local.js`, `test-staging.js`) and six
+  more under `tests/regression/`, none referenced by any workflow, `package.json` script, test
+  config, or source import. The two regression scenarios they exercised (rapid cart mutation,
+  checkout-cancel cart restoration) are already covered as a manual register in
+  `docs/regression-tests.md`, verified live on staging during P6.7's closeout. `puppeteer` removed
+  from `package.json` — these scripts were its only consumer in the repo.
+
+### Docs
+- **ADR-004**: added an implementation-status breadcrumb for slices 0–1 (Neon environment isolation,
+  the `Vendor` aggregate + `vendorId` migration), both shipped to production 2026-08-08. One
+  follow-up item from #65 remains open and un-narrowed to just that: independently verifying the
+  hand-authored migration has no Prisma schema drift.
+
+### Added
+- **`demo-store-admin@example.com` in the demo-accounts roster** (#190): a store admin — vendor
+  `ADMIN`, platform `CUSTOMER`. This role was previously impossible to represent:
+  `requireVendorRole()` short-circuits to `via: "platform-admin"` for any platform `ADMIN`
+  (`lib/auth-rbac.ts`), so `demo-admin`'s `vendorRole` is never read, and the three guards that only
+  fire for `via: "ADMIN"` (`roles.ts:42`, `roles.ts:64`, the self-lockout branch) had unit coverage
+  but had never run against a real session. `tests/demo-accounts.test.ts`'s roster assertions now
+  derive from `DEMO_ACCOUNTS` instead of hardcoding its size and shape.
+
+### Docs
+- **P6.7 closed out** (#186, `specs/2026-08-17-p6.7-closeout-promotion/`): walked `validation.md`
+  §1.1–§1.4 and §2 live on staging across four accounts — all 29 rows now checked off with the
+  observed result recorded against each. Both hierarchy refusals, the STAFF denial and both
+  self-lockout variants hold; the store admin's role selector omits `ADMIN` from the DOM entirely,
+  and injecting the option server-side is still refused. The audit trail wrote **6 rows for 6
+  successful writes and 0 rows for the 4 refusals**, confirming the guards run inside the
+  `$transaction`. Smoke-checked P6.6/P6.6c/P7a and the #187 cart/checkout paths ahead of promotion;
+  P6.5 and a live order status transition are recorded as deliberately not covered.
+- **`specs/Validation.md` → `docs/regression-tests.md`**: given KMS front-matter and moved out of
+  `specs/`, where it had no front-matter, never reached `ARTIFACT_INDEX.md`, and collided by name
+  with every slice-local `validation.md`. Both of its regression scenarios were re-verified on
+  staging and are annotated with the result.
+- **Roadmap corrections**: the P6.5 row cited "Issue #180" (an unrelated CORS issue) and the P7a row
+  cited "PR #183" (an issue number, and no PR carried P7a). Both now record that the slice shipped
+  by direct push with no anchoring issue, naming the actual commits `982eafb` and `624a842`.
+- **Board reconciliation**: #183/#184/#187 → In Review; **#185 corrected from Done → In Review**
+  (its fix was never promoted, so it was not in production); #176 → Backlog; added a draft item for
+  P6.6, which shipped via PR #182 with no issue and no board presence.
+- Filed **#191** — eleven orphaned debug scripts still tracked from the ungated period.
+
+### Docs
+- **P6.7 closeout — Document (final)**: corrected `specs/roadmap.md`'s 2026-08-17 closeout row,
+  which had recorded promotion to production as already done — it was written during Build, before
+  the promotion PR existed. Added the real promotion row: **PR #194**, merge `7c9409c`, 56 commits
+  (not the 51 `plan.md` estimated pre-Ship), `deploy-production` green, production `/api/health`
+  confirmed `db.ok: true`. Board reconciled to match: #183/#184/#185/#187 and the P6.6 (PR #182)
+  draft item moved to **Done** — all four fixes were confirmed inside the promoted commit range, so
+  "In Review" (PR #193's placeholder, written before promotion) was no longer accurate. #186/#190
+  closed on the `main` merge. **Process lesson recorded in `specs/sdd-workflow.md`**: a slice's own
+  `validation.md` should never check `ARTIFACT_INDEX.md` staleness with a bare
+  `git diff --exit-code` — the footer embeds `git rev-parse HEAD` at generation time, so a committed
+  index can only ever cite its own parent commit, and a bare diff will show that one-commit gap
+  forever, by construction. CI's `gates.yml` normalizes the footer away before comparing; P6.7's
+  `validation.md` didn't, so `/validate` reported a false failure and `/fix` spent a harmless-but-
+  unnecessary commit chasing it.
+
+### Docs
+- **P6.7 Document (final)**: rebuilt `ARTIFACT_INDEX.md` (P6.7's `plan.md` was missing KMS
+  front-matter, so the slice was invisible to `sdd:audit`'s index check — added it); added the
+  2026-08-17 roadmap closure/status row recording what PR #188 actually verified vs. what's still
+  open (live multi-role validation, promotion to `main`); reconciled `validation.md` to check off
+  §3's now-real automated coverage while leaving §1/§2 explicitly unverified rather than silently
+  passing; reopened issue #186 (closed prematurely on staging, before review) and set its board
+  status to In Review; recorded the ungated-direct-push pattern in `specs/sdd-workflow.md`'s Orient
+  section so the next session checks `gh pr list` against the commit range, not just divergence
+  counts.
+
+### Fixed
+- **P6.7 Validate pass — self-lockout race, missing test coverage, and branch-wide gate breakage**:
+  - `lib/repositories/roles.ts`: closed a TOCTOU race in the last-admin self-lockout guard — the
+    admin count and the demoting write now run inside the same `$transaction` at `Serializable`
+    isolation, so two concurrent self-demotions can no longer both pass the check and leave a
+    vendor with zero admins.
+  - Added `tests/roles.test.ts` (12 tests) covering the role-transition matrix `validation.md` §3
+    asked for, plus the self-lockout guard.
+  - Corrected `validation.md`'s "403 Forbidden" wording to match how a Next.js Server Action
+    actually reports a refusal (`{success:false, error}` on a normal response, not a route
+    handler's HTTP status).
+  - Removed the leftover diagnostic try/catch wrapper in `checkout/page.tsx` and
+    `categories/page.tsx` (23 lint errors) now that the connection-exhaustion bug it was added to
+    diagnose is fixed elsewhere; deleted a stray UTF-16-encoded scratch file (`test-cart.ts`) that
+    broke `lint`/`format:check` outright; fixed a stale `tests/payments.test.ts` assertion left
+    over from the checkout-cancel-routing fix; reformatted the remaining root-level scratch
+    scripts flagged by `format:check`.
+
+### Added
+- **Promo Slider & UI Animations**: Added a new `PromoSlider` component to the homepage to showcase the latest offers. Enhanced the overall visual impact with subtle animations (hover translations, shadows, and scaling) across the `ProductCard`, `DepartmentScroller`, and homepage trust sections.
+- **Validation Guidelines**: Added a manual regression register tracking test cases for critical system logic including the hybrid Prisma driver architecture and cart persistence, preventing regressions. (Originally added as `specs/Validation.md`; moved to `docs/regression-tests.md` with front-matter during P6.7's closeout.)
+- **P6.7 — Staff Team & Role Management**:
+  - Built a new `/staff/team` interface for managing staff members within a vendor organization.
+  - Added a backend integration allowing STORE_ADMIN users to assign `STAFF` and `STORE_ADMIN` roles to existing users.
+  - Created `VendorRoleAuditLog` to persistently track all role elevation actions with attribution (`grantedBy`).
+  - Implemented `lib/repositories/roles.ts` to enforce RBAC and safe role updates.
+
+### Fixed
+- **Checkout Form Persistence**: Contact details on the checkout form now persist using local storage to survive the navigation flow when returning from payment.
+
+### Fixed
+- **Cloudflare Staging React Error #441 / Intermittent 500s (Connection Exhaustion / HTTP Transaction Error)**:
+  - Deployed a hybrid Prisma driver strategy in `lib/db.ts` to solve both WebSocket connection exhaustion on Cloudflare isolates AND the "Transactions are not supported in HTTP mode" error.
+  - `getPrisma()` now uses the fetch-based `PrismaNeonHttp` adapter for 99% of read operations, bypassing Cloudflare's WebSocket limit.
+  - `getPrismaWs()` uses the WebSocket-based `PrismaNeon` adapter strictly for operations requiring `$transaction` (e.g. checkout, add to cart). This ensures we only open a WebSocket exactly when an interactive transaction is required, keeping the concurrent socket count well below Cloudflare's strict 50-per-isolate limit.
+- **Cloudflare Staging React Error #441 (Tag Cache)**:
+  - Fixed `addToCart` Server Action crashing during OpenNext revalidation phase.
+  - Replaced `revalidateTag("cart")` with `revalidatePath("/", "layout")` in `features/cart/shared.ts` to bypass OpenNext tag cache missing binding issues on Cloudflare Workers.
+
+### Fixed
+- **Storefront & Admin Accessibility / Contrast Audit**:
+  - Restored WCAG 4.5:1 text color contrast on product unit labels (`text-black/60`), original prices (`text-black/60`), and the 'Filters' side navigation title (`text-primary`).
+  - Darkened dashboard notification text and card descriptions in the staff portal (`app/(admin)/staff/page.tsx`) from `/60` and `/70` to `/80` opacity.
+  - Increased footer contrast on all storefront pages by removing `/70` opacity on the footer element.
+  - Swapped the 'Apply' button background on the filtering form from `#4CAF50` (which failed contrast ratios against white text) to `#2E7D32`.
+  - Added a visually hidden `<h2>Products</h2>` inside the product grid to establish a semantic heading sequence for the category pages (`H1` -> `H2` -> `H3`), preventing skipped heading levels.
+  - Added explicit `aria-label`s to the quantity increment/decrement buttons in `AddToCartButton.tsx`.
+  - Wrapped main action controls and navigational links in the `<Header>` component inside a `<nav aria-label="Main Navigation">` landmark.
+- **Navigation RSC 404 Pre-fetch Error**: The 'Help Guide' link in the top navigation bar was pre-fetching `/help` in the background, which does not exist, triggering a fatal `404 (Not Found)` RSC error that halted client-side navigation. Re-pointed the link to `#` until the help page is implemented.
+- **Next.js 15 Client Transition 500 Errors (#184)**: Resolved `ERROR 2745569299` hard crashes in the Admin/Staff portal when toggling tiers or navigating client-side. Next.js 15 enforces strict rules that were previously warnings:
+  - Missing `<Suspense>` bounds around `useSearchParams()` now throw fatal server errors on RSC fetches. Wrapped `InventoryTable` at `/staff/inventory` in `<Suspense>`.
+  - `params` and `searchParams` are now asynchronous Promises. Components returning early (e.g. `requireVendorRole` failing and returning `<PanelRefusal>`) without awaiting these promises triggered unhandled serialization errors. Systematically moved `await params` and `await searchParams` to the top of all `app/(admin)/staff/...` pages.
+  - Implemented systematic null-safety across `lib/repositories/products.ts` resolving intermittent 500 errors.
+- **Cloudflare Worker CPU Execution Limit**: Set `[limits] cpu_ms = 50` in `wrangler.toml` to prevent Error 1102 ("Worker exceeded resource limits") during Next.js RSC cold starts on category pages.
+- **Transactional Email Strategy (GAP-005)**: Flagged migration to native Cloudflare Email Sending (outbound) and Email Routing (inbound) under Workers Paid ($5/mo) for Phase 8, replacing Resend and expanding CPU execution headroom.
+
+### Added
+- **P6.6c — Staff/Admin Operations Views Completion**:
+  - Refactored `PanelNav` to include all missing tabs (Reports, Inventory, Categories, Discounts, etc.) and enabled horizontal scrolling for mobile devices.
+  - Injected missing dashboard portal cards for "Live Inventory", "Runbook", and "Reports" (Admin only) on the main Operations dashboard.
+  - Built a zero-trust, static Operations Runbook (`/staff/runbook`) based on the UI-ref spec.
+  - Built an Admin-only financial Reports dashboard (`/staff/reports`) computing live metrics (Total Revenue, Total Orders, Average Basket Value) via a new Prisma aggregate query in `OrderRepository`.
+- **P6 Missing Gap (Issue #168)**: Shipped a dedicated "Live Inventory & Availability" view tailored for shop-floor staff. This includes dynamic tier toggling between Staff and Admin views, tabbed navigation, client-side filtering, and optimistic mutations for quick stock adjustments and availability toggles. Resolves a previously deferred P6 requirement and aligns perfectly with the AI Studio mockup.
+- **P6.6 — P0 Core Shopping UI Overhaul** (`specs/2026-08-13-p6.6-p0-ui-overhaul/`):
+  Full UI redesign mapping to the `docs/ui-ref` prototype while maintaining the `VendorConfig` multi-tenancy constraints.
+  - **Header & Cart Drawer**: Added delivery promise strip, global search UI, dynamic brand logo rendering, and a styled cart drawer button displaying the total price.
+  - **Hero & Trust Strip**: New storefront landing page (`page.tsx`) with a dynamic gradient Hero banner, real postcode checking, and Trust Values row.
+  - **Product Discovery**: Converted static placeholder text into live, data-driven "New Arrivals" and "Featured Halal Deals" merchandising rows.
+  - **Product Card Flow**: Overhauled visual card styling (badges, discount display, layout) and added an inline quantity selector directly into `AddToCartButton` to satisfy the requested Image → Title → Pack Size → Price → Offer → Qty Selector → Add to Cart UX flow without introducing complex client state.
+- **P7a — UK compliance, operational gap closure, and UX hardening** (`specs/2026-08-13-p7a-compliance-hardening/`):
+  Delivers UK GDPR/PECR compliance, OWASP edge security headers, guest order tracking, slide-over cart drawer, staff bulk order transitions, and one-click reordering.
+  - **UK GDPR & PECR Cookie Consent**: `CookieBanner.tsx` component managing essential/optional cookies with host-scoped `aheed_cookie_consent` cookie. Legal Terms of Service (`/terms`) and Privacy Policy (`/privacy`) pages.
+  - **OWASP Security Headers**: Injection of HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, and `X-XSS-Protection` in `next.config.mjs`.
+  - **Guest Order Lookup**: `/orders/lookup` page allowing unauthenticated guest shoppers to track orders via Order Number + Email.
+  - **Slide-Over Cart Drawer**: `components/cart/CartDrawer.tsx` matching `docs/ui-ref` design mockup visual look and feel.
+  - **One-Click Reorder**: Reorder items Server Action on `/account/orders/[orderNumber]` page.
+- **P6b2 — product image upload via presigned PUT** (#167,
+  `specs/2026-08-12-p6b2-image-upload/`): P6's last slice, and the first time an admin can put a
+  real photograph on a product. P6b1 made every *field* editable and left images read-only, so the
+  only way to change one was a developer re-running `prisma/seed.ts`. Three capabilities the
+  project has never had land together: the **first write through `lib/storage`** at runtime, the
+  **first request the Worker has ever signed**, and the **first browser-direct upload**. The Worker
+  signs a short-lived `PUT` (`presignPut`, SigV4 query signing via aws4fetch — still plain S3, no
+  R2 feature) and the browser uploads **straight to storage**, so no image byte transits the Worker
+  and its request-size and CPU limits are not in the upload path. **Keys are immutable —
+  `products/{productId}/{uuid}.webp`** — so replacing an image writes a *new* object and repoints
+  the row rather than overwriting: that keeps a Cloudflare cache purge out of the design entirely,
+  which would otherwise have meant a purge-scoped API token as a new Worker secret and a
+  provider-specific call inside a deliberately vendor-agnostic port. Keying on the product id
+  rather than the slug survives the slug edits P6b1 made possible. **The server never accepts a
+  key**: `requestImageUpload` takes a product id and a byte length and nothing else, because a
+  signature proves *who is asking*, never *what they may ask for* — a client-named key would let
+  one vendor's admin obtain a valid signature for a PUT over another vendor's object. **The row is
+  written only after the object is verified**: `attachProductImage` re-runs the ADMIN check and the
+  vendor-scoped product lookup, re-checks the key shape against that product, then issues a
+  server-side `headObject` (must exist, be `image/webp`, be within 2 MiB) before anything changes,
+  since a presigned PUT cannot police a body it never sees. Bytes are written before the row
+  deliberately — the reverse order risks a row pointing at an object that was never uploaded, a
+  visibly broken product page, where this order risks orphaned bytes, which are invisible. The
+  browser converts to **WebP on a canvas** (1200px longest edge, quality 0.82, EXIF orientation
+  honoured) because the Worker never sees the bytes and so cannot; the `.webp` convention now holds
+  literally rather than by hope. **No schema change, no migration** — `ProductImage` has carried
+  `storageKey`/`alt`/`sortOrder`/`isPrimary` since P2. Scope is the **primary image only**:
+  add/remove/reorder is #173, and **nothing is ever deleted**, so superseded objects accumulate by
+  design (#174). Corrects four docs that all gave the example key as `products/{sku}/main.webp` —
+  `Product` has no `sku` field and never has, and the seed actually writes
+  `products/{slug}/main.svg`; ADR-003 gains an additive implementation note recording the port's
+  real methods, the aws4fetch-vs-AWS-SDK substitution and the immutability rule, reopening no
+  decision. Staging bucket CORS applied and verified during the slice; **production CORS is
+  deliberately deferred to the promotion**.
+- **P6b1 — catalogue management: product, category & inventory writes** (#159,
+  `specs/2026-08-12-p6b1-catalogue-writes/`): the first admin **write** path to the catalogue.
+  `lib/repositories/products.ts` and `categories.ts` were read-only — every exported method a query
+  — so products, categories and inventory existed only because `prisma/seed.ts` created them, and
+  the owner could not add a product, correct a price or mark something out of stock without a
+  developer and a re-seed. Product and category **create + edit** plus inventory editing now live
+  inside P6a's `(admin)` panel at `/staff/products` and `/staff/categories`, ADMIN-only, matching
+  `/staff/loyalty` and `/staff/discounts`. **No schema change and no migration** — every field
+  written already existed; what was missing was never the columns. Admin routes key on **`id`, not
+  `slug`**, because this slice makes a slug editable for the first time and an admin URL that
+  changes when you rename the thing it points at breaks every bookmark. **Admin reads are separate
+  functions, not a flag on the storefront's** — every storefront read filters `isActive: true`,
+  which is right there and fatal here, since the owner's first need after hiding a product is to
+  find it again; an `includeInactive` boolean in the storefront hot path would leak hidden products
+  to shoppers on one wrong call. **`categoryId` is untrusted**: `Product.categoryId`'s foreign key
+  carries no vendor, so a write resolves the category *scoped to the acting vendor* and refuses
+  otherwise — the same defence P3d used for its review-form product ids. Every field rule is pure
+  and DB-free in `lib/catalogue-form.ts` (28 unit tests), including slug derivation from the name
+  and the rule that a "was" price must be strictly above the price it advertises a saving against.
+  **Nothing is deletable** — `isActive` is the only removal, for both models: `Product` is
+  referenced by `OrderItem`, `CartItem` and `Review`, so a hard delete would either fail on the
+  foreign key or destroy order history (same posture P5b took for discount codes). **Deactivating a
+  category with active products or sub-categories is refused, naming the blockers**, rather than
+  cascading — one click quietly rewriting rows the owner never saw is the wrong default with no
+  undo. **A category's parent must itself be top-level**, capping the tree at the two levels the
+  storefront can actually render and making a cycle unrepresentable; recorded in
+  `specs/architecture.md` (1.12.0) beside the model, since the schema's self-relation is unbounded.
+  Creating a product creates its `Inventory` row in the same transaction, and updates upsert it, so
+  "out of stock" and "never given stock" stop being indistinguishable. `isUniqueViolation` extracted
+  to `lib/repositories/prisma-errors.ts` and shared with `discounts.ts` — slug collisions become a
+  routine human error once a person types slugs. Product image upload is deliberately **not** here:
+  it is #167 (P6b2), the only part of P6b that is new infrastructure and the only part blocked on
+  owner-provisioned bucket CORS and Worker `S3_*` secrets; the form shows existing images read-only
+  and `lib/storage.ts` is untouched. Also deferred with issues filed: a STAFF-visible stock-only
+  surface (**#168**) and search on the admin product list (**#169**).
+- **P6a — admin panel shell & order dashboard** (#158, `specs/2026-08-12-p6a-admin-shell-orders/`):
+  the first P6 slice. Before this, `/staff/orders`, `/staff/loyalty` and `/staff/discounts` were
+  three orphan pages with no index, no navigation between them, and the *shopper's* header rendered
+  above each — reachable only by typing the URL. A new **`app/(admin)/` route group** with its own
+  layout makes them one navigable panel; route groups are URL-invisible, so **every path is
+  unchanged**. The new layout re-carries the two things the storefront layout had been silently
+  providing: the **ADR-004 slice 3b tenant gate** (`getCurrentVendorId()` *throws* on an
+  unresolvable host, so a layout without the `/coming-soon` redirect turns an unknown host into a
+  500 — `specs/architecture.md` now records the gate as a per-layout obligation, not a property of
+  one file) and the **slice 4 brand tokens**, extracted to `lib/vendor-theme.ts` so two layouts
+  cannot drift apart on the same palette. The layout's role lookup drives **navigation only** — a
+  layout is not an authorization boundary in the App Router, so every page still calls
+  `requireVendorRole` with its own roles and every action re-checks independently. Adds a `/staff`
+  landing page. **The order dashboard supersedes P4b's deliberate stopgap** (#129): with no query
+  string it is still *exactly* P4b's actionable queue — the packing floor's default does not move —
+  while `?status=` (including `?status=all`) and `?q=` reach the rest, so a delivered order from
+  last week is findable at all. An absent **or unrecognised** status both fall back to the queue
+  rather than widening it, and the pagination link carries the **normalised** value, never the raw
+  input, so a typo cannot propagate through paging; all of it lives in a pure, DB-free
+  `lib/staff-orders-query.ts`. Search spans order number, guest email and a member's email.
+  **A per-order detail view at `/staff/orders/{orderNumber}`** — the first staff have ever had —
+  served by `getForStaff()`, a **third** order read beside `getByOrderNumber` (P3b's capability-URL
+  rule) and `getForUser` (P4a's owner-only rule) and deliberately neither: vendor-scoped, *not*
+  owner-scoped, so a guest order with no owner is visible to the staff who must pack it while
+  another vendor's number resolves to nothing. It is the **first reader of
+  `OrderStatusEvent.createdByUserId`**, which P4b shipped with nothing able to display it.
+  **P4a's no-note guarantee is preserved structurally rather than by filtering**: `buildTimeline`
+  and `StatusEventInput` still have no `note` field at all, and the staff view gets its own builder,
+  its own entry type and its own repository select — so a note reaching a shopper's order page would
+  require changing three things, not forgetting one. Unlike the customer timeline it does **not**
+  collapse consecutive identical statuses, because for staff that repeat is the diagnostic
+  information. `STAFF_QUEUE_STATUSES` moved to `lib/order-status.ts` (it was always a status rule,
+  not a data-access concern) so the pure parser can reach it without importing a repository.
+  **No schema change and no migration** — `Order`'s `@@index([vendorId, status, createdAt])` from
+  P3b already serves every list here. Deliberately excluded and tracked: catalogue management
+  (#159, P6b), bulk order actions (#162), and search indexing for real volume (#163); staff
+  cancellation and refunds remain ADR-005 territory. `docs/repo-structure.md`'s app-tree sketch,
+  which showed an `(admin)/admin/` group that was never built, corrected to the `(admin)/staff/`
+  group that now exists.
+- **P5b — discount codes: engine, checkout application & staff admin** (#145,
+  `specs/2026-08-11-p5b-discount-codes/`): P5's second slice and the discounts half of the phase.
+  Per-vendor `PERCENTAGE`/`FIXED_AMOUNT` codes with a validity window, minimum spend, a global usage
+  cap and a per-customer cap; entered at checkout, created and deactivated at `/staff/discounts` by
+  a vendor ADMIN. **P5a's generic `Order.discountPence` paid off exactly as designed**: `computeTotals`
+  already took a discount parameter, so `lib/payments.ts`, `/api/webhooks/stripe` and `Order` itself
+  are untouched, no ADR-005 decision is reopened, and `eligibleSpendPence` already excluded the whole
+  discount from earning — so a code-discounted order earns fewer points with **no new code**, and
+  codes cannot become a points-farming loophole. **Codes and points stack, code first**: the code is
+  evaluated against the pre-discount subtotal (a percentage must not shrink because points were also
+  spent) and `clampRedemption` gained an optional `existingDiscountPence` (default `0`, so every P5a
+  case passes unmodified) so points fill only the remaining headroom above the 30p payment floor.
+  **The usage counter counts DOWN** — `remainingRedemptions`, nullable for unlimited — because
+  `usedCount < maxRedemptions` is a column-to-column comparison Prisma cannot express in a `where`
+  and raw SQL is forbidden in application code; counting down restores the literal-to-column guard
+  `Inventory.quantity` (P3b) and `balancePoints` (P5a) already use, and `NULL` arithmetic keeps an
+  unlimited code unlimited with no branch. **The per-customer cap is structural, not a
+  count-then-write race**: `DiscountRedemption.seq` under `@@unique([codeId, userId, seq])` means two
+  concurrent claims by one shopper both compute `seq 0` and the database refuses the second. **An
+  abandoned checkout gives the use back** — `releaseOrder` releases the code beside the points
+  reversal, or a 100-use launch code would die without a single paid order; that release **deletes**
+  the redemption row rather than writing a reversal, deliberately unlike the loyalty ledger, because
+  nothing financial happened and deleting frees the shopper's `seq` slot. **An unusable code fails
+  the checkout with its reason**, the opposite of P5a's treatment of an unparseable points value:
+  silently charging full price for an order the shopper believes is discounted is the worse failure.
+  One additive migration (two tables, one enum); no column added to `Order`. Deliberately excluded
+  and tracked: category-scoped codes (#146), auto-applied promotions (#147), multiple codes per
+  order (#148), first-order-only eligibility (#149), naming the applied code on order pages and in
+  the email (#150), and code-use reversal on refund (#151, unreachable today for the same structural
+  reason as #137). P5 does **not** close on this slice's promotion — **#143** must be resolved first,
+  since P5a is live in production but dark.
+
+### Fixed
+- **P6a closeout docs.** `specs/roadmap.md` (1.18.0) gains P6a's slice row and its promotion row,
+  written from what live validation actually proved: **every one of build-notes' "known-shaky"
+  areas came back clean**, most notably the search `where`'s `user.email` relation-filter leg
+  (17 real matches through the relation, not the scalar legs) and `mode: "insensitive"` both proven
+  against the real Neon driver adapter for the first time, and the advance-status Server Action
+  driven end-to-end through a genuine rendered `multipart/form-data` form. No defect found in the
+  artifact; two apparent test failures during validation traced back to the validation harness
+  itself (an `Origin`-header mismatch on a hand-built Server Actions POST; a literal-string check
+  that missed a React hydration comment). **P6a promoted** (PR #165, merge `035fa69`), carrying
+  P5's still-unpromoted closeout (#157) along with it — no migration, the simplest promotion of the
+  phase so far. P6 stays **open**: P6b (#159, catalogue management) is next.
+  `specs/sdd-workflow.md` (2.6.0) **corrects the model-switch point**: the loop had the switch to
+  Opus 5 landing right after Ship, so Document (final) — reconciliation work against a branch the
+  current session already has full context on — ran on a freshly-switched, cold Opus 5 session that
+  then spent tokens re-orienting to do work that didn't need Opus's extra reasoning. The switch now
+  sits at the *end* of Document (final), immediately before the second `/clear`, so Document runs on
+  the already-warm model and the next loop's Orient starts already on Opus 5. `CLAUDE.md` and the
+  `/ship`/`/document` command files updated to match.
+- **P6b1 closeout docs.** `specs/roadmap.md` (1.19.0) gains P6b1's slice row and its promotion row.
+  A real defect was found and fixed **before** the slice ever reached `staging`: the write path's
+  `"use server"` file (`features/admin/catalogue.ts`) also exported a plain object
+  (`initialCatalogueState`) alongside its two actions, and Next validates a `"use server"` file's
+  *entire* export set together whenever any one action dispatches — so every product/category write
+  500'd, for any caller, with `next build`/`tsc`/`npm test` all staying green throughout (none of
+  them load the module through the flight-loader's runtime dispatch path). Only `npm run preview`'s
+  live write rows caught it. Fixed by moving the constant into `lib/catalogue-form.ts`; re-validated
+  live in full afterward, with every write-path requirement re-proven against real Postgres on
+  staging rather than just re-read. `CLAUDE.md` (1.1.0) gains a new "Server Actions" section
+  recording the trap so it isn't rediscovered. **P6b1 promoted** (PR #171, merge `a577697`),
+  carrying P6a's still-unpromoted Document-final closeout (#166) along with it — no migration. P6
+  stays **open**: P6b2 (#167, product image upload) is next.
+- **P6b2 closeout docs — P6 closed.** `specs/roadmap.md` (1.20.0) gains P6b2's slice row, its
+  promotion row and a phase-closure row: all three P6 slices (P6a #158, P6b1 #159, P6b2 #167) are now
+  live in production. All 32 `validation.md` rows pass, including a full real-browser end-to-end run
+  (EXIF-upright confirmation, exact 1200×900 downscale, zero CORS/console errors, CDN fetch of the
+  resulting key). Two real defects found and handled during this slice's Validate: `validation.md`'s
+  own R26 fixture script named the wrong vendor slug and built a `PrismaClient` with no driver
+  adapter (both would have made the script throw as originally written — fixed in `ddaf30a`,
+  **before** `staging`), and a pre-existing, unrelated bug in `lib/auth-origin.ts` that 403s
+  real-browser sign-in against `npm run preview` on any non-default port — filed as **#176**, not
+  fixed here (staging/production are unaffected; default port, Cloudflare sets `x-forwarded-proto`
+  correctly there). `specs/sdd-workflow.md` (2.7.0) records #176 in the Validate stage so it isn't
+  rediscovered. `CLAUDE.md` (1.2.0) records the Windows `npm run preview` orphaned-process trap
+  (`workerd.exe`/`wrangler dev`'s children survive the parent's termination, causing `EBUSY` on the
+  next build) hit twice during this slice's live-browser Validate. **P6b2 promoted** (PR #178, merge
+  `2f8ae5b`) — no migration. **One prerequisite the promotion does not carry**: production's
+  `aheed-images-production` bucket CORS is deliberately not applied yet (owner action, tracked in
+  `plan.md`'s Prerequisites), so uploads will 403 in production until it's set.
+- **The order confirmation email and order-detail pages labelled the combined discount line "Loyalty
+  points" unconditionally**, unchanged from P5a — so as of this slice, an order discounted by a code
+  alone (no points touched) rendered a line claiming the shopper's loyalty balance had been spent.
+  The arithmetic was always correct (`subtotal - discount + delivery = total` held either way); only
+  the label was wrong. Found at this slice's Validate. Relabelled to "Discount" in both
+  `features/checkout/send-confirmation.ts` and `components/orders/OrderItemsCard.tsx` (shared by
+  `/checkout/{orderNumber}` and `/account/orders/{orderNumber}`); `tests/order-confirmation-email.test.ts`
+  updated to assert the new label.
+- **P5b closeout docs.** `specs/roadmap.md` (1.16.0) gains P5b's slice row, written from what live
+  validation actually proved: **every one of build-notes' eight "known-shaky" areas came back
+  clean**, most notably both concurrency guarantees (the global usage-cap race and the per-customer
+  race) actually running under `Promise.all` against real Postgres, and the admin cross-vendor
+  replay proven in **both directions** — closing, for discount codes, the exact gap **#141** recorded
+  for P5a's loyalty config. P5 stays **open**: **#143** (P5a live but dark) must resolve first.
+- **P5 closeout.** P5b promoted to production (PR #155, merge `1b66bdf`); unlike P5a's promotion,
+  `deploy-production` applied a genuinely pending migration (`20260811175844_p5b_discount_codes`),
+  confirmed from the deploy log rather than inferred from a green merge. **#143 resolved**: production
+  re-seeded for Aheed only (`SEED_SRIMART_HOST` deliberately unset, so SriMart's block never ran) —
+  `loyaltyEnabled: true`, Silver/Gold tiers, and `WELCOME10` all confirmed live by direct read, not
+  assumed from the seed's exit code. **P5 (#88) closes here**: loyalty and discounts are now both live
+  *and reachable*, which neither promotion alone achieved. Two new gitignored-file defects found and
+  filed, not fixed in this diff: **#154** (`secrets/production.vars`' `CDN_BASE_URL` held staging's
+  host — fixed by the owner before the re-seed ran) and **#156** (`RESEND_API_KEY`'s malformed `=`
+  spacing broke plain-bash `source`, briefly printing the key to a terminal).
+  `specs/sdd-workflow.md` (2.5.2) gains a fourth Validate trap: a Next.js server action's id is a
+  stable build-time hash in `.next/server/server-reference-manifest.json`, independent of any
+  session — which is what let this slice's admin RBAC rows (no-`Cookie`, wrong-role) be driven live
+  **without** a valid session to render the form first. `specs/2026-08-11-p5b-discount-codes/validation.md`'s
+  C6 fixture corrected in place (matching P4a's R27 precedent): it was described as sharing C1's
+  code string, which directly contradicted R48's own premise that C6 exists on no other vendor —
+  found and fixed at this pass, not carried forward as a live defect. **#144** (P5a's promotion-row
+  backfill) closed — confirmed landed on `staging`. **#141 commented, not closed**: the account
+  blocker it named turns out to be avoidable (a platform `ADMIN` transcends vendor membership, so no
+  dedicated SriMart-admin account is needed), but it names P5a's `/staff/loyalty` action
+  specifically, which this slice's validation didn't re-run.
+- **P5a closeout docs.** `specs/roadmap.md` (1.14.0) gains P5a's slice row, written from what live
+  validation actually proved rather than what the build expected. It **supersedes
+  `build-notes.md`'s "nothing in this slice has touched a real database"** — honest when written,
+  and exactly what aimed validation at the right places: all 65 rows were then walked against real
+  Postgres and **seven of the notes' eight "known-shaky" areas came back clean**, including the one
+  that mattered most (the double-spend guard survived a genuine `Promise.all` race with one winner,
+  one `REDEEM` and a balance that never went negative — the unit test had only ever simulated a lost
+  race by hand). The eighth stands: **#104** still blocks any inbox-level email proof. P5 stays
+  **open** — P5b (discounts engine) is the remaining slice, so there is no phase-closure row here.
+- **A real environment defect, found by validation and unrelated to the slice.** `.env` *and*
+  `.dev.vars` both pointed at the **production** Neon project while `S3_BUCKET`/`CDN_BASE_URL` in
+  the same files correctly said staging — so nothing looked wrong, the documented "check both"
+  passed cleanly, and P5a's migration reached production ahead of its promotion PR. Additive and
+  verified harmless (row counts unchanged, every `discountPence = 0`, no drift), but the identical
+  slip against a destructive migration would not have been. **`CLAUDE.md` now requires diffing
+  `.env`/`.dev.vars` against `secrets/staging.vars` and `secrets/production.vars`, not merely
+  against each other** — two files agree on the wrong target as easily as they disagree. **#119**
+  updated: its framing described only half the failure mode, and its closing criteria should widen
+  from "make the two files agree" to "make the target unambiguous". Recorded for the upcoming
+  promotion: `deploy-production` will report **no pending migrations**, which is expected, not
+  drift (same situation PR #108 logged for P3).
+- **`specs/sdd-workflow.md` (2.5.0) — `gh pr checks` is a view, not the truth.** During P5a's
+  promotion (#140) a `gates` run showed every step green including `Complete job`, while the job's
+  status stayed `in_progress` and `gh pr checks` reported `pending 0` for **56 minutes**;
+  `gh run cancel` returned `HTTP 500`. The run had actually succeeded in ~1 minute.
+  githubstatus.com showed **Actions "Operational"** alongside a separate active **API Requests /
+  GraphQL** degradation — status finalisation rides that degraded path, so Actions' own badge stays
+  green while its reporting is broken. The Ship stage now says to cross-check a long "pending"
+  against `gh run view --json status,conclusion`, and to read **every** status-page component
+  rather than only Actions: an `until ! gh pr checks | grep pending` loop can spin forever on a
+  finished run, and "still pending" is not evidence a job is still working. The same incident also
+  silently dropped a delivery-board write (#135 reverted from `In Review` to `In Progress` after a
+  verified edit) — board state was re-applied and re-verified.
+- **#141 filed** — P5a's R56 was verified in one direction only. An Aheed admin's tampered
+  `vendorId`/foreign tier key were both ignored (write landed on Aheed, SriMart byte-for-byte
+  unchanged), but the reverse leg `validation.md` asks for — a **SriMart** admin submitting from the
+  SriMart host — was skipped, because `scripts/demo-accounts.ts` seeds memberships against the first
+  ACTIVE vendor only, so no SriMart admin exists. A test-coverage gap, not a known defect; the fix
+  worth making is seeding a per-vendor admin for every active vendor, which several later slices
+  will want anyway.
+- **P5a — loyalty points: earn, redeem, tiers, expiry & admin config** (#135,
+  `specs/2026-08-11-p5a-loyalty-points/`), the first P5 slice and the loyalty half of the phase.
+  A shopper earns per-vendor points on orders they actually pay for, spends them at checkout, and
+  loses them to inactivity. The discounts engine stays P5b.
+  - **One money seam, so the payment path needed no change at all.** `computeTotals` gained a
+    discount and the identity `subtotal − discount + delivery = total`; everything downstream —
+    the `Order` row, `Payment.amountPence`, the Stripe session amount — derives from it, so
+    `lib/payments.ts` and the webhook are untouched and **ADR-005's decisions are unaltered**
+    (it gains an additive implementation note only). Free delivery and the vendor's minimum order
+    are judged on the subtotal **before** the discount: custom already earned isn't clawed back by
+    paying with points.
+  - **A double-spend is structurally impossible.** `LoyaltyAccount.balancePoints` is a
+    compare-and-set counter guarded by a conditional `updateMany` carrying `vendorId`, `userId`,
+    `balancePoints: { gte: n }` and the lapse bound — the same technique P3b used against
+    overselling and P4b against double-advancing, aimed at a third race. The append-only
+    `LoyaltyLedgerEntry` beside it is the audit trail, exactly as `OrderItem` sits beside
+    `Inventory.quantity`; a `SUM()` balance cannot be guarded, which is why both exist.
+  - **The debit runs before the order is written**, so an order can never carry a discount whose
+    points the shopper turned out not to have. `@@unique([orderId, kind])` makes a second `EARN`
+    (duplicate Stripe delivery) or a second `REDEEM` (double submit) a database error rather than a
+    check someone has to remember.
+  - **Points are credited on payment confirmation**, inside the transaction that sets `CONFIRMED`,
+    and **only a `REDEEM` is ever reversed** — `releaseOrder` acts on `PENDING_PAYMENT` orders,
+    strictly before an earn exists, so no current path can cancel an earned order. Earn reversal
+    arrives with refunds (ADR-005 territory).
+  - **Expiry is derived at read time, adding no infrastructure.** `wrangler.toml` still declares no
+    cron triggers; a lapsed balance reads as zero, is refused by the redemption guard, and is reset
+    rather than incremented by the next earn.
+  - Earning excludes both delivery and the discounted portion, so redeemed points cannot re-earn
+    points. Tier multipliers are basis points and are **snapshotted onto the earn**, keeping a
+    historical earn explainable after the tier table changes. Redemption is clamped so
+    `discountPence` is always exactly `pointsSpent × pencePerPoint` and the payable total never
+    falls below `MIN_PAYABLE_PENCE` (30p) — below Stripe's GBP floor an order would exist that
+    could never be paid for.
+  - Surfaces: `/account/loyalty` (balance, cash value, lifetime, tier, ledger) and an ADMIN-only
+    `/staff/loyalty` on P4b's `/staff` segment. `STAFF` is deliberately excluded there — advancing
+    an order is a packing-floor action, changing the earn rate is an owner decision.
+  - One additive migration: three tables, one enum, `Order.discountPence` and six `VendorConfig`
+    columns, all defaulted. Seed turns loyalty **on** for Aheed with two tiers and deliberately
+    **off** for SriMart, which is what proves it is per-vendor data.
+  - Also corrected here: the order confirmation email gains a discount line — without it the three
+    money lines stop reconciling the moment an order carries a discount. No new email is sent.
+  - Deliberately excluded: the discounts engine (P5b), tier create/delete from the admin UI, guest
+    loyalty, and cross-vendor balances.
+
+- **P4b — staff order status transitions & delivery emails** (#125,
+  `specs/2026-08-11-p4b-order-status-transitions/`), the write half of P4 and the slice that closes
+  the phase. `OUT_FOR_DELIVERY` and `DELIVERED` have been in the `OrderStatus` enum since P3b's
+  initial migration with **nothing in the codebase able to reach them** — an order landed on
+  `CONFIRMED` when Stripe's webhook fired and stayed there forever. P4a made status visible; this
+  makes it move, under a real person's hand, with that person on the record.
+  - **A vendor-role-gated staff queue at `/staff/orders`** — `requireVendorRole("STAFF","ADMIN")`,
+    the **first real consumer of ADR-004 slice 3a's `VendorMembership`**, which until now had no
+    caller exercising it. A new `/staff` segment parallel to `/dev`, so P6's admin panel has a
+    namespace to grow into rather than needing a URL migration.
+  - **A double-advance is structurally impossible, not merely unlikely.** Legality is evaluated
+    against the *persisted* status and the write is a conditional `updateMany` whose `where` repeats
+    that status — the same compare-and-set P3b used to make overselling impossible, aimed at a
+    different race. A stale tab or a double click matches zero rows and writes nothing. `vendorId`
+    sits in the `where` too, so another vendor's order number is indistinguishable from one that
+    does not exist.
+  - **`OrderStatusEvent.createdByUserId`**, nullable, `ON DELETE SET NULL` — the slice's one
+    additive migration. This **corrected issue #125's own "no schema change" line**, which was an
+    Orient-time observation rather than a decision and could not survive contact with "the acting
+    user recorded". P4's roadmap line promises an audit trail, and attribution not captured now is
+    unbackfillable. Nullable means P3-era rows need no backfill and system transitions keep leaving
+    it null; `SetNull` because removing a departed staff member's account must not delete the audit
+    trail of the orders they handled.
+  - **The transition rules are pure** (`canTransition`/`nextStatus` over a `LEGAL_TRANSITIONS` map
+    in `lib/order-status.ts`, unit-tested across the full 5×5 matrix by asserting the exact legal
+    set, so a future added status cannot widen the ladder silently). `PENDING_PAYMENT` is absent as
+    a *source*: only Stripe's webhook moves an unpaid order. Staff cannot cancel — that is
+    refund-adjacent (ADR-005) and a decision of its own.
+  - **The server action re-runs its own RBAC check.** A server action is a public endpoint exposed
+    at a stable action id; a gate on the page is a gate on the page and nothing more.
+  - **Emails on the two staff transitions only**, sent after the transaction commits and never
+    throwing — a delivery that physically happened must not be undone because a provider was
+    unreachable. No `CONFIRMED` branch exists, so P3c's confirmation email stays the only one for
+    that event.
+  - **`note` stays system-written.** P4b ships no input through which staff can type into that
+    column, so P4a's structurally-unrenderable-note guard is honoured by not opening the door. A
+    staff-authored note needs a customer-visible/internal distinction and belongs with P6.
+  - The queue is **keyset-paginated** like P4a rather than a fixed `take`: a worklist that silently
+    stops at row *N* hides the order nobody packs. It shows only actionable statuses, deliberately
+    inverting P4a's unfiltered customer list — a shopper is hunting one order, a packer is working a
+    queue.
+  - Deliberately excluded, tracked: a staff order **detail** view, filters, search and bulk actions
+    (**#129**, P6's panel supersedes this queue wholesale).
+
+### Fixed
+- **`CLAUDE.md` documented `lib/config`'s env precedence backwards, and always had.** It claimed
+  `process.env` wins over the Cloudflare request context, "so local `.env` wins in dev and a stray
+  `.dev.vars` can't shadow it". `readEnv()` does the opposite — it tries `getCloudflareContext()`
+  first and falls through to `process.env` only when there is no Worker request context — and has
+  since the file was written (`e41e8ec`). So under `npm run preview` **`.dev.vars` wins**, which is
+  exactly how a fixture script (reading `.env`) and the app under preview can silently use different
+  Neon projects while every result still looks plausible (**#119**). Found at P4a's Validate, where
+  the two files did point at different projects. Corrected to describe real behaviour; the code is
+  unchanged, since flipping the precedence would be a behaviour change needing its own proposal.
+
+### Changed
+- **P4a closeout docs**: roadmap change-log row for the slice (`specs/roadmap.md` 1.11.0), and a
+  `specs/sdd-workflow.md` (2.3.0) Spec-stage rule earned twice in one slice — **don't `grep` for the
+  absence of a word in prose or commented code**, because the artifact names what it deliberately
+  excludes, so the check matches its own explanation and "passing" means deleting the rationale
+  (P4a's R5 at Build, R27 at Validate). P4a's `validation.md` R27 row corrected in place.
+- **P4b closeout docs, and P4 closed.** `specs/roadmap.md` (1.13.0) gains P4b's promotion row and a
+  **P4 closure** row: order history, the three-step ladder with an attributed audit trail, staff
+  updates and delivery emails are all in production, and the one gap carried out of the phase is
+  infra not code — Resend still has no verified sending domain (**#104**), so P4b's emails are
+  correct in every structurally checkable respect and still cannot be confirmed to reach a real
+  inbox anywhere. The promotion row deliberately **supersedes `build-notes.md`'s "nothing in this
+  slice has touched a real database"**: that was true when written and is what aimed validation at
+  the right places, and three of the four "known-shaky" areas it named came back clean under live
+  checking — the compare-and-set held under a genuine concurrent `Promise.all` double-submit, the
+  keyset crossed a real 20/6 page boundary, and the migration applied with no drift and no row
+  touched.
+- **`specs/sdd-workflow.md` (2.4.0) — a third grep-shaped check retired, and a CI trap written
+  down.** P4b's `validation.md` R23 row required `grep` to show **no** `skip:` in the staff list
+  method; `skip: 1` is Prisma's standard keyset idiom for excluding the cursor row, already shipped
+  in P4a's `listForUser` and P2b's `products.ts` and endorsed by `specs/architecture.md`. The check
+  would have failed a correct implementation and passed one that dropped the cursor entirely — the
+  same class as the rule P4a added. Row corrected in place. Separately, the Clear checklist now
+  requires `npm run kms:build-index` to have been run and committed: **every slice adds a
+  front-mattered `plan.md`, so every slice makes `ARTIFACT_INDEX.md` stale**, CI's `gates` job fails
+  on exactly that, and nothing local catches it — not `sdd:preclear`, not Validate's pre-flight. P4a
+  remembered by hand, P4b didn't and burned a red CI run. **#132** tracks making it mechanical.
+
+### Added
+- **P4a — order history & status timeline** (#122, `specs/2026-08-11-p4a-order-history/`), the first
+  P4 slice and the read half of the phase. A signed-in shopper gets `/account/orders` — their own
+  orders for **this vendor**, newest first, ten per page — and `/account/orders/{orderNumber}`,
+  showing the purchased lines, the snapshotted delivery address, and a **status timeline**. P4a
+  builds less than P4's roadmap line implies because P3 left more behind than the line recorded:
+  `OrderStatusEvent` rows were already being written in three places and `Order` already carried
+  `@@index([vendorId, createdAt])`, so this slice is **read-only — no schema change, no migration**.
+  - **`getForUser()` is a second, stricter read next to `getByOrderNumber()`, which is untouched.**
+    The existing method implements P3b's capability-URL rule — a guest order has no owner, so the
+    unguessable order number *is* the credential. That is right for `/checkout/{n}` and wrong for
+    `/account/orders/{n}`: a page claiming to be *your* history must not render someone else's order
+    because a valid number was pasted into the address bar. `userId` is part of the `WHERE`, not a
+    post-hoc check, so a guest order and another member's order both simply fail to match.
+  - **The timeline is built from `status` and can never render `OrderStatusEvent.note`.** Today's
+    notes are system-written and harmless, but P4b hands staff a control that writes that column,
+    and an internal note on a customer's own order page is a live incident rather than a cosmetic
+    bug. `buildTimeline`'s types carry no note field, the repository does not select it, and a unit
+    test asserts a smuggled note cannot reach the output — the leak is unrepresentable, not merely
+    unlikely.
+  - **The list is deliberately unfiltered by status.** An abandoned `PENDING_PAYMENT` order and a
+    `CANCELLED` one both appear. Hiding them would look tidier while concealing the exact order
+    someone is most likely hunting for after a failed payment.
+  - Pure, DB-free logic in `lib/order-status.ts` (12 unit tests), matching the split already used by
+    `lib/cart-rules.ts` and `lib/shopping-list.ts`; `en-GB` dates pinned explicitly, because a
+    Workers isolate has no user locale and an unpinned format renders the US month order.
+  - `components/orders/` extracts the items/totals and address cards out of the P3b confirmation
+    page so both order pages share one implementation instead of two copies of the money breakdown.
+  - Deliberately excluded, each tracked: guest order lookup (**#123**), reorder-from-a-past-order
+    (**#124**, inherited from P3d), and all staff transitions and delivery emails (**#125**, P4b).
+  - Two **spec** rows were corrected during the build rather than worked around, recorded inline in
+    `requirements.md`: R9 demanded "exactly one Prisma query", which a nested relation `select` can
+    never satisfy (Prisma issues a second batched query unless `relationJoins` is enabled) and now
+    states the property that matters — no N+1; and R5 verified "no note field" with a grep that
+    matched the module's own explanatory comment, which would have meant deleting the explanation to
+    please the check.
+
+### Changed
+- **`specs/sdd-workflow.md` 2.2.1** — corrects the delivery-board blockquote, which claimed
+  `Backlog` and `In Review` "do not exist yet" and told the reader to substitute `Todo`. Both are
+  false: Project #2 has all four Status options and `CLAUDE.md` already records the rename as done,
+  so a reader following the workflow doc would have filed status wrongly. Rides P4a's branch per the
+  carry-forward rule.
+- **Post-promotion documentation pass for P3 in production** (`specs/roadmap.md`,
+  `docs/env-setup.md` 1.7.0) — rescued from PR #110, which branched before P3d and had gone stale
+  and conflicting; the content below is the part of it that had not landed any other way.
+  - **The roadmap now records the promotion itself** (PR #108) in the existing promotion-entry
+    style: `deploy-production` green, production `/api/health` reporting commit `034a380` with
+    `db.ok: true`, and `/api/webhooks/stripe` live (an unsigned POST is rejected 400, so signature
+    verification is active). It also records that the two P3 migrations were **already applied** to
+    the production database — CI reported "no pending migrations" — because no `main` push occurred
+    between PR #81 and #108, so they reached production out-of-band. No drift resulted (CI
+    confirming zero pending *is* the proof repo and DB agree), but it bypassed `CLAUDE.md`'s
+    migrations-run-in-CI rule, which is worth having on the record rather than discovering twice.
+  - **Corrects two claims in `env-setup.md` that live verification made false**: it said production
+    would use a live Stripe key and that test mode was for "everything except production".
+    Production deliberately runs **test-mode** keys, because it shipped before the storefront opened
+    to customers; installing a live key is a separate decision (#113), not a consequence of
+    promoting code.
+  - **Puts the per-endpoint webhook trap where operators will hit it** — each Stripe endpoint has
+    its own `whsec_…`, so staging's cannot verify production's deliveries, and the failure is
+    *silent*: the handler rejects every delivery, so orders never leave `PENDING_PAYMENT` and their
+    stock is never released. Also records the Cloudflare gotcha that forces deploy-then-secrets
+    ordering: a Worker secret cannot be edited while an undeployed version is pending.
+
+### Fixed
+- **`sdd:audit` was passing a slice it should have failed** (`scripts/sdd-check.ts`). The check that
+  exists specifically to catch "shipped without a roadmap entry" reported P3d as documented while
+  the roadmap said only that P3d was *still to come*. It matched a bare token (`p3d`) against
+  change-log rows, guarded by `row.date >= sliceDate` on the reasoning that a row predating a slice
+  can't document it. That guard does not hold: the P3a/P3b/P3c backfill row is dated `2026-08-10`
+  and names "P3d", and the P3d slice dir is **also** `2026-08-10`, so the row satisfied its own
+  guard. Spec and ship land the same day routinely here, so same-day collisions are the normal case,
+  not an edge. A row now counts only when it cites the slice's **spec path** (`specs/<slice>/`) —
+  precise, unfakeable by prose, and already the convention every real closure row follows. Verified
+  by watching it fail on the genuine P3d gap, then pass once the real row landed. This is the third
+  time this specific gap has bitten: P3a/P3b/P3c shipped undocumented, the audit was written to stop
+  it, and the audit then let P3d through too.
+- **`configure-env.mjs` now knows about the Stripe secrets.** P3c added `STRIPE_SECRET_KEY` and
+  `STRIPE_WEBHOOK_SECRET` as Worker secrets but never taught the sync tool about them, so the
+  script silently reported them as "unrecognized" and skipped them — which is why production ran
+  without Stripe credentials until they were set by hand. Added as a new **`OPTIONAL_WORKER_SECRETS`**
+  list rather than under `WORKER_SECRETS`, mirroring the app's own contract: `getPaymentService()`
+  falls back to the stub when `STRIPE_SECRET_KEY` is unset, so an environment without Stripe is a
+  supported state, not a misconfiguration. Making them required would block configuring a fresh
+  environment that has no Stripe yet — verified both ways (present → pushed; absent → skipped,
+  exit 0). `STRIPE_PUBLISHABLE_KEY` is deliberately still unrecognized: hosted Checkout runs
+  nothing in the browser, so the app never reads it.
+  - Records the trap that caused the mismatch: **`STRIPE_WEBHOOK_SECRET` is per-endpoint, not
+    per-account.** Staging's value cannot verify deliveries to production's endpoint, so it must
+    never be copied between environments — each `secrets/<env>.vars` carries the secret belonging
+    to that environment's own Stripe endpoint.
+- **Backfilled the missing P3a/P3b/P3c roadmap change-log entries** (`specs/roadmap.md` 1.9.0). All
+  three slices shipped without one — the roadmap still ended at ADR-004 slice 3c (2026-08-09) while
+  cart, checkout and Stripe payments were live on staging. Records what each slice delivered, the
+  live-verification outcome for P3c, and that **P3 remains open pending P3d ("Shop your list")**.
+  This is the gap that motivated the post-Ship documentation audit in `specs/sdd-workflow.md` 2.0.0:
+  every SDD gate fires before or at merge, so the roadmap update — which happens after the PR lands
+  — had nothing enforcing it. The KMS index, by contrast, was never at risk: `gates.yml` already
+  rebuilds and diffs it (normalizing timestamp and commit) on every PR.
+
+### Added
+- **P3d — "Shop your list"** (#114, `specs/2026-08-10-p3d-shop-your-list/`): the second way to fill
+  a cart. Paste a list, see what each line matched, then add the confirmed lines in one action. The
+  last P3 slice.
+  - **Matching is token-AND on product `name`**, in a new `ProductRepository.matchListTerms()` that
+    issues **one** query for the whole list (candidate rows, capped at 200) and leaves every
+    per-line decision to pure code in `lib/shopping-list.ts`. Deliberately not
+    `ProductRepository.search()`: that is a single `contains` OR'd across name and description, so
+    `"2x chicken breast"` matches nothing — exactly the input this feature invites. Matching
+    `description` was rejected too, since a term hitting prose yields a confident-looking wrong
+    product.
+  - **A leading bare integer is a quantity only when not glued to a unit** — `2 apples` is two
+    apples, `5kg basmati rice` is one bag of *Basmati Rice 5kg*. Four seeded products carry a size
+    in their name, so this is ordinary input, not an edge case. Explicit `2x` / `x2` forms always
+    win.
+  - **Nothing enters the cart unreviewed.** Every line renders as matched, ambiguous (with a
+    chooser), unmatched, or unavailable; only an explicit action writes. Ambiguity is real here —
+    `milk` matches both *Whole Milk* and *Coconut Milk*.
+  - **The matching pass writes nothing at all** — no `Cart`, no `CartItem`, no guest cookie —
+    preserving P3a's rule that browsing creates no state. The guest token is issued only by
+    `add-list-to-cart`.
+  - New `CartRepository.addItems()` resolves the cart once and writes every line in a single
+    transaction, reusing `effectiveStock()`/`clampQuantity()` rather than re-deriving them.
+    Duplicate lines are summed first (`sumLinesByProduct`), since two upserts of one row inside a
+    transaction would fight. Product ids from the stateless review form are **untrusted**: stock is
+    resolved through the existing vendor-scoped `stockMap`, so an id from another vendor has no row,
+    resolves to 0, and is skipped.
+  - **Typos are explicitly out of scope** (`bannanas` reports unmatched). Handling them means
+    `pg_trgm`, whose `similarity()` needs `$queryRaw` — forbidden in application code — and P2
+    deliberately deferred trigram search. The mandatory review step is what keeps that honest: an
+    unmatched line is visible, not silently dropped.
+  - No schema change, no migration, no saved lists.
+- **Two machine checks behind the SDD loop's honor-system stages** (`scripts/sdd-check.ts`,
+  `specs/sdd-workflow.md` 2.1.0). Every existing gate fires before or at merge — `pre-commit`
+  (Gate 2), `pre-push`/`gates.yml` (Gate 4), CI (Gate 3) — so nothing had teeth after Ship. That is
+  how P3a/P3b/P3c all shipped with no roadmap entry.
+  - `npm run sdd:preclear` (end of `/build-notes`) — derives the slice from the branch diff, then
+    requires all four spec files, the build-notes template's four sections, a `CHANGELOG.md` diff
+    against the base, and a clean working tree. The Clear is irreversible, so "everything is
+    persisted" stops being a claim and becomes an exit code.
+  - `npm run sdd:audit` (at `/orient`) — reports slices that shipped without a roadmap change-log
+    entry or never reached `ARTIFACT_INDEX.md`. **Only audits slices after a baseline constant**, so
+    it never retroactively polices work that predates the loop. A roadmap row only counts if it is
+    dated on/after the slice — without that, the backfill row naming P3d would have satisfied the
+    check for an undocumented P3d.
+  - Both copy `hooks/pre-push`'s posture (origin/staging → origin/main → don't block offline) and
+    reuse `readFrontMatter`/`ROOT` from `kms/schema/repo`. Verified against real history: with the
+    baseline set before P3a, the audit reports the exact three gaps that existed pre-backfill.
+- **`specs/templates/feature-spec/build-notes.md`** — build notes stop being free-form. Its four
+  headings are exactly what `sdd:preclear` greps for, making the template the check's contract
+  rather than decoration. `plan.md`/`requirements.md`/`validation.md` were already templated; the
+  one artifact the Clear actually bets on was not.
+- **Delivery-board steps wired into the loop.** Propose adds the issue to GitHub Project #2 with a
+  Phase; Build moves it to In Progress; Ship moves it to **In Review** on staging merge; it closes
+  to **Done** only on promotion to `main` — because `Done` means *in production* and `Closes #NN`
+  never fires on a merge into `staging`. Ten issues (#93–#106) filed after the board was provisioned
+  had never been added to it; `scripts/provision-project.sh` was re-run to adopt them. **Still
+  needed, UI-only:** the Status field keeps GitHub's default `Todo/In Progress/Done`, so `Backlog`
+  and `In Review` don't exist yet.
+
+### Changed
+- **P3 closed** (`specs/roadmap.md` 1.10.0). Cart → checkout → payment → list-based cart entry all
+  shipped to production (P3a #93, P3b #96, P3c #99, P3d #114). Adds the P3d closure row and the
+  phase-closure row, and carries out the two known gaps — both infra, not code: Resend has no
+  verified sending domain so no confirmation email reaches a real inbox in any environment (#104),
+  and the payment-provider failure path still needs a window against staging's live secrets (#103).
+  Neither blocks P4.
+- **P3d's R10 corrected after ship** (`specs/2026-08-10-p3d-shop-your-list/requirements.md`). The
+  row specified ranking as "all-terms matches first, then shorter name, then alphabetical", but R9
+  defines a candidate *as* an all-terms match, so that first tier can never fire. Flagged as a
+  deviation at build and confirmed at `/validate` as a **spec defect rather than an implementation
+  shortcut** — `rankCandidates()` shipped the two reachable tiers instead of a branch that provably
+  cannot execute. The requirement now says what the code does; every behaviour it asserts
+  (exact-match-wins, determinism, the 5-candidate cap) was already tested. Corrected in place with
+  a dated note rather than rewritten silently.
+- **How to validate server actions without a browser** (`specs/sdd-workflow.md` 2.1.0 → 2.2.0,
+  Validate stage). Next renders progressive-enhancement fields on every server-action form, so
+  posting those fields as `multipart/form-data` invokes the real action — and the response's
+  `Set-Cookie` is how you prove a *negative*, which is how P3d's "matching writes nothing" was
+  actually verified rather than inferred. Records the three traps that each cost a dead end:
+  `fetch`/undici **silently drops a caller-set `Host` header** (fatal under multi-tenancy — every
+  request resolves to `/coming-soon` and reads as a broken app; use `node:http` with
+  `setHost: false`), `$ACTION_REF_1` renders with **no `value` attribute** (a parser requiring one
+  drops it and the POST fails as a bare `500` with an empty body), and a `<select>` is a form field
+  that must be serialized in document order alongside `<input>`s. Also adds: confirm which database
+  the Worker is on before trusting a live result, since `preview` reads `.dev.vars` while seeds and
+  inspection scripts read `.env` (#119).
+- **SDD workflow restructured from a seven-stage sequence into a delivery loop with two context
+  Clears** (`specs/sdd-workflow.md` 1.0.0 → 2.0.0). The order is now **Orient → Propose → Spec →
+  Build → Document (build notes) → CLEAR → Validate ⇄ Fix → Ship → Document (final) → CLEAR →
+  Orient**, with the model switching to Sonnet 5 for the validation half and back to Opus 5 for the
+  final documentation pass.
+  - **Why the Clear before Validate:** a context that just built something is the worst judge of
+    whether it matches the spec — it remembers the intent and reads that intent into the code. The
+    reset forces Gate 3 to run against `requirements.md` and the artifact on disk, which is the only
+    version of the spec a future maintainer ever gets. This already caught real defects under the
+    old single-context flow (a consolidated `features/cart/actions.ts` that deviated from the
+    spec's one-file-per-action shape; webhook functions resolving `getPrisma()` internally, so they
+    couldn't be proven against real Postgres) — the reset makes that systematic rather than lucky.
+  - **Document split in two.** `/build-notes` (new) is a **write-to-disk** stage before the Clear:
+    build notes, persistent-doc updates, deferred items filed as issues — and **Gate 4's CHANGELOG
+    entry**, which has to be on the branch before it merges, i.e. before Ship, which now precedes
+    the final documentation pass. `/document` is now purely the post-ship durable record (KMS index,
+    roadmap, reconciling docs with what validation actually found) and supersedes the build notes
+    where they disagree.
+  - **`/fix` (new)** formalises the Validate ⇄ Fix cycle: fix the root cause rather than the check,
+    re-run `/validate` from the top rather than just the failed row, and stop when a "fix" is really
+    a redesign — that's a Spec-level change, not something to improvise in a validation mindset.
+  - Existing commands realigned: `/build` now hands off to `/build-notes` instead of `/validate`,
+    `/validate` treats build notes as a claim about the artifact rather than evidence, `/orient`
+    doubles as the post-Clear re-entry point, and `/spec` records that `requirements.md` is the only
+    thing the fresh validation context will have.
+  - **Two rules the assistant cannot enforce on itself** and must therefore ask for, now stated in
+    `CLAUDE.md`: `/clear` is user-invoked, and so is every model switch.
+
+### Added
+- **Stripe payments, webhooks & confirmation email (P3c, #99)** — money actually moves
+  (`specs/2026-08-10-p3c-stripe-payments/`). Replaces P3b's stub with a real hosted **Stripe
+  Checkout** adapter, a signature-verified idempotent webhook at `/api/webhooks/stripe`, and an
+  order confirmation email. **Closes the stock-release gap P3b explicitly recorded**: an order that
+  fails or expires now returns its items to stock instead of holding them forever.
+  - **Fixes a latent defect in P3b**: `createPayment()` was called *inside* `placeOrder`'s Prisma
+    transaction. Harmless with a stub that does no I/O — which is why it passed every check — but a
+    real HTTP call there would hold a Postgres transaction open on a serverless connection against
+    Prisma's 5s timeout, so a slow Stripe response would roll back a good order. The session is now
+    created **after commit**, and if it fails a **compensating transaction** cancels the order and
+    releases its stock, so a shopper is never left with an unpayable order holding inventory.
+  - **Raw `fetch`, no `stripe` SDK** — the same Worker-bundle reasoning that chose `aws4fetch` over
+    the AWS SDK and plain fetch over Resend's. Signatures are verified with **WebCrypto**
+    (HMAC-SHA256 over `{timestamp}.{rawBody}`, constant-time compared, 5-minute replay tolerance),
+    using the **raw** body — re-serialising parsed JSON changes bytes and breaks verification.
+  - **Idempotent by the same conditional-update guard as the stock decrement** (`WHERE status =
+    'PENDING_PAYMENT'`), not a new event-log table. Stripe retries aggressively and can deliver out
+    of order, so a duplicate delivery must change nothing — and must not send a second email or
+    release stock twice.
+  - **The webhook is vendor-agnostic**: it has no tenant context, so it finds the order by the
+    `orderNumber` in session metadata and derives the vendor from the row. **One endpoint per
+    environment, not one per vendor host** — the same Worker serves every host, and per-host
+    endpoints would produce multiple signing secrets the single `STRIPE_WEBHOOK_SECRET` can't hold.
+  - **`checkout.session.completed` alone isn't enough** — it can fire `payment_status: "unpaid"` for
+    asynchronous methods, so confirmation requires `"paid"`.
+  - **The confirmation email fires only from the webhook**, after payment confirms — never at order
+    creation, where a later failure would leave the shopper holding a "confirmed" email for a
+    cancelled order. Email failure never rolls back a confirmed payment.
+  - **`/checkout/{orderNumber}` is now status-aware** rather than assuming the redirect means
+    success: the browser redirect routinely races the webhook and a closed tab means it never
+    happens, so the page renders whatever `order.status` actually is.
+  - Two new **optional** Worker secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`); with neither
+    set the app **falls back to the stub**, so local dev and CI need no Stripe setup. Deliberately no
+    `STRIPE_PUBLISHABLE_KEY` — hosted Checkout never runs anything in the browser. Deferred and
+    tracked: resume-payment for stuck orders (**#100**), webhook reconciliation sweep (**#101**).
+  - **Live-verified against staging** (2026-08-10) with real Stripe test-mode keys: two real
+    payments confirmed the webhook, idempotency, and status-aware confirmation page against
+    staging's actual database. Uncovered a real infra gap in the process — Resend has no verified
+    sending domain yet, so it rejects delivery to any address outside its own test address
+    (**#104**, owner action). That failure incidentally proved the email-failure-is-non-fatal
+    guarantee live: the order still confirmed and the webhook still returned 200. Remaining gap
+    (payment-provider failure path, **#103**) needs a deliberate window against staging's live
+    secrets rather than being done inline.
+- **Checkout + order core (P3b, #96)** — a cart can now become a real order
+  (`specs/2026-08-10-p3b-checkout-order-core/`). Adds vendor-scoped `Address`/`Order`/`OrderItem`/
+  `Payment`/`OrderStatusEvent` behind a new `lib/repositories/orders.ts`, a `/checkout` page
+  following `docs/ui-ref/CheckoutModal.tsx`, and a `/checkout/{orderNumber}` confirmation served
+  from the persisted order so a refresh shows the same thing.
+  - **Overselling is structurally impossible.** The whole checkout is one interactive transaction —
+    decrement stock → create address/order/items/payment/status-event → clear the cart — and the
+    decrement is a **conditional `updateMany`** (`quantity: { gte: qty }`) whose `count === 0` means
+    someone else took the last one, rolling everything back. No raw SQL (`CLAUDE.md`), no
+    read-then-check gap. Clearing the cart *inside* the transaction also makes a **double submit**
+    safe: the second finds an empty cart instead of creating a duplicate order.
+  - **Stock decrements at order creation**, so an order opens as **`PENDING_PAYMENT`** — an unpaid
+    order must never read as `CONFIRMED` or staff would pick and deliver it. ⚠️ **Gap until P3c:**
+    an abandoned checkout holds its stock, because release on payment-failure/expiry is P3c's
+    webhook. **P3b must not reach production ahead of P3c.**
+  - **Money is recomputed server-side** from the database inside the transaction and never read from
+    the form; prices are then snapshotted onto `OrderItem`. The **delivery address is snapshotted
+    per order** for the same reason — editing a saved address later must not rewrite where a past
+    order went.
+  - Five checkout gates, each its own error: unresolved P3a merge, empty cart, unavailable line,
+    undeliverable postcode (via the existing `isDeliverable`), and below the vendor's minimum order.
+  - **`PaymentService` port created** (`lib/payments.ts`) — named in `tech-stack.md` since the
+    architecture baseline, never previously written. P3b ships a **stub** that charges nothing, so
+    the risky logic was testable before any Stripe credential existed; P3c swaps in Stripe.
+  - **Order numbers** are `{VENDOR}-{YYYYMMDD}-{6 random}` with the prefix derived from the vendor
+    slug — deliberately **not sequential**, since a counter lets anyone who places two orders infer
+    the shop's volume. Collisions retry against the unique index rather than being assumed away.
+  - **ADR-005 — Payments & multi-vendor money flow**: Stripe behind the port, hosted Checkout (it
+    handles UK SCA/3DS, a legal requirement), and a single platform account with a Connect-ready
+    seam. Records the **merchant-of-record** consequence — with one account the platform is the
+    seller for every vendor's sales, which is acceptable only while Aheed is the sole real merchant.
+  - Additive migration (two enums + five tables). `VendorProfile` gains `slug`. `architecture.md`
+    (v1.8.0) and `tech-stack.md` (v1.1.0) updated.
+- **Cart foundation (P3a, #93)** — the storefront's inert "Add to Cart" is now real
+  (`specs/2026-08-09-p3a-cart-foundation/`). Vendor-scoped `Cart`/`CartItem` behind a new
+  `lib/repositories/cart.ts`, so one shopper has an **independent cart per vendor**. Identity is
+  **exactly one of** `userId` or an opaque `guestToken` in a **host-only** `aheed_cart` cookie
+  (mirroring slice 3c's isolation), and carts are created **lazily** — no row and no cookie until a
+  first add, so crawling this public, indexed storefront writes nothing. UI follows
+  `docs/ui-ref/CartDrawer.tsx`: a slide-out drawer whose **contents are server-rendered** (quantity
+  and remove are plain `<form>` posts to server actions) with only open/close as a client island,
+  plus a `/cart` route as the canonical URL. `AddToCartButton` is the one other island — it exists
+  because `ProductCard`'s body is a `<Link>` and the click must not navigate.
+  - **Two carts are never silently merged.** Signing in with both a guest and a saved cart prompts
+    the shopper — combine (sum, capped at stock) / keep saved / keep new — and nothing is destroyed
+    until they choose. No prompt when there's nothing to decide (empty saved cart is simply adopted).
+    This is also what makes the shared-device case safe: a second person signing in on a borrowed
+    browser is *asked* about the stranger's basket rather than inheriting it.
+  - **The cart stores no prices** — unit price is read from `Product` at render and is snapshotted
+    into `OrderItem` only at order creation (P3b); a cart that cached prices would serve stale money.
+    Stock is advisory here and authoritative at the P3b decrement (a cart is not a reservation).
+  - **Delivery rules became vendor data**: `VendorConfig` gains `deliveryFeePence` (default 349),
+    `freeDeliveryThresholdPence` (null = never free) and `minimumOrderPence` (default 0), seeded
+    differently for Aheed and SriMart. The reference mockup's hardcoded `£30` threshold and
+    `#1B5E20` greens are **translated, not copied** — thresholds come from the DB and colours through
+    `design-system.md`'s token table, so per-vendor theming can't regress the way #77 did. Applying
+    fee/minimum to a payable total stays P3b.
+  - Edge cases closed during spec review: a product with **no `Inventory` row** counts as out of
+    stock (never unlimited), and a product that goes inactive **while sitting in a cart** renders as
+    unavailable and is excluded from the subtotal instead of quietly adding money.
+  - Additive migration (two tables + three defaulted/nullable columns). `ProductSummary` gains
+    `inStock` so cards can show the out-of-stock state. Deferred: abandoned guest-cart cleanup
+    (**#94**, likely P7 with the GDPR retention review).
+- **GitHub Project delivery tracking (`scripts/provision-project.sh`).** Adds the idempotent
+  provisioning script for the *Aheed Online Store — Delivery* Project (Projects V2), plus the
+  `specs/roadmap.md` note establishing the rule: **the Project is a generated view of the roadmap,
+  never a second plan** — it carries only the status layer (in progress / in review / blocked), while
+  scope and acceptance criteria stay in `specs/`. Provisions 6 area labels, 11 milestones 1:1 with the
+  roadmap phases (M0–P2.5 created **and closed**, P3–P8 open), and one epic per unspec'd phase (P3–P8)
+  linking to its criteria rather than copying them. Check-then-create throughout: a re-run creates
+  nothing. Deliberately omitted as duplication: a `feature` label (the repo already uses
+  `enhancement`), `priority:*` labels (Priority is a Project field), and `phase:*` labels (Phase is a
+  Project field). **Two GitHub limits, flagged not papered over:** Projects V2 exposes no public API
+  for built-in workflows or view creation (the script prints the UI steps), and issues here never
+  auto-close on `Closes #NN` because PRs merge to `staging`, not the default branch — so **Done means
+  "promoted to production"** and staging-merged work legitimately sits in In Review.
+- **Data-driven auth cookie scoping (ADR-004 slice 3c, #74)** — the last multi-tenancy gate before P3
+  (`specs/2026-08-09-multitenancy-slice3c-auth-cookie-scoping/`). Better Auth's `baseURL`,
+  `trustedOrigins` and cookie domain are now resolved **per request** from the host
+  (`lib/auth-origin.ts`: pure `buildAuthOrigin` + async `resolveAuthOrigin`; `getAuth()` is now
+  `async`), replacing the single hardcoded `BETTER_AUTH_URL`. Every vendor host gets a **host-only
+  session, trusting only its own origin, by default** — no shared subdomain family exists (Aheed and
+  SriMart sit on distinct hosts), so isolated-by-default is the correct posture. A new **optional**
+  platform env `AUTH_COOKIE_FAMILY_DOMAIN` (unset in every environment today) arms the parent-domain
+  family-SSO cookie for a future `{slug}.<family>` subdomain family with no code change; a
+  custom-domain vendor never matches it and stays isolated. No schema/migration change. **Onboarding
+  caveat:** because `baseURL` is per host, each vendor host must be registered in the Google OAuth
+  client's redirect URIs (Aheed + SriMart done). ADR-004 carries a breadcrumb reconciling decision 4's
+  assumed subdomain family with the deployed topology; `specs/roadmap.md` change-log back-fills slices
+  3a/3b/4 + the #81 promotion. **ADR-004 slice sequence complete — P3 unblocked.** See the `trustedOrigins`
+  correction below (#83), caught during this slice's own staging verification.
+- **Per-vendor search-box placeholder (ADR-004 slice 4 follow-up).** The header search placeholder was
+  hardcoded Aheed grocery copy ("Search halal lamb, basmati, lentils…") shown on every vendor. Adds a
+  nullable `VendorConfig.searchPlaceholder` column (additive migration), read via
+  `lib/repositories/vendor.ts` with a generic `"Search products…"` fallback; seeded per vendor (Aheed
+  keeps its copy, SriMart gets "Search chargers, earbuds, lamps…"). Re-seed each environment to apply.
+
+### Fixed
+- **Auth `trustedOrigins` narrowed to same-vendor-only (#83, ADR-004 slice 3c correction).** Live
+  staging verification of #74, right after merge, showed the original design — `trustedOrigins`
+  populated from every `VendorDomain` host — would let one vendor's origin pass Better Auth's
+  origin/CSRF check on **another** vendor's auth endpoints (e.g. SriMart's origin trusted by Aheed's
+  `/api/auth/*`), reopening a cross-tenant surface that isolated-by-default exists to close.
+  `trustedOrigins` now contains only the current request's own origin (+ the family wildcard when
+  `AUTH_COOKIE_FAMILY_DOMAIN` is armed) — confirmed with the human. `lib/auth-origin.ts` no longer
+  needs a DB call at all. `requirements.md`/`validation.md`/ADR-004/`architecture.md`/`env-setup.md`
+  corrected to match.
+- **Roadmap's slice 3c change-log entry corrected (#83 follow-up).** Missed when #83 fixed the other
+  standing docs — `specs/roadmap.md` still described `trustedOrigins` as resolved "from the host +
+  `VendorDomain`". Now matches the same-vendor-only design.
+- **Multi-vendor browse/product polish (ADR-004 slice 4 follow-up, #79).** Three Aheed-hardcoded
+  surfaces that looked wrong on a 2nd vendor (SriMart): (1) the **speciality filters**
+  (Halal/Fresh/Organic) are now **data-driven** — `ProductRepository.availableSpecialities()` shows
+  each only if the vendor has ≥1 active product with that attribute (a tech vendor shows none); (2)
+  the shared product-image placeholder no longer reads "Aheed placeholder" — `placeholder-product.svg`
+  is now brand-neutral ("No image", grey), re-uploaded to existing products by a new seed
+  `refreshProductImages` step; (3) `app/manifest.ts` is **vendor-aware** (name/short_name/theme_color
+  from the resolved vendor, neutral fallback). Re-seed to refresh the placeholder image.
+- **Per-vendor theming now recolours the storefront (ADR-004 slice 4 follow-up).** The slice-4
+  injection set only the eight `--color-brand-*` primitives on the storefront wrapper, but Tailwind v4
+  emits the semantic tokens at `:root` as `var(--color-brand-*)` and the browser resolves that inner
+  `var()` **at `:root`** — freezing e.g. `--color-primary` to the default palette, so a 2nd vendor's
+  colours never applied (caught on staging: SriMart seeded blue but still rendered green). The wrapper
+  now also re-declares the **semantic** tokens (same primitive→semantic mapping as `tokens.css`) and
+  derives the hover shades per vendor via `color-mix()`. Data/seed were correct; only the injected
+  layer changed (`app/(storefront)/layout.tsx`). No schema/seed change.
+
+### Added
+- **Multi-tenancy — branding-as-CSS-vars + config split (ADR-004 slice 4)**
+  (`specs/2026-08-08-multitenancy-slice4-branding-config/`, #73). Fills the empty
+  `VendorBranding`/`VendorConfig`/`VendorDeliveryArea` satellites and wires the read paths, so a
+  vendor's **look and locality are data-driven**: the eight `--color-brand-*` primitives are injected
+  as CSS custom properties per request (semantic tokens/components unchanged — the `var()` seam
+  cascades), and header/hero copy, locality, delivery area, logo, page metadata and email sender name
+  come from the DB. New `lib/repositories/vendor.ts` read path (per-request `cache()`, keeps the
+  no-direct-Prisma guard green); `lib/delivery.ts`'s `isDeliverable(postcode, prefixes)` is now pure +
+  vendor-scoped; header logo renders from `logoStorageKey` via the CDN or a **text wordmark** fallback.
+  Seeds **SriMart** with a visibly distinct (blue/tech) palette, Reading/`RG` locality and its own
+  tagline — proving two hosts render as different vendors from data alone. No schema migration (slice-1
+  tables) and no new env vars. Deferred (tracked): the per-page `metadata.title` long tail + async
+  `manifest.ts`, per-vendor email From (Resend domain verification), a named theme catalogue (#75),
+  and dedicated hero-copy columns; auth cookie scoping / family SSO stays slice 3c (#74).
+- **Multi-tenancy — host→tenant resolution + 2nd vendor (SriMart)**
+  (`specs/2026-08-08-multitenancy-slice3b-host-resolver/`, #70; ADR-004 slice 3b). The app now serves
+  the right vendor's data based on the **request host**: a `VendorDomain(host)` table maps hosts to
+  vendors, and `lib/tenant.ts`'s resolver looks it up (falling back to the sole vendor while only one
+  exists; unmatched hosts with 2+ vendors → a `/coming-soon` page linking to the default store).
+  `getCurrentVendorId()` keeps its non-null contract, so repositories/`requireVendorRole` are
+  unchanged. **No Next middleware** (edge runtime is forbidden) — the storefront layout gates the
+  tenant. Adds **SriMart** as a real 2nd vendor with a distinct dummy catalogue, seeded (with its
+  `VendorDomain`) only when both `SEED_AHEED_HOST`/`SEED_SRIMART_HOST` are set. `wrangler.toml`
+  declares the `srimart.nocaped.com` / `srimart-staging.nocaped.com` custom domains. Additive
+  migration (`VendorDomain` table).
+- **Multi-tenancy — per-vendor authorization (`VendorMembership`)**
+  (`specs/2026-08-08-multitenancy-slice3a-vendor-membership/`, #68; ADR-004 slice 3a). Authorization
+  is now two-tier: `User.role` is the **platform** role (platform `ADMIN` transcends vendors; `/dev`
+  still gates on it), and a new **`VendorMembership(userId, vendorId, role)`** carries **per-vendor**
+  staff/admin (`VendorRole` = STAFF|ADMIN). A new `requireVendorRole()` gate allows platform admins
+  or matching members of the current vendor. The demo-accounts tool now provisions memberships
+  (`demo-admin` → Aheed ADMIN, `demo-staff` → Aheed STAFF; `demo-staff`'s platform role corrected to
+  CUSTOMER). Additive migration (new table, no backfill). No infra; testable at one vendor. Host
+  resolution (3b) and auth cookie scoping (3c) follow.
+- **Multi-tenancy — repository-layer `vendorId` enforcement**
+  (`specs/2026-08-08-multitenancy-slice2-vendor-enforcement/`, closes #66; ADR-004 slice 2). Adds a
+  `lib/tenant.ts` `getCurrentVendorId()` tenant seam (interim: the single ACTIVE vendor; slice 3
+  swaps in host→tenant resolution) and injects `where: { vendorId }` across `lib/repositories/*`
+  (products/categories/reviews), resolved once per request-scoped repository instance — method
+  signatures unchanged, so pages/features are untouched. An ESLint guard now makes importing
+  `@/lib/db` (`getPrisma`) or `@prisma/client` an error in `app/`/`features/`/`components/` (the
+  `/api/health` infra probe is allowlisted), keeping domain queries inside the repository layer.
+  Runtime output is unchanged at one vendor. Also records the deferred slice-0/1 roadmap closure (#65).
+- **Multi-tenancy foundation — Vendor aggregate + `vendorId` migration**
+  (`specs/2026-08-08-multitenancy-slice1-vendor-schema/`, closes #62; ADR-004 slice 1). Introduces a
+  `Vendor` tenancy root plus `VendorBranding`/`VendorConfig`/`VendorDeliveryArea` satellite tables
+  (empty until slice 4), and a required `vendorId` FK on `Category`/`Product`/`Inventory`/`Review`.
+  Global slug uniques become per-vendor composites (`@@unique([vendorId, slug])`,
+  `@@unique([vendorId, userId, productId])`); read indexes lead with `vendorId`. A hand-authored
+  migration backfills all existing rows to a single "Aheed Food Centre" vendor (fixed UUID, identical
+  across environments). `seed.ts` and the review upsert supply `vendorId`. **Runtime behavior is
+  unchanged** — read-side `vendorId` filtering / repository enforcement is slice 2. `User` and auth
+  tables stay global (identity is platform-wide).
+
+### Changed
+- **KMS internal docs site is now live** at `https://docs.internal.aheedfoodcentre.nocaped.com`,
+  gated by a Cloudflare Access self-hosted application (One-time PIN, email allow-list) — the site
+  has no auth of its own; Access is the auth. Uncommented the custom-domain route in
+  `kms/site-internal/wrangler.toml` (the Access app was created first, so the hostname was gated
+  before it ever resolved). `workers_dev` stays `false`. Linking it from the `ADMIN`-gated `/dev`
+  page (`KMS_INTERNAL_URL`) is deferred to the dev-role view work (#60).
+- **Separated the staging and production Neon databases** (`specs/2026-08-08-neon-db-separation/`,
+  closes #56; ADR-004 slice 0). Staging and production no longer share one Neon project — each has
+  its own, so a staging test can never read or mutate live production rows (environment isolation vs
+  tenant isolation). Production stays on the original project untouched; staging moves to a fresh
+  project (migrated by CI, seeded + demo accounts restored via `npm run demo:accounts -- add`).
+  `docs/env-setup.md` documents the one-project-per-environment topology and fresh-DB bootstrap. This
+  is the prerequisite before the `vendorId` multi-tenancy migration (slice 1).
+
+### Added
+- **Demo-accounts tool** (`specs/2026-08-08-demo-accounts-tool/`, closes #57). A standalone
+  `scripts/demo-accounts.ts` (`npm run demo:accounts -- add|remove`) that adds/removes the demo login
+  accounts (`demo-admin`/`demo-staff`/`demo-customer`, one per RBAC role) on demand against any
+  environment via its `DIRECT_URL` — deliberately separate from `prisma/seed.ts` so demo accounts
+  survive DB resets and stay in prod + staging until all phases complete.
+  - Created **through Better Auth** (hashed, real sign-in) via a minimal **email-free** auth instance,
+    with `role` set via a post-signup Prisma update (`role` is `input:false`) and `emailVerified`
+    forced true — **no** verification email is ever sent. `add` is idempotent; `remove` cascades.
+  - Password comes from `DEMO_ACCOUNT_PASSWORD` (never committed); `docs/env-setup.md` documents usage.
+  - Groundwork for ADR-004 slice 0 (#56): restores demo accounts on the fresh staging Neon project.
+- **Dev view — admin diagnostics page** (`specs/2026-08-07-dev-view/`, closes #41). A minimal
+  ADMIN-gated `/dev` page — the safe core of the mockup's "Developer Control Toolbar", without the
+  parts that would either expose secrets or switch to views that don't exist yet.
+  - `app/(storefront)/dev/page.tsx` — gated with `requireRole("ADMIN")` (401 → `/login`; 403 →
+    "administrators only", not the diagnostics). Real RBAC, not a client toggle.
+  - `lib/dev-diagnostics.ts` — `getDevDiagnostics()` returns **non-secret** values only: the
+    deployed commit and **configured-or-not booleans** per integration (Google/storage/email/CDN/
+    `BETTER_AUTH_URL`), never a key value. Unit-tested, including an assertion that a sentinel
+    secret never appears in the serialized output.
+  - The page shows environment (derived from host), commit, integration ✓/✗ rows, the admin's own
+    session, and a link to the KMS internal docs — or a "pending setup" note until `KMS_INTERNAL_URL`
+    is set (the KMS internal site still needs DNS + a Cloudflare Access gate, a human task).
+  - **Deliberately excluded**: any secret/API-key/webhook value, and view/role switching (deferred
+    to P6, when the Staff/Admin panels it would switch to actually exist).
+
+### Changed
+- **Browse-page layout flipped (from live review).** Departments and filters swapped places:
+  departments are now a **horizontal, icon-led strip across the top**, scrolled by ‹ › arrow
+  buttons with the scrollbar hidden (`.no-scrollbar`) — a small `DepartmentScroller` client
+  component (the arrows drive `scrollBy`; it degrades to native touch/trackpad scroll without JS).
+  Search + filters moved into a **vertical left sidebar** (`ProductFilterForm` restyled to a stacked
+  panel). Applies to the homepage, category, and search pages; the old vertical `CategorySidebar`
+  is removed.
+- **Storefront polish (from live review).** Delivery check broadened from Milton Keynes MK1–MK19 to
+  **any MK postcode district** (MK1–MK99, e.g. MK24 — previously wrongly rejected); `lib/delivery.ts`
+  regex + test + copy updated, and the precise per-vendor footprint is flagged as future DB config
+  (ADR-004 / #49). The header **logo is cropped (whitespace trimmed) and enlarged** (`docs/logo.png`
+  re-exported to `public/images/brand/logo.png`, 298×160, displayed `h-11` mobile / `h-16` desktop).
+  **Mobile UI reworked to best practices**: the search bar (previously hidden below `sm`) now gets a
+  dedicated full-width row on mobile; the header compacts (icon-only account/cart) instead of
+  overflowing; the homepage departments became a **horizontal, icon-led, scrollable row**
+  (Uber-Eats style) instead of a grid; and the category sidebar scrolls horizontally on mobile
+  rather than burying products under a tall vertical list.
+- **`/api/health` now reports the deployed commit** (`commit: "<short-sha>"`, `null` locally),
+  giving a reliable way to trace a live environment back to its GitHub commit. Originally attempted
+  via `wrangler deploy --tag/--message` (self-labeling the Cloudflare dashboard's Version History)
+  — reverted after the first real `deploy-staging` run failed with `Unknown argument: request`.
+  Root cause: an upstream Cloudflare limitation, not a quoting bug — `--tag`/`--message` are
+  documented on `wrangler deploy` but broken for Static Assets deployments (which this Worker is,
+  via OpenNext's `ASSETS` binding); see
+  [workers-sdk#9611](https://github.com/cloudflare/workers-sdk/issues/9611) and
+  [#10933](https://github.com/cloudflare/workers-sdk/issues/10933). `--dry-run` doesn't hit the
+  broken path, so it looked fine locally before the real deploy caught it. Replaced with
+  `--var GIT_COMMIT_SHA:$(git rev-parse --short HEAD)` (a stable, well-supported flag) read back via
+  `lib/config.ts`'s newly-exported `readEnv()`.
+
+### Fixed
+- **KMS — internal docs site build broken by `CLAUDE.md`'s HTML comments.** PR #26 gave
+  `CLAUDE.md` front-matter for the first time, which made `kms/scripts/assemble.ts` start
+  including it in `deploy-docs-internal`'s build — but its `next dev`-regenerated
+  `<!-- BEGIN/END:nextjs-agent-rules -->` markers are valid Markdown, not valid MDX (Nextra's
+  compiler parses `<` as a JSX tag open and chokes on the following `!`). Can't fix at the source
+  (that exact HTML-comment block is rewritten verbatim by `next dev`, see `CLAUDE.md` itself), so
+  `assemble.ts` now rewrites `<!-- ... -->` to `{/* ... */}` for every doc at assembly time.
+  Verified: `npm run build` in `kms/site-internal` now compiles clean.
+
+### Added
+- **Env-config CLI + multi-tenancy ADR (platform foundation)** — tooling and decision docs, no
+  runtime change.
+  - `scripts/configure-env.mjs` (`npm run configure-env -- <staging|production>`) configures every
+    required secret for an environment in one command, routing each to the correct store —
+    **GitHub environment secrets** (`CLOUDFLARE_ACCOUNT_ID`/`CLOUDFLARE_API_TOKEN`/`DIRECT_URL`, for
+    CI) vs. **Cloudflare Worker secrets** (everything the app reads at runtime). Reads a gitignored
+    `secrets/<env>.vars` (template: `secrets/example.vars`), validates all values are present, and
+    pipes them via stdin so **no value ever appears in argv or logs**. `--dry-run` validates +
+    shows routing without setting anything. Adds two required vars the original list omitted:
+    `BETTER_AUTH_URL` (per-env origin) and `S3_REGION` (ADR-003). Documented in `docs/env-setup.md`
+    (surfaced in the internal KMS).
+  - **ADR-004 (draft)** — `specs/decisions/ADR-004-multi-tenancy.md`: the direction for a
+    DB-driven multi-vendor platform (vendors/regions/branding as data, per-vendor theming over one
+    business-logic/data layer), with open questions (tenant resolution, isolation model) to resolve
+    before it's Accepted. Tracked by #49; also flags that **staging and production currently share
+    one Neon database**.
+- **P2.5b2 — Storefront visual redesign UI** (`specs/2026-08-07-p2-5b2-visual-ui/`), the UI half
+  of P2.5b and the slice that closes the "live site is nowhere near the mockup" gap that opened
+  P2.5 (closes #43). Applies P2.5b1's tokens/schema/seed to a real storefront matching the AI
+  Studio mockup (`docs/ui-ref/`).
+  - **Layout + header**: root `app/layout.tsx` drops the `max-w-2xl` body constraint that had
+    silently narrowed every page since P2a; a new `app/(storefront)/layout.tsx` (`force-dynamic`,
+    since it reads the session) hosts `components/layout/Header.tsx` — a **Server Component** (no
+    client JS) with a promo bar, logo, GET search form, an auth-aware account control
+    (`getSession()` → account link vs. "Sign in"), and an inert cart button (no count; no cart
+    until P3). The layout adds no second `<main>` — pages keep their own.
+  - **Hero homepage**: the M0 walking-skeleton `app/page.tsx` is removed and `/` is now served by
+    `app/(storefront)/page.tsx` — a hero band, a data-driven department grid, and a postcode
+    deliverability checker wired to P2.5b1's `isDeliverable()`. (`/api/health` is unchanged and
+    remains the machine-readable health surface.) The checker lives on the hero, not the sticky
+    header, because Next App Router layouts don't receive `searchParams` — only pages do.
+  - **Redesigned `ProductCard`**: Halal/Fresh badges, a discount "Offer" badge + "Save £X" +
+    strikethrough original price (derived from `originalPrice`), a star rating, `origin`, and an
+    inert Add-to-Cart control. All brand colors come from semantic tokens (no raw hex); the gold
+    rating star uses stock Tailwind `amber-400`, the one non-brand decorative color the design
+    system already defers to Tailwind for.
+  - **Category sidebar + speciality filters**: `components/layout/CategorySidebar.tsx`
+    (presentational, receives categories as props) renders on the category and search pages;
+    `ProductFilterForm` gains Halal/Fresh/Organic checkboxes wired to P2.5b1's real filter fields,
+    with both pages parsing the params, passing them to the repository, and carrying them through
+    pagination.
+  - **Two data-layer additions surfaced during Orient** (not pure UI, so called out): (1)
+    `ProductSummary`/`ProductDetail` now expose `averageRating`/`reviewCount` — P2.5a denormalized
+    these *for the cards* but no read path ever selected them; (2)
+    `components/product/category-icon.ts` maps a category slug to a lucide icon with a **generic
+    default fallback**, so a category added to the DB later still renders an icon without a schema
+    `iconName` field (honors the "auto-size to more categories" requirement).
+  - **Dynamic-sizing / performance / auth** (explicit human requirements on #43): every grid and
+    sidebar renders straight from `.map()` over DB results — no hardcoded 8-category/16-product
+    counts; loading stays Server-Component + keyset-paginated (P2b's cursor pattern, reused); the
+    header reflects real auth state, no mock.
+  - **Deliberately excluded**: cart/Add-to-Cart wiring (P3), the Dev Control Toolbar (#41),
+    `next/image`, a `Category.iconName` field, real photography, and a homepage "featured products"
+    rail (no backing data — no featured field or list-all method exists yet).
+  - **Post-preview adjustments** (from reviewing the running preview): the delivery area moved from
+    Leicester (LE1–LE5) to **Milton Keynes (MK1–MK19)** — `isDeliverable()`, its test, and all
+    locality copy (header/hero/metadata); the header now uses the **real logo** (`docs/logo.png`
+    resized to `public/images/brand/logo.png`) in place of the "A" placeholder; and `globals.css`
+    now forces `color-scheme: light` with an explicit white background + brand-ink text — a
+    dark-mode browser was painting a dark canvas, making dark text on the transparent category
+    cards unreadable.
+- **P2.5b1 — Visual redesign foundation** (`specs/2026-08-07-p2-5b1-visual-foundation/`), first of
+  two P2.5b slices (issue #40), split from a single oversized slice so tokens/schema/seed could be
+  validated before P2.5b2's UI work (issue #43) consumes them.
+  - **Design tokens**: `design-system/tokens/tokens.css` gains three tint primitives
+    (`#E8F5E9`/`#FFF3E0`/`#FFEBEE`, confirmed against both the brand kit and the mockup's own
+    `index.css`) as `--color-action-tint`/`--color-accent-tint`/`--color-danger-tint` — named
+    relative to their base color, matching the existing hover/active-shade convention rather than
+    inventing generic "success/warning" status vocabulary. `specs/design-system.md` (v1.1.0) also
+    documents the brand kit's type scale as Tailwind utility mappings and resolves its two
+    long-open items: real logo source (`docs/logo.png`, now committed) and red's dual role
+    (alert/danger **and** sale-badge color, confirmed via the mockup's `ProductCard.tsx`).
+  - `lucide-react` added — the mockup's actual icon library, not a guessed choice.
+  - **Prisma**: `Product` gains `origin` (String?), `originalPrice` (Int? pence — a discount badge
+    is derived from the gap to `basePrice` at render time, not a separate boolean that could drift),
+    and `isHalal`/`isFresh`/`isOrganic` (Boolean, default false). `lib/repositories/products.ts`'s
+    `ProductFilters`/`ProductSummary`/`ProductDetail` extended to match; `search()` and
+    `listByCategory()` both route through the same `buildFilterWhere()`, so the three new filters
+    behave identically from either entry point — no divergent behavior to maintain.
+  - **Seed**: adds 6 categories (halal-meat, groceries, international, beverages, snacks,
+    household) and 12 products, bringing the catalogue to 9 categories / 18 products — covers the
+    mockup's 8 real departments plus the existing `bakery` (which the mockup doesn't have and isn't
+    being removed; content parity matters more than exact slug parity with already-live URLs).
+    **Bug caught mid-build**: the original seed script's idempotency check was a single
+    `category.count() > 0` gate — since the existing 3 categories already exist in every
+    environment, it would have silently skipped all 6 new categories forever. Rewritten to check
+    per-category by slug, so partial catalogues extend correctly instead of getting stuck. New
+    product images go through the same real `putObject()` storage round-trip as P2a's seed, never
+    an external URL.
+  - `lib/delivery.ts` — pure `isDeliverable()`, checks a postcode's LE1–LE5 (Leicester) prefix,
+    case/whitespace-tolerant. No persistence; P3's checkout decides what to do with the result.
+  - **Fixed while validating**: `docs/ui-ref/` (the mockup's committed reference source, its own
+    separate Vite/React project) was never excluded from this repo's root `eslint.config.mjs`/
+    `tsconfig.json`, so both `lint` and `tsc --noEmit` failed on code that isn't part of this app at
+    all. Excluded, matching the existing pattern for `kms/site-internal`/`kms/site-public`.
+  - **Corrected during build**: `requirements.md`/`plan.md` originally said "5 new categories...
+    8 total" while separately listing 6 category names — an arithmetic slip, not a scope change.
+    Fixed to 6 new / 9 total (12 new products / 18 total) before implementing, matching the
+    enumerated list and the "add every mockup category we're missing" rationale that was always
+    the actual intent.
+  - **Deliberately excluded**: any layout/component/visual application of these tokens — P2.5b2
+    (issue #43). Real product photography remains deferred per P2a's original note.
+- **P2.5a — Ratings & reviews backend** (`specs/2026-08-07-p2-5a-ratings-reviews/`), first slice
+  of P2.5 — a phase inserted into the roadmap after P2's close (closes #39, see `specs/
+  roadmap.md` v1.2.0 for why: comparing the live site against the project's own AI Studio design
+  mockup surfaced that ratings/reviews were never in the original P0–P8 plan at all).
+  - **Prisma**: `Review` (one per user per product via `@@unique([userId, productId])` —
+    resubmitting updates rather than duplicates; cascade-deletes with the user, matching
+    `Session`/`Account`'s existing pattern). `Product` gains denormalized `averageRating`/
+    `reviewCount`, recomputed from a full aggregate (not incremental, avoids float drift) inside
+    the same transaction as every review write — matches `Inventory.quantity`'s existing
+    denormalized-for-read-performance precedent, needed because ratings render on every
+    paginated product-grid card.
+  - `lib/repositories/reviews.ts` — `upsert`/`delete` (ownership-checked via a single atomic
+    `deleteMany({ id, userId })`, not a read-then-check), `listByProduct`, `getByUserAndProduct`
+    (pre-fills the submission form for a returning reviewer).
+  - `features/reviews/` — **the first real use of `features/` since auth**, and for the same
+    underlying reason: a genuine session-gated write use-case, unlike P2's read-only browsing
+    which correctly stayed in `components/product/`. Two Server Actions
+    (`submit-review.ts`/`delete-review.ts`) behind a plain `<form>` — no client component, same
+    progressive-enhancement pattern as P2's GET forms.
+  - `features/reviews/validate-rating.ts` — pure, unit-tested `parseRating()`, same pattern as
+    `parse-price-input.ts`.
+  - `app/(storefront)/products/[slug]` extended with a review list, the submission form for
+    logged-in visitors, and a login prompt (not a redirect) for guests — browsing stays
+    guest-accessible, no regression.
+  - **Deliberately excluded**: review moderation (fits P6's admin panel better), verified-purchase
+    gating (impossible before P3/cart exists), review-list pagination (bounded to the most recent
+    20 for now), any visual/component redesign — all P2.5b (#40), once this lands.
+- **P2b — Catalogue search & filters** (`specs/2026-08-07-p2b-catalogue-search/`), second and
+  final P2 slice, closing out P2 (closes #34).
+  - `lib/repositories/products.ts` gains `search()` (global, across all categories, same keyset
+    cursor pagination as `listByCategory()`) and a shared `ProductFilters` shape
+    (`minPricePence`/`maxPricePence`/`inStockOnly`) used by *both* `search()` and
+    `listByCategory()` — one filter definition, not two parallel ones. Search matching is plain
+    Postgres case-insensitive `contains` on `name`/`description` — `specs/architecture.md`
+    explicitly defers a trigram index or a dedicated search service until the catalogue actually
+    grows; this slice fulfills what was already decided there, doesn't reopen it. An
+    empty/whitespace query returns no results, not the whole catalogue.
+  - `app/(storefront)/search` — new route. `app/(storefront)/categories/[slug]` extended (not
+    replaced) to accept the same price/availability filters.
+  - `components/product/ProductFilterForm.tsx` — one shared component for both routes, a plain
+    `<form method="GET">` with no client-side JS, matching P2a's zero-client-JS precedent
+    (`<Link>`-based pagination). No hidden cursor field, so a filter change naturally restarts
+    pagination at page 1.
+  - `components/product/parse-price-input.ts` — pure, unit-tested counterpart to P2a's
+    `formatPrice()`: parses a user-typed pounds string into integer pence for the repository
+    layer, `undefined` (not `0`) for blank/invalid/negative input.
+  - **Corrected assumption from `/propose`**: expected this slice would finally give
+    `features/catalogue/` real content (client-side search interactivity). Didn't hold up — a
+    plain GET form matches P2a's established pattern better than debounced client search, so
+    `features/catalogue/` is still just `.gitkeep` after P2 in full.
+  - **Deferred, not implemented**: typo-tolerant/fuzzy search. Real fuzzy matching needs
+    `pg_trgm` and Prisma has no native wrapper for its `similarity()`/`%` operator, so it would
+    mean both a new Postgres extension and `$queryRaw` (against `CLAUDE.md`'s no-raw-SQL rule) —
+    and it's exactly the trigram work `specs/architecture.md` already defers until the catalogue
+    grows past its current 6 placeholder products. Not a quick add; left flagged for whenever
+    that condition is actually met.
+  - `specs/roadmap.md`'s change log gains the **P2 closure entry**, and — noticed while adding
+    it — **P0 and P1 never got their own closure entries either**, despite both being long done;
+    backfilled retroactively (v1.1.0) so the log reads as a coherent history instead of jumping
+    from M0 straight to P2.
+- **P2a — Catalogue browsing** (`specs/2026-08-07-p2a-catalogue-browsing/`), first slice of P2.
+  Split from the full roadmap line — search & filters follow separately as P2b (issue #34), same
+  split pattern as P1a/P1b.
+  - **Prisma**: `Category` (self-referential, slug/name/sortOrder/isActive), `Product`
+    (slug/name/description/categoryId/basePrice pence/unitLabel/isActive), `ProductImage`
+    (relative `storageKey` only, never a URL), `Inventory` (quantity/lowStockThreshold) — matches
+    the representative schema already designed in `specs/architecture.md` §3.2. Migration applied
+    directly to Neon staging (same pattern P1a used).
+  - `lib/repositories/categories.ts` / `products.ts` — `CategoryRepository`/`ProductRepository`
+    ports + Prisma implementations, constructed fresh per call (never cached across requests, same
+    contract as `lib/db.ts`'s `getPrisma()`). Flat files, not a directory per domain — follows the
+    flat-file precedent P1a set (`lib/auth.ts`) over `docs/repo-structure.md`'s stale sketch.
+  - Keyset (cursor) pagination on product listings — cursor `(createdAt, id)`, never `OFFSET`, per
+    `specs/architecture.md`'s pagination strategy.
+  - `app/(storefront)/categories`, `/categories/[slug]`, `/products/[slug]` — category index,
+    paginated product grid, product detail page. All publicly reachable, no auth regression.
+  - **Bug caught by `npm run build`, not local `next dev`**: `/categories` (no dynamic segment) was
+    getting statically optimized at build time — Next.js tried to prerender it in plain Node, but
+    `lib/db.ts` loads Prisma via `@prisma/client/wasm`, which only works in the Workers runtime,
+    so the build hard-failed (`Unknown file extension ".wasm"`). Same root cause as P1b's
+    `/login`/`/register` fix; same fix here — `export const dynamic = "force-dynamic"` on all three
+    new routes. Also means `specs/architecture.md`'s "Data Cache/ISR for catalogue pages" can't be
+    Next's own SSG-based ISR while Prisma requires the Workers runtime — any caching for these
+    pages needs to happen at Cloudflare's edge-cache layer instead, not attempted in this slice.
+  - `components/product/` — `ProductCard`, `ProductImageGallery`, and a pure, unit-tested
+    `formatPrice(pence)` helper (`450` → `"£4.50"`) — same pure-helper-alongside-I/O-code pattern
+    as `lib/storage.ts`'s `composePublicUrl`.
+  - Product images resolved via the existing `composePublicUrl(CDN_BASE_URL, storageKey)` — no raw
+    R2/S3 URL ever rendered or stored.
+  - `prisma/seed.ts` extended: seeds placeholder categories/products (real Aheed product data
+    doesn't exist yet) and actually uploads a placeholder SVG through `lib/storage.ts`'s
+    `putObject()` for each product image, proving the real storage round-trip. Uploads all images
+    before writing any DB rows, and writes all rows in a single `prisma.$transaction` — found while
+    validating locally: a mid-run failure (wrong/missing storage credentials) otherwise left an
+    orphaned `Category` with zero `Product`s, which then silently broke the seed script's own
+    idempotency check (`Category` count `> 0` → skip) on every subsequent run.
+  - **Infra fix, found validating images against the real staging CDN domain**: R2's custom
+    domain (`images.staging.aheedfoodcentre.nocaped.com`) was returning a Cloudflare
+    `Cf-Mitigated: challenge` 403 on every request — confirmed via both a cookie-less `curl` and,
+    once the browser extension was available, a real Chrome `<img>` tag load (broken-image icon),
+    ruling out "just a bot-detection false positive." Turning off Bot Fight Mode alone didn't fix
+    it; the actual cause was the zone's **Security Level** (Security → Settings), which issues a JS
+    challenge independently of Bot Fight Mode. Lowered for this zone; re-verified 200 via both
+    `curl` and a real browser afterward. Worth checking Security Level on **production**'s zone
+    too before promoting, not just staging's.
+  - **Still needed from the human before this is live end-to-end on production**: the same
+    `S3_*`/`CDN_BASE_URL` Worker secrets confirmed on staging still need setting on production, and
+    the Security Level check above repeated for production's zone.
+  - Two persistent docs corrected against what this slice actually found, not just noted in this
+    changelog entry: `specs/architecture.md`'s Caching section (the Data Cache/ISR claim above,
+    v1.1.0) and `docs/repo-structure.md`'s `lib/` tree (flat files for single-adapter concerns —
+    `db.ts`, `storage.ts`, `auth.ts`, `email.ts`, `config.ts` — vs. a real directory only for
+    `lib/repositories/`, which genuinely holds multiple per-domain files; v1.1.0). The latter had
+    already been contradicted once by P1a's `lib/auth.ts` without the doc being fixed — fixed now
+    instead of deferring a third time.
+- **`docs/onboarding.md` refreshed** — was still framed around M0-only ("Feature work (P0+) starts
+  only after M0 is green"), badly stale now that M0/P0/KMS/design-system have shipped and P1a is
+  in flight. Updated: current phase status (pointing at `specs/roadmap.md`'s change log as the
+  source of truth, not duplicating it), `.env` vs `.dev.vars` distinction, the `npm run preview`
+  vs `npm run dev` DB-touching gotcha surfaced immediately rather than buried in `CLAUDE.md`, the
+  seven-stage SDD workflow + slash commands, and a pointer to the internal docs site. Verified no
+  real duplication with `kms/site-internal/`'s content — that site auto-assembles from `specs/`,
+  `docs/`, and `CLAUDE.md` (confirmed all 20 backfilled docs, including this one, assemble
+  correctly), nothing hand-duplicated there. Its one stale line (`content/dev/index.mdx` said
+  pages were "populated once those docs carry real front-matter" — no longer true post-backfill)
+  fixed to point at the now-real content instead.
+- **SDD — backfill missing `plan.md` files + prevent future drift.** 4 slices had drifted to a
+  two-file (`requirements.md`/`validation.md`) pattern, missing `plan.md` — unintentional; started
+  with the design-system slice and got entrenched when `specs/sdd-workflow.md`'s own `/spec` stage
+  only mentioned the other two. Fixed:
+  - `specs/templates/feature-spec/{plan,requirements,validation}.md` — scaffolded for the first
+    time (`docs/repo-structure.md` documented this directory but it never existed), so future
+    slices copy a real template instead of improvising from "the most recent slice."
+  - `plan.md` backfilled for `design-system`, `kms-backfill`, `kms-gates`, `kms-site` — the
+    narrative (goal, scope, deliberately-excluded, rationale) that front-matter now lives on,
+    moved off `requirements.md` to match the established one-entry-per-slice precedent.
+  - `kms/schema/repo.ts`'s `walk()` now excludes `specs/templates/` — the template's placeholder
+    front-matter (`id: REPLACE-ME-...`) would otherwise hard-fail `kms:validate` once gate-wired.
+  - `specs/sdd-workflow.md` and `.claude/commands/spec.md` now require all three files for every
+    new slice, not just two.
+  - `specs/2026-08-06-p1-auth/plan.md` lands separately, directly on PR #24's branch (doesn't
+    exist on `staging` yet).
+- **KMS — front-matter backfill** (`specs/2026-08-06-kms-backfill/`), closing the last deferred
+  item from the KMS foundation slice (`specs/2026-08-06-kms/requirements.md` R8).
+  `ARTIFACT_INDEX.md` now indexes 19 docs instead of 1: `CLAUDE.md`, all three `docs/*.md`, the 9
+  persistent `specs/` docs (architecture, mission, roadmap, tech-stack, design-system,
+  sdd-workflow, and the 3 ADRs), and one representative file per dated slice folder. Matches the
+  precedent already set by `specs/2026-08-06-kms/plan.md`: one indexed entry per meaningful
+  doc/slice, not every acceptance-criteria file — sibling `requirements.md`/`validation.md` files
+  stay deliberately un-indexed. `specs/2026-08-06-p1-auth/requirements.md` is excluded from this
+  slice (doesn't exist on `staging` yet, only on PR #24) — its front-matter lands with that PR
+  instead.
+- **P1b — Google Sign-In** (`specs/2026-08-06-p1b-google-signin/`), closing out P1's auth line on
+  top of P1a below. Unblocked by the human provisioning the Google Cloud Console OAuth client and
+  setting `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` as Cloudflare secrets on both `staging` and
+  `production` (issue #28) — the one credential P1a's proposal had deferred as P1b.
+  - `lib/auth.ts` — new exported pure `buildSocialProviders(env)`: returns a
+    `socialProviders.google` block only when both credentials are present, `undefined` otherwise
+    (never a half-configured provider). Split out specifically so it's unit-testable —
+    `getAuth()` itself has no tests, since it depends on `getPrisma()`. `emailAndPassword`
+    unchanged. No new Prisma migration — Google sign-ins land in the `Account` table P1a already
+    created, and get `role: CUSTOMER` via the same Prisma default as email/password sign-up.
+  - `lib/config.ts` gains `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, both optional (same
+    degrade-not-crash pattern as `RESEND_API_KEY`) — documented in `.env.example` and
+    `.dev.vars.example`.
+  - `features/auth/components/GoogleSignInButton.tsx` — one shared "Continue with Google" control
+    for both `/login` and `/register` (Better Auth's social sign-in creates an account on first
+    use, so login and register need the same control, not two).
+  - **Bug caught by `npm run build`'s route table, not local `next dev`**: `/login`/`/register`
+    were being statically prerendered, which would have baked the Google-button visibility check
+    in at *build* time — but `wrangler secret put` values only exist at Worker *request* time, so
+    the button would have silently never rendered in production regardless of the secrets being
+    set. Fixed with `export const dynamic = "force-dynamic"` on both pages (same pattern
+    `/account` already uses).
+  - **Deliberately incomplete**: the actual Google consent-screen flow can't be exercised against
+    `npm run preview` locally — the OAuth client's redirect URIs are only registered for
+    `staging`/`production`, not `localhost`. Verified as far as possible locally (the button
+    renders/hides correctly, and `POST /api/auth/sign-in/social` returns a correctly-built Google
+    authorization URL with the right `client_id`/scopes/PKCE challenge/redirect URI); the actual
+    consent screen + callback need a real sign-in against a deployed environment before this is
+    fully confirmed end-to-end.
+- **P1a — `plan.md`** added (`specs/2026-08-06-p1-auth/plan.md`) — part of backfilling the
+  `plan.md` file every slice is now required to have (issue #27); this one lands directly on this
+  branch since the spec folder doesn't exist on `staging` yet.
+- **P1a — Email/password auth, RBAC, account shell** (`specs/2026-08-06-p1-auth/`), split from the
+  full P1 roadmap line since Google Sign-In needs a Google Cloud Console OAuth client only the
+  human can create (tracked as P1b, issue #23):
+  - **Prisma**: `User` (`role` enum — `CUSTOMER`/`STAFF`/`ADMIN`, default `CUSTOMER`), `Session`,
+    `Account`, `Verification` — Better Auth's standard relational shape, no `Json` columns,
+    explicit FKs. Migration applied directly to Neon staging (`prisma migrate dev` — confirmed
+    with the user, no separate local Postgres exists); CI's `prisma migrate deploy` no-ops on it.
+  - `lib/auth.ts` — Better Auth server instance (Prisma adapter, email/password, required email
+    verification, password reset). `role` added via `additionalFields` with `input: false` so a
+    signup request can never set its own role. No Google/OAuth provider — P1a is email/password
+    only. `lib/auth-rbac.ts` — `requireRole()` gates a route/action to one or more roles, returning
+    401/403 (never a silent pass-through) rather than throwing.
+  - `lib/email.ts` — new `EmailService` port + Resend adapter via plain `fetch` (no SDK, same
+    Workers-bundle-size reasoning as `lib/storage.ts`'s `aws4fetch` choice). Degrades to a logged
+    no-op, not a crash, when `RESEND_API_KEY` is unset.
+  - `app/api/auth/[...all]/route.ts`, and UI under a new `app/(storefront)/` route group:
+    `/login`, `/register`, `/forgot-password`, `/reset-password`, a protected `/account` shell.
+  - **Prerequisite fix, found stress-testing this slice against the real Workers runtime**
+    (`npm run preview`, not `next dev` — see below): `lib/db.ts`'s `getPrisma()` cached a Prisma/
+    Neon client across requests, which Cloudflare Workers forbids (I/O objects can't cross request
+    boundaries) — rapid sequential requests failed ~1-in-3 times with `"Cannot perform I/O on
+    behalf of a different request."` Pre-existing since M0 (affects `/api/health` too, just never
+    caught — validation never hammered it with back-to-back requests). Fixed: `getPrisma()` and
+    `getAuth()` now construct fresh per call rather than caching across requests, matching Neon's
+    own recommended pattern for serverless/edge. Stress-tested clean afterwards.
+  - `eslint.config.mjs` now excludes `.wrangler/**` (missed alongside `.next/**`/`.open-next/**` —
+    running `npm run preview` locally left bundled worker output that `npm run lint` was linting
+    as source, producing dozens of bogus errors from third-party code).
+  - **Gate 3 fix, found validating locally against the `gates` CI job's actual env**: `lib/email.ts`'s
+    `getEmailService()` called the shared `getEnv()`, which requires `DATABASE_URL`/
+    `BETTER_AUTH_SECRET` — unrelated to email — so `tests/email.test.ts` failed in any environment
+    without those two set (including CI, which never provides them for the test step). Split a
+    narrow `getEmailEnv()`/`emailSchema` out of `lib/config.ts` covering only
+    `RESEND_API_KEY`/`RESEND_FROM_EMAIL`; `getEmailService()` now depends on that instead.
+  - **Still needed from the human before this is live end-to-end**: `RESEND_API_KEY` (a Resend
+    account/key — verification and password-reset emails currently log-and-skip, don't send) and
+    `BETTER_AUTH_SECRET`/`RESEND_API_KEY` set via `wrangler secret put` on staging/production.
+  - **Discovered while validating, not fixed (documented for awareness)**: `@prisma/client/wasm`
+    cannot load under plain `next dev` (Node.js runtime, not workerd) — any DB-touching route
+    silently shows an error state under `npm run dev`. Always use `npm run preview` (OpenNext +
+    local Workers runtime) to validate DB-touching code; `next dev` is UI-only from now on.
+- **KMS — gate wiring** (`specs/2026-08-06-kms-gates/`), closing the last deferred item from the
+  KMS design (`specs/2026-08-06-kms/plan.md` §2, `requirements.md` R8). `gates.yml` now runs
+  `kms:validate` and an `ARTIFACT_INDEX.md` staleness check (regenerated and diffed with the
+  `Last build:` timestamp normalized out, so the check is meaningful rather than always failing).
+  Includes two prerequisite bug fixes found while grounding — wiring the validator as originally
+  sketched would have broken every future PR:
+  - `kms/schema/repo.ts`'s `walk()` now excludes `kms/site-*/content/` (assembled/generated site
+    output) — it was indexing the same doc twice (source path + assembled copy) and wasn't even
+    deterministic in CI, since that gitignored directory doesn't exist on a fresh checkout.
+  - `kms/schema/validate.ts` now distinguishes "no front-matter" from "front-matter present but
+    missing `visibility`" (the schema's own required, no-default field) — the latter is reported
+    informationally, not hard-failed. Fixes false-positive failures on `.claude/commands/*.md`
+- **SDD workflow, generalized as keywords + slash commands** (`specs/sdd-workflow.md`,
+  `.claude/commands/`). Expands CLAUDE.md's four gates (Propose/Spec/Validate/Changelog) into seven
+  stages — **Orient → Propose → Spec → Build → Validate → Document → Ship** — each also an
+  invokable slash command, generalized from patterns and failure modes actually hit running the
+  process across the KMS and design-system-tokens slices (stale planning-doc traps, Windows
+  `core.autocrlf` giving false `prettier --check` positives against real CI, PRs merging before a
+  fast-follow commit landed, a Gate-4 CHANGELOG check whose diff base moves between pushes).
+  `CLAUDE.md`'s gate section now points to it.
+- **P0 — Design-system tokens** (`specs/design-system.md`, `specs/2026-08-06-design-system/`),
+  closing the last item deferred from the P0 foundation slice below. Encodes the Aheed brand kit
+  as real tokens rather than leaving Tailwind uninstalled:
+  - Tailwind CSS v4, CSS-first `@theme` config (no `tailwind.config.ts` — v4's own recommended
+    default; `docs/repo-structure.md`'s sketch of a JS config is stale, same as its now-wrong P6
+    tag on `tsconfig.json`).
+  - `design-system/tokens/tokens.css` — primitive brand-kit colors (`--color-brand-*`) layered
+    under semantic tokens (`--color-primary`/`--color-action`/`--color-accent`/`--color-danger`/
+    `--color-surface-muted`) plus radius tokens, so components read the semantic layer, never a
+    raw hex. Two hover/active shades are derived (not brand-sourced) and commented as such.
+  - Poppins loaded via `next/font/google` (self-hosted at build, no runtime request — matters on
+    Workers), one family at two weights (400/600), not two families.
+  - `app/globals.css`/`app/page.tsx` restyled with the tokens to prove they flow live, not just
+    sit as unused config; the old hand-rolled `.card`/`.ok`/`.bad` CSS is gone.
+  - Deliberately deferred: real logo source files (the brand kit is a reference image, not
+    exportable assets), `components/`/`design-system/{components,patterns,pages,guidelines}/`
+    (nothing consumes tokens yet), dark mode, and the hex/px-banning eslint rule (P6-tagged).
+- **P0 — Foundation & scaffolding (first slice).** Hardens what M0 proved, scoped to what wasn't
+  already built during M0's infrastructure work (`specs/2026-08-06-p0-foundation/`):
+  - Local SDD git hooks (`hooks/pre-commit` — Gate 2 spec-before-code, `hooks/pre-push` — Gate 4
+    changelog-before-merge), activated by the `core.hooksPath` wiring `scripts/bootstrap.sh`
+    already had. Fast local feedback only — `gates.yml` in CI remains the real enforcement.
+  - Prettier (`.prettierrc.json`, `.prettierignore`, `npm run format`/`format:check`), wired into
+    `gates.yml`. Deliberately excludes `.md`/`.mdx` — Prettier's markdown table reformatting pads
+    every cell to align columns, which wrecks readability on long-prose cells.
+  - `app/robots.ts`, `app/sitemap.ts`, `app/manifest.ts` — the Next.js App Router convention for
+    SEO/PWA metadata (route files under `app/`, not static files under `public/`). `robots.ts` is
+    host-aware: only the production domain allows crawling, staging always disallows. No brand
+    icon assets exist yet, so `manifest.ts` ships an empty `icons` array rather than fabricated
+    placeholders — a real follow-up needing actual brand input.
+  - `tests/setup.ts`, wired into `vitest.config.mts`'s `setupFiles` — loads `.env` for tests that
+    read `process.env`.
+  - Deliberately out of scope: design-system tokens (no `specs/design-system.md` spec exists yet),
+    `lib/repositories/` (nothing to wrap until P1's catalogue models exist), and GitHub
+    branch-protection rules on `main`/`staging` (a real gap, flagged as a follow-up recommendation).
+- **KMS — front-matter schema & validator (foundation slice).** First piece of the knowledge-
+  management system design (`specs/2026-08-06-kms/plan.md`): `kms/schema/frontmatter.ts` (the Zod
+  contract — `id`, `title`, `audience`, `type`, `status`, `version`, `updated`, `visibility`,
+  `summary`, `tags`; `visibility` has no default, so a doc can never silently become public) and
+  `kms/schema/validate.ts` (`npm run kms:validate` — walks all `.md`/`.mdx`, hard-fails on invalid
+  front-matter, warns on missing front-matter without blocking). `ARTIFACT_INDEX.md` moved to the
+  repo root per the design's folder structure. Deliberately deferred to follow-up work: the index
+  generator, the internal/public site assembly, CI gate wiring, and backfilling front-matter onto
+  existing docs — see `specs/2026-08-06-kms/requirements.md` R8.
+- **KMS — index generator, assembly & internal site** (`specs/2026-08-06-kms-site/`), the deferred
+  follow-up to the schema/validator foundation slice above:
+  - `kms/scripts/build-index.ts` (`npm run kms:build-index`) walks front-matter docs and regenerates
+    `ARTIFACT_INDEX.md` grouped by track; deterministic output aside from its `Last build:` timestamp.
+  - `kms/scripts/assemble.ts --visibility internal|public` (`npm run kms:assemble:internal`/`:public`)
+    copies single-source docs into a site's `content/` by `visibility`, so doc bodies are never
+    duplicated by hand. Both scripts share new `kms/schema/repo.ts` (walk/parse helpers factored out
+    of `validate.ts`).
+  - `kms/site-internal/` — a standalone Next.js + Nextra 4 app (own `package.json`, own toolchain,
+    excluded from the root's lint/typecheck via `eslint.config.mjs`/`tsconfig.json`) serving
+    assembled docs under `/dev`, with `/staff` stubbed. Its `wrangler.toml` targets a separate Worker
+    (`aheed-kms-internal`) with `workers_dev = false` and the custom-domain route commented out —
+    not internet-reachable until the human provisions DNS + a Cloudflare Access application gating it
+    (zero-trust; the site has no auth of its own).
+  - `.github/workflows/deploy-docs-internal.yml` mirrors `deploy-staging.yml`'s build-then-deploy
+    pattern, triggered on push to `staging`/`main`. Safe to run before Cloudflare-side provisioning
+    exists (no public route to expose), but won't do anything useful until it does.
+  - The public site (track 3) stays stubbed — no storefront exists yet to document.
+### Milestone
+- **M0 — Walking Skeleton closed.** `/api/health` returns `db.ok: true` on both staging and
+  production; `gates`, `deploy-staging`, and `deploy-production` all green end-to-end. Proceeding
+  to P0 per `specs/roadmap.md`.
+
+### Fixed
+- `kms/scripts/assemble.ts`, `kms/scripts/build-index.ts`, `kms/site-internal/tsconfig.json`
+  reformatted to satisfy `prettier --check` — missed locally because a Windows checkout
+  (`core.autocrlf=true`) masks real formatting diffs behind line-ending noise; `gates` runs on
+  Linux/LF and caught it. No logic changes. (Landed on `staging` via PR #10; this entry was
+  originally missed there — see #11.)
+- **M0 infrastructure fixes to actually reach `db.ok: true` in production:**
+  - `PrismaNeon` adapter takes a `PoolConfig` (`{ connectionString }`), not a `Pool` instance.
+  - `prisma/schema.prisma` generator now sets `engineType = "client"` — the default `"library"`
+    engine calls `fs.readdir` at runtime, unsupported by workerd's `nodejs_compat` polyfill.
+  - `lib/db.ts` imports `PrismaClient` from `@prisma/client/wasm` explicitly, not the bare
+    `@prisma/client` specifier — Next's Node-based build tracer otherwise resolves the `"node"`
+    export condition (`fs.readFileSync`-based loader) even though the code runs in workerd.
+  - `package-lock.json` resynced with `package.json` (`npm ci` was failing in CI); restored the
+    `allowScripts` allowlist needed for native postinstall scripts under npm 11+.
+  - Wired up the GitHub Actions deploy pipeline: created the missing `staging` environment,
+    populated `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`/`DIRECT_URL` secrets on both
+    environments, set the Worker's own runtime `DATABASE_URL` secret (`wrangler secret put`),
+    enabled R2 and created the image buckets. Disabled the competing Cloudflare Workers Builds
+    git integration, which was misconfigured (wrong build command, no `--env`, skipped migrations)
+    and racing against the correct GitHub Actions pipeline.
+
+### Changed
+- **Upgraded to Next 16 / vitest 4** (deliberate major-version adoption, not incremental):
+  - `next lint` (removed in Next 16) replaced with plain `eslint .`; migrated `.eslintrc.json` to
+    flat config (`eslint.config.mjs`) using `eslint-config-next/core-web-vitals`.
+  - `dev`/`build` scripts pin `next ... --webpack` — Turbopack (Next 16's default) can't resolve
+    `@prisma/client/wasm`'s subpath export (`Module not found`), even though webpack and the
+    package's `exports` map both handle it fine.
+  - `vitest.config.ts` → `vitest.config.mts` (vitest 4's native config loader warns on ESM syntax
+    in a file loaded as CommonJS).
+  - `tsconfig.json`: `jsx` → `"react-jsx"` (Next 16 requires the automatic runtime); added
+    `.next/dev/types/**/*.ts` to `include`.
+  - Restored `@neondatabase/serverless` to an exact pin (`0.10.4`, no caret) and
+    `@opennextjs/cloudflare` to `^1.20.2` — both had drifted to older/looser ranges outside this
+    change.
+
+### Added
+- **Milestone 0 — Walking Skeleton.** Minimal end-to-end app to validate the pivoted
+  infrastructure before feature work: `HealthCheck` model, `/` page and `/api/health` route that
+  read it back through Prisma → Neon.
+  - Next.js on **Cloudflare Workers** via `@opennextjs/cloudflare` (`open-next.config.ts`,
+    `wrangler.toml` with `staging`/`production` envs + custom domains + `nodejs_compat`).
+  - `lib/config` (zod env with `getCloudflareContext()` fallback), `lib/db` (Neon serverless driver
+    adapter, lazy singleton), `lib/storage` (S3-compatible port via `aws4fetch`, keys-not-URLs).
+  - GitHub Actions: `gates.yml` (lint/typecheck/test + CHANGELOG check), `deploy-staging.yml`
+    (auto), `deploy-production.yml` (manual approval via `production` environment). Migrations run
+    in CI against `DIRECT_URL`; runtime uses pooled `DATABASE_URL`.
+  - SDD assets: feature/bug issue forms, PR template, gate labels; M0 spec
+    (`specs/2026-08-05-m0-walking-skeleton/`) and `docs/walking-skeleton-runbook.md`.
+- SDD constitution + `specs/architecture.md` (Cloudflare Workers + Neon design, migration strategy).
+
+### Changed
+- Roadmap now begins with **Milestone 0 (Walking Skeleton)** ahead of P0, so infrastructure is
+  proven end-to-end before scaffolding features.
+- Hosting pivoted from GCP Cloud Run + Cloud SQL to **Cloudflare Workers + Neon** (revised ADR-001);
+  object storage via the **S3-compatible API only** (ADR-003).
+
+### Notes
+- No feature code beyond the skeleton. Auth, catalogue, cart, checkout, and the design system
+  arrive in P1+ behind their specs and gates.

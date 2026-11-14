@@ -1,0 +1,109 @@
+import { getBundlesForStorefront } from "@/lib/bundles-service";
+import { getCategoryRepository } from "@/lib/categories-service";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { getEnv } from "@/lib/config";
+import { BundleCard } from "@/components/bundle/BundleCard";
+import { CollectionNav } from "@/components/product/CollectionNav";
+import { ProductGrid } from "@/components/product/ProductGrid";
+import { DEFAULT_PRODUCT_GRID_DENSITY } from "@/lib/product-grid-density";
+import { DepartmentScroller } from "@/components/layout/DepartmentScroller";
+import { hasAvailableItems } from "@/lib/bundle-pricing";
+import { PageContainer } from "@/components/layout/PageContainer";
+
+// See app/(storefront)/categories/page.tsx — Prisma's @prisma/client/wasm
+// can't load during next build's Node-based static prerendering.
+export const dynamic = "force-dynamic";
+
+export async function generateMetadata() {
+  const profile = await getCurrentVendorProfile();
+  const name = profile?.name ?? "Aheed Food Centre";
+  return { title: `Value Bundles — ${name}` };
+}
+
+/**
+ * #501 — the destination for the shop page's Value Bundles "View all", which
+ * had nowhere to point because no bundles route existed.
+ *
+ * IT LISTS THE SAME SET THE ROW DOES, and that is expected rather than a
+ * defect: `listActiveBundles` (`lib/repositories/bundles.ts`) takes no `take`
+
+ * bundle for the vendor. The page earns its place as somewhere for the bundle
+ * count to grow into and as an addressable destination; if that count ever
+ * outgrows a screen, paginating it is a change to the repository function, not
+ * to this file.
+ *
+ * `hasAvailableItems` is applied here for the same reason `BundleRow` applies
+ * it — a bundle whose every constituent is unavailable renders nowhere rather
+ * than as an empty card with a zero total. Sharing the one predicate is what
+ * stops the page and the row disagreeing about which bundles exist.
+ *
+ * `BundleCard` stays a non-navigable card: there is still no bundle detail page
+ * (#498), so this is a listing whose cards add to the cart, not a gateway.
+ */
+export default async function BundlesPage() {
+  const [bundles, departments] = await Promise.all([
+    getBundlesForStorefront(),
+    getCategoryRepository().listTopLevel(),
+  ]);
+  const renderable = bundles.filter((bundle) => hasAvailableItems(bundle.items));
+  const { CDN_BASE_URL } = getEnv();
+  // #962 — request-memoised; the header already resolved this profile in the same render.
+  const gridDensity =
+    (await getCurrentVendorProfile())?.productGridDensity ?? DEFAULT_PRODUCT_GRID_DENSITY;
+
+  return (
+    <PageContainer width="wide" padY="tight">
+      {/*
+        #681 — the same chrome the other browse surfaces carry, so this stops reading as a separate
+        site. The department strip is a way BACK OUT to a filtered product listing, not a filter
+        over what is on this page.
+      */}
+      <DepartmentScroller categories={departments} activeSlug={null} use3D />
+
+      {/*
+        #701 — `/bundles` used to be a single-column page (CollectionNav full-width, a 3-column
+        grid) while `/search` and `/categories/[slug]` are two-column (sidebar + flex-1 content,
+        4-column grid), so Value Bundles' "View all" landed somewhere that visibly didn't match
+        New Arrivals'/Featured Products'. Same wrapper those two pages use.
+
+        Still deliberately NOT the filter panel: `Bundle` has no `categoryId` and none of that
+        form's predicates (price, stock, halal, origin, brand) exist on a bundle at all, because a
+        bundle is a curated set spanning departments (#347) — this slice doesn't reopen that. The
+        left column carries `CollectionNav` alone.
+      */}
+      <div className="mt-6 flex flex-col gap-6 md:flex-row">
+        <div className="md:w-60 md:shrink-0">
+          <CollectionNav activeHref="/bundles" />
+        </div>
+
+        <div className="flex-1">
+          <h1 className="text-2xl font-semibold text-primary">Value Bundles</h1>
+          <p className="mt-1 text-sm text-primary-muted">
+            Curated sets, added to your basket in a single tap.
+          </p>
+
+          {renderable.length === 0 ? (
+            <p className="mt-6 text-primary-muted">No bundles are available right now.</p>
+          ) : (
+            <div className="mt-6">
+              <ProductGrid as="ul" density={gridDensity}>
+                {renderable.map((bundle) => (
+                  <BundleCard
+                    key={bundle.id}
+                    id={bundle.id}
+                    name={bundle.name}
+                    tagline={bundle.tagline}
+                    imageKey={bundle.imageKey}
+                    altText={bundle.altText}
+                    items={bundle.items}
+                    cdnBaseUrl={CDN_BASE_URL ?? ""}
+                  />
+                ))}
+              </ProductGrid>
+            </div>
+          )}
+        </div>
+      </div>
+    </PageContainer>
+  );
+}

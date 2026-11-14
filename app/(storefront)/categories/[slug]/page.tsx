@@ -1,0 +1,251 @@
+import Link from "next/link";
+import { headers } from "next/headers";
+import { notFound } from "next/navigation";
+import { buildCategoryMetadata } from "@/lib/page-metadata";
+import { getCategoryRepository } from "@/lib/categories-service";
+import { getProductRepository } from "@/lib/products-service";
+import { getRequestCartQuantities } from "@/lib/cart-summary";
+import { getRequestFavouriteState } from "@/lib/favourites-summary";
+import { getEnv } from "@/lib/config";
+import { getCurrentVendorProfile } from "@/lib/vendor-service";
+import { DEFAULT_PRODUCT_GRID_DENSITY } from "@/lib/product-grid-density";
+import { ProductCard } from "@/components/product/ProductCard";
+import { ProductGrid } from "@/components/product/ProductGrid";
+import { CollectionNav } from "@/components/product/CollectionNav";
+import { parsePackSizeParam } from "@/components/product/unit-price";
+import { FilterPanel } from "@/components/product/FilterPanel";
+import { CollapsibleSidebar } from "@/components/product/CollapsibleSidebar";
+import { FILTERS_COLLAPSED_SCRIPT } from "@/components/product/filters-collapsed";
+import { getBrandRepository } from "@/lib/brands-service";
+import { FilterChips } from "@/components/product/FilterChips";
+import { SubcategoryLinks } from "@/components/product/SubcategoryLinks";
+import { DepartmentScroller } from "@/components/layout/DepartmentScroller";
+import { parsePriceInput } from "@/components/product/parse-price-input";
+import { nextCategoryPageHref, prevCategoryPageHref } from "@/components/product/category-href";
+import type { FilterParamValue } from "@/components/product/filter-params";
+import { listCurrentVendorAttributeDefinitions } from "@/lib/attributes-service";
+import { resolveAttributeFilters } from "@/lib/attribute-filters";
+import { PageContainer } from "@/components/layout/PageContainer";
+
+// See app/(storefront)/categories/page.tsx — Prisma's @prisma/client/wasm
+// can't load during next build's Node-based static prerendering.
+export const dynamic = "force-dynamic";
+
+const PAGE_SIZE = 12;
+
+/**
+ * #996 — this route's own title, description and canonical. See the twin in
+ * `app/(storefront)/products/[slug]/page.tsx` for the full reasoning, including why this returns
+ * `{}` rather than naming a vendor when a read fails.
+ *
+ * The description is composed rather than read: `Category` has no description column.
+ */
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
+  try {
+    const { slug } = await params;
+    const host = (await headers()).get("host");
+    const [category, profile] = await Promise.all([
+      getCategoryRepository().getBySlug(slug),
+      getCurrentVendorProfile(),
+    ]);
+    if (!host || !category || !profile) return {};
+
+    return buildCategoryMetadata({ host, slug, name: category.name, vendorName: profile.name });
+  } catch {
+    return {};
+  }
+}
+
+type SearchParams = {
+  minPrice?: string;
+  maxPrice?: string;
+  inStock?: string;
+  isHalal?: string;
+  isFresh?: string;
+  isOrganic?: string;
+  /** #569 — dietary, offers, origin and brand facets. */
+  isVegetarian?: string;
+  isGlutenFree?: string;
+  isHmcCertified?: string;
+  onOffer?: string;
+  origin?: string;
+  /** #569 — a brand SLUG; an unknown value applies no predicate and renders no chip. */
+  brand?: string;
+  /** #397 — pack size as `<amount>-<UNIT>`, e.g. `500-GRAM`. */
+  packSize?: string;
+  cursor?: string;
+
+  back?: string;
+  /** #912 — vendor-defined filters; unknown slugs apply nothing and render no chip. */
+  [attributeKey: `attr_${string}`]: FilterParamValue;
+};
+
+/*
+ * #601 — the Previous/Next hrefs used to be built by a hand-written `if (params.X) qs.set(...)`
+ * chain HERE, the third place a filter key had to be registered and the one no test could reach.
+ * They now live in `components/product/category-href.ts`, carrying exactly the keys
+ * `filter-params.ts` defines — including #912's vendor-defined `attr_*` filters.
+ */
+
+export default async function CategoryPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ slug: string }>;
+  searchParams: Promise<SearchParams>;
+}) {
+  const { slug } = await params;
+  const query = await searchParams;
+
+  const categoryRepo = getCategoryRepository();
+  const [category, allCategories] = await Promise.all([
+    categoryRepo.getBySlug(slug),
+    categoryRepo.listTopLevel(),
+  ]);
+  if (!category) {
+    notFound();
+  }
+
+  const products = getProductRepository();
+  // #496 — aggregate the department's own products with every one of its
+  // subcategories' (a subcategory itself has no children, so this is always
+  // exactly [category.id] there — the array collapses to the old behaviour).
+  const categoryIds = [category.id, ...category.children.map((child) => child.id)];
+  // #569 — resolve the brand slug to an id before the query, mirroring /search.
+  const selectedBrand = query.brand ? await getBrandRepository().getBySlug(query.brand) : null;
+  // #912 — the vendor's own filters: one resolution feeds both the predicate and the chips.
+  const attributeFilters = resolveAttributeFilters(
+    query,
+    await listCurrentVendorAttributeDefinitions(),
+  );
+
+  const { items, nextCursor } = await products.listByCategory(categoryIds, {
+    take: PAGE_SIZE,
+    cursor: query.cursor,
+    minPricePence: parsePriceInput(query.minPrice ?? ""),
+    maxPricePence: parsePriceInput(query.maxPrice ?? ""),
+    inStockOnly: query.inStock === "1",
+    isHalal: query.isHalal === "1",
+    isFresh: query.isFresh === "1",
+    isOrganic: query.isOrganic === "1",
+    isVegetarian: query.isVegetarian === "1",
+    isGlutenFree: query.isGlutenFree === "1",
+    isHmcCertified: query.isHmcCertified === "1",
+    onOffer: query.onOffer === "1",
+    origin: query.origin || undefined,
+    brandId: selectedBrand?.id,
+    packSize: parsePackSizeParam(query.packSize),
+    attributeOptionGroups: attributeFilters.optionGroups,
+    attributeRanges: attributeFilters.ranges,
+  });
+  /*
+   * #568 — facets narrow to this category's own products (and its subcategories'), so a department
+   * with no organic stock does not offer an Organic toggle that would return nothing. The three
+   * speciality flags are deliberately not passed; see `getAvailableFacets` for why each
+   * probe must exclude all of them rather than only its own.
+   */
+  const facets = await products.availableFacets({
+    categoryIds,
+    minPricePence: parsePriceInput(query.minPrice ?? ""),
+    maxPricePence: parsePriceInput(query.maxPrice ?? ""),
+    inStockOnly: query.inStock === "1",
+  });
+  // P8.5a (#345): request-memoised, so this shares the header's cart read
+  // rather than issuing a second identical query.
+  const cartQuantities = await getRequestCartQuantities();
+  // #232 — request-memoised too, so a page rendering several grids issues ONE favourite query.
+  const favouriteState = await getRequestFavouriteState();
+  const { CDN_BASE_URL } = getEnv();
+  // #962 — request-memoised; the header already resolved this profile in the same render.
+  const gridDensity =
+    (await getCurrentVendorProfile())?.productGridDensity ?? DEFAULT_PRODUCT_GRID_DENSITY;
+
+  // #498 — a subcategory has no children of its own (two-level cap), so its
+  // own tab row is its PARENT's children — its siblings, itself included —
+  // rather than nothing at all. A department (no parent) shows its own
+  // children, as before. `activeSlug` is whichever page is actually being
+  // viewed, so exactly one pill (or "All") is ever highlighted.
+  const tabParentSlug = category.parent?.slug ?? category.slug;
+  const tabs = category.parent?.children ?? category.children;
+  const scrollerActiveSlug = category.parent?.slug ?? category.slug;
+
+  const isFirstPage = !query.cursor;
+
+  return (
+    <PageContainer width="wide" padY="tight">
+      {/* Departments: horizontal strip on top (arrow-scrolled). Highlights
+          the DEPARTMENT even when viewing one of its subcategories. */}
+      <DepartmentScroller categories={allCategories} activeSlug={scrollerActiveSlug} use3D />
+
+      {/* #1173 — applies a collapse chosen earlier in this tab before the sidebar paints. */}
+      <script dangerouslySetInnerHTML={{ __html: FILTERS_COLLAPSED_SCRIPT }} />
+      <div data-filters-layout="" className="mt-6 flex flex-col gap-6 md:flex-row">
+        {/*
+          #694 — the collections were reachable from /search and /bundles and INVISIBLE here, on
+          the page a shopper actually reaches from the department menu. Rendered outside
+          FilterPanel (which renders its form twice, and would put two identical `nav` landmarks in
+          the accessibility tree) and inside this fixed-width column, matching
+          app/(storefront)/search/page.tsx exactly.
+
+          No `activeHref`: a category is a different axis from a collection, so nothing here is the
+          current collection and marking one `aria-current` would be a lie.
+        */}
+        {/* #1173 — collapsible at md and up (a JavaScript enhancement; open without it). */}
+        <CollapsibleSidebar id="browse-sidebar">
+          <CollectionNav />
+          {/* #568 — sidebar at md+, a `details` disclosure below it. Both render the same form. */}
+          <FilterPanel heading="Filters" searchParams={query} facets={facets} />
+        </CollapsibleSidebar>
+
+        <section className="flex-1">
+          <h1 className="mb-6 text-2xl font-semibold text-primary">{category.name}</h1>
+          <SubcategoryLinks tabs={tabs} parentSlug={tabParentSlug} activeSlug={slug} />
+          {/*
+            #568 — the category itself is NOT a chip here: it is the route, not a filter, and
+            removing it would have to mean navigating somewhere else entirely. `SubcategoryLinks`
+            above is how you change it.
+          */}
+          <FilterChips
+            basePath={`/categories/${slug}`}
+            // #569 — an unresolved brand slug applies no predicate, so it must not render a chip.
+            params={{ ...query, brand: selectedBrand ? query.brand : undefined }}
+            brandLabel={selectedBrand?.name}
+            attributeLabels={attributeFilters.labels}
+          />
+          <h2 className="sr-only">Products</h2>
+          <ProductGrid density={gridDensity}>
+            {items.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                cdnBaseUrl={CDN_BASE_URL ?? ""}
+                cartQuantity={cartQuantities.get(product.id) ?? 0}
+                favouriteState={favouriteState(product.id)}
+              />
+            ))}
+          </ProductGrid>
+          {(nextCursor || !isFirstPage) && (
+            <div data-tap-surface="pagination" className="mt-6 flex gap-3">
+              {!isFirstPage && (
+                <Link
+                  href={prevCategoryPageHref(slug, query)}
+                  className="inline-flex min-h-tap items-center rounded-full border border-black/10 bg-white px-4 py-2 font-semibold text-primary hover:bg-surface-muted lg:min-h-0"
+                >
+                  Previous page
+                </Link>
+              )}
+              {nextCursor && (
+                <Link
+                  href={nextCategoryPageHref(slug, query, nextCursor)}
+                  className="inline-flex min-h-tap items-center rounded-full bg-action px-4 py-2 font-semibold text-white lg:min-h-0"
+                >
+                  Next page
+                </Link>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
+    </PageContainer>
+  );
+}

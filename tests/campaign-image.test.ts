@@ -1,0 +1,126 @@
+import { describe, expect, it, vi } from "vitest";
+import { buildCampaignImageKey, isCampaignImageKey } from "@/lib/campaign-image";
+
+/**
+ * The actions module is imported FOR REAL below — only its dependencies are
+ * mocked, matching tests/product-image.test.ts's shape exactly. `lib/db`
+ * imports `@prisma/client/wasm`, which the Workers runtime resolves and plain
+
+ * assertion runs.
+ */
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+vi.mock("@/lib/auth", () => ({
+  getAuth: async () => ({ api: { getSession: async () => null } }),
+}));
+vi.mock("@/lib/db", () => ({ getPrisma: () => ({}) }));
+
+import * as campaignImageActions from "@/features/admin/campaign-image";
+
+/**
+ * P8.5e (#356) — the campaign banner key rules (R18-R20), unit-tested with no
+ * database. Same structure as `products/{productId}/{uuid}.webp`'s tests —
+ * `isCampaignImageKey` is the only thing standing between a client-supplied
+ * key and a write, so every way of dressing up "a different object" has to be
+ * refused rather than normalised.
+ */
+
+const CATEGORY = "3f2a1b4c-1111-4000-8000-000000000001";
+const OTHER = "3f2a1b4c-1111-4000-8000-000000000002";
+
+/**
+ * #364 — the campaign key used to suffix `.webp` regardless, on the reasoning
+ * that it had to keep passing `isCampaignImageKey`. That reasoning did not hold:
+
+ * `POST /api/admin/campaign-images/generate` never passes through it. So the
+ * suffix was constrained by a check that code path never runs, while the bytes
+ * it stored were PNG.
+ */
+describe("buildCampaignImageKey — extension follows the real content type (#364)", () => {
+  it("defaults to .webp, so the browser-upload path is unchanged", () => {
+    expect(buildCampaignImageKey(CATEGORY)).toMatch(/\.webp$/);
+  });
+
+  it("uses the actual type when one is given", () => {
+    expect(buildCampaignImageKey(CATEGORY, "image/png")).toMatch(/\.png$/);
+  });
+
+  it("still refuses a non-webp key on the browser-upload path it guards", () => {
+    expect(isCampaignImageKey(buildCampaignImageKey(CATEGORY, "image/png"), CATEGORY)).toBe(false);
+    expect(isCampaignImageKey(buildCampaignImageKey(CATEGORY), CATEGORY)).toBe(true);
+  });
+});
+
+describe("buildCampaignImageKey", () => {
+  it("produces categories/{categoryId}/{uuid}.webp", () => {
+    expect(buildCampaignImageKey(CATEGORY)).toMatch(
+      new RegExp(`^categories/${CATEGORY}/[0-9a-f-]{36}\\.webp$`),
+    );
+  });
+
+  it("never repeats a key for the same category — replacement writes a NEW object", () => {
+    expect(buildCampaignImageKey(CATEGORY)).not.toBe(buildCampaignImageKey(CATEGORY));
+  });
+
+  it("round-trips through its own validator", () => {
+    expect(isCampaignImageKey(buildCampaignImageKey(CATEGORY), CATEGORY)).toBe(true);
+  });
+});
+
+describe("isCampaignImageKey", () => {
+  it("refuses a key built for a different category", () => {
+    expect(isCampaignImageKey(buildCampaignImageKey(OTHER), CATEGORY)).toBe(false);
+  });
+
+  it("refuses a traversal segment", () => {
+    expect(isCampaignImageKey(`categories/${CATEGORY}/../evil.webp`, CATEGORY)).toBe(false);
+  });
+
+  it("refuses any suffix other than .webp", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isCampaignImageKey(`categories/${CATEGORY}/${uuid}.png`, CATEGORY)).toBe(false);
+  });
+
+  it("refuses an extra path segment", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isCampaignImageKey(`categories/${CATEGORY}/nested/${uuid}.webp`, CATEGORY)).toBe(false);
+  });
+
+  it("refuses a leading slash", () => {
+    expect(isCampaignImageKey(`/${buildCampaignImageKey(CATEGORY)}`, CATEGORY)).toBe(false);
+  });
+
+  it("refuses a different prefix", () => {
+    const uuid = "0f1e2d3c-4b5a-4988-9776-a1b2c3d4e5f6";
+    expect(isCampaignImageKey(`products/${CATEGORY}/${uuid}.webp`, CATEGORY)).toBe(false);
+  });
+
+  it("refuses a filename that is not a uuid", () => {
+    expect(isCampaignImageKey(`categories/${CATEGORY}/main.webp`, CATEGORY)).toBe(false);
+  });
+});
+
+describe('features/admin/campaign-image.ts is a valid "use server" module', () => {
+  /**
+   * Next validates a "use server" file's ENTIRE export set the moment any one
+   * action in it is dispatched — one exported constant 500s every action in
+   * the file, for every caller, while build-time checks stay green (P6b1/#159).
+   */
+  it("exports only async functions", () => {
+    const exports = Object.entries(campaignImageActions);
+    expect(exports.length).toBeGreaterThan(0);
+    for (const [name, value] of exports) {
+      expect(typeof value, `${name} must be a function`).toBe("function");
+      expect((value as () => unknown).constructor.name, `${name} must be async`).toBe(
+        "AsyncFunction",
+      );
+    }
+  });
+
+  it("exports exactly the two actions", () => {
+    expect(Object.keys(campaignImageActions).sort()).toEqual([
+      "attachCampaignImage",
+      "requestCampaignImageUpload",
+    ]);
+  });
+});

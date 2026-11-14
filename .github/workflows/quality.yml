@@ -1,0 +1,69 @@
+name: quality
+
+# Reusable quality checks (P9.2, #435). Called by BOTH `gates` (on pull_request) and
+# `deploy-production` (on push to main), so the production deploy path cannot be weaker
+# than the pull-request path. Adding a check here adds it to both — which is the point;
+# duplicating these steps into each caller is what allowed the two to drift apart.
+#
+# The KMS checks live in their own `kms` job below rather than in `quality`, because
+# `continue-on-error` is per-job: folding them into `quality` would make lint, typecheck
+# and test non-blocking on the production path too (#537).
+#
+# The Gate 4 CHANGELOG diff is the one check that genuinely cannot move here: it needs
+# `github.base_ref`, which a push event does not have, so it stays inline in `gates.yml`.
+on:
+  workflow_call:
+    inputs:
+      kms_blocking:
+        description: >-
+          Whether a KMS failure fails the workflow. True on the pull-request path, where it
+          is the gate. False on the production path, where the same check is a drift
+          tripwire: content has already merged by then, and failing the deploy cannot
+          un-merge it — it only withholds the fix. Annotations still surface either way.
+        type: boolean
+        default: true
+        required: false
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run db:generate # generate Prisma client (no DB connection)
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      # #1223: the committed icon data and the licence notice are generated; fail on a stale file.
+      - run: npm run icons:check
+      - run: npm test
+
+  kms:
+    runs-on: ubuntu-latest
+    # Non-blocking resolves to `continue-on-error: true`, which still reports the job as
+    # failed in the UI and still emits the `::error::` annotations the check prints — it
+    # only stops the failure from failing the workflow, and so from blocking the deploy.
+    continue-on-error: ${{ !inputs.kms_blocking }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: KMS — front-matter validation
+        run: npm run kms:validate
+      # Rebuilds every artefact `kms/scripts/build-index.ts` writes and diffs each one. The
+      # file list comes from the generator's own GENERATED_ARTIFACTS export, so an output
+      # added there is checked here without editing this workflow (#537 — this step used to
+      # check ARTIFACT_INDEX.md alone while the generator wrote two files, and the unwatched
+      # one went stale on staging and main with CI green).
+      - name: KMS — generated artefacts are current
+        run: npm run kms:check-generated
+      # The coverage ratchet (#861). Fails when the per-directory count of uncovered markdown
+      # files differs from the checked-in baseline in either direction, so the front-matter debt
+      # is strictly non-growing and a reduction cannot be silently given back. Lives here rather
+      # than in a caller for the same reason every other KMS check does — a check added to a
+      # caller makes the deploy paths run less than a pull request does (#537).
+      - name: KMS — coverage ratchet
+        run: npm run kms:coverage
